@@ -11,7 +11,7 @@ from pathlib import Path
 
 import anthropic
 from anthropic import DefaultHttpxClient
-from anthropic.types import MessageParam
+from anthropic.types import Message, MessageParam
 from pydantic import BaseModel
 
 from app.config import settings
@@ -32,6 +32,12 @@ STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
 }
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
+
+REPAIR_REQUEST = (
+    "В ответе нет ни одного тега <file path=\"...\">. "
+    "Верни тот же самый текст целиком, ничего не переписывая и не сокращая, "
+    "обёрнутый в теги по формату из системного промпта."
+)
 
 
 class StageResult(BaseModel):
@@ -116,18 +122,7 @@ def parse_file_blocks(text: str) -> dict[str, str]:
     return files
 
 
-def run_stage(
-    stage: str,
-    inputs: dict[str, str],
-    user_edit: str | None = None,
-    history: list[MessageParam] | None = None,
-    params: dict[str, str] | None = None,
-) -> StageResult:
-    model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
-    messages: list[MessageParam] = [
-        *(history or []),
-        {"role": "user", "content": build_user_message(inputs, user_edit, params)},
-    ]
+def ask_model(stage: str, model: str, messages: list[MessageParam]) -> tuple[Message, int]:
     started = time.perf_counter()
     try:
         response = anthropic_client().messages.create(
@@ -154,11 +149,52 @@ def run_stage(
         response.usage.output_tokens,
         duration_ms,
     )
+    return response, duration_ms
+
+
+def answer_text(stage: str, response: Message) -> str:
     raw = "".join(block.text for block in response.content if block.type == "text")
     if response.stop_reason != "end_turn":
         hint = " Raise ANTHROPIC_MAX_TOKENS." if response.stop_reason == "max_tokens" else ""
         raise StageError(f"{stage}: model stopped with {response.stop_reason}.{hint}", raw)
+    return raw
+
+
+def run_stage(
+    stage: str,
+    inputs: dict[str, str],
+    user_edit: str | None = None,
+    history: list[MessageParam] | None = None,
+    params: dict[str, str] | None = None,
+) -> StageResult:
+    model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
+    messages: list[MessageParam] = [
+        *(history or []),
+        {"role": "user", "content": build_user_message(inputs, user_edit, params)},
+    ]
+    response, duration_ms = ask_model(stage, model, messages)
+    raw = answer_text(stage, response)
     files = parse_file_blocks(raw)
+    input_tokens = response.usage.input_tokens
+    output_tokens = response.usage.output_tokens
+
+    if not files:
+        repair, repair_ms = ask_model(
+            stage,
+            model,
+            [
+                *messages,
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": REPAIR_REQUEST},
+            ],
+        )
+        duration_ms += repair_ms
+        input_tokens += repair.usage.input_tokens
+        output_tokens += repair.usage.output_tokens
+        response = repair
+        raw = answer_text(stage, repair)
+        files = parse_file_blocks(raw)
+
     if frozenset(files) not in STAGE_OUTPUTS[stage]:
         expected = " or ".join(", ".join(sorted(paths)) for paths in STAGE_OUTPUTS[stage])
         got = ", ".join(sorted(files)) or "no <file> blocks"
@@ -166,7 +202,7 @@ def run_stage(
     return StageResult(
         files=files,
         model=response.model,
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         duration_ms=duration_ms,
     )

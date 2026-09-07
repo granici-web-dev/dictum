@@ -197,9 +197,24 @@ def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) ->
         run_stage("intake", INPUTS)
 
 
-def test_run_stage_raises_when_no_file_block(llm: InstallResponses) -> None:
-    llm([ok("Вот идея: бот присылает список.")])
+def test_run_stage_asks_again_when_the_answer_has_no_file_blocks(llm: InstallResponses) -> None:
+    requests = llm([ok("Вот идея, но я забыл теги."), ok(IDEA_BLOCK)])
+
+    result = run_stage("intake", INPUTS)
+
+    assert "inputs/idea.md" in result.files
+    assert len(requests) == 2
+    repair = request_body(requests[1])["messages"]
+    assert repair[-2] == {"role": "assistant", "content": "Вот идея, но я забыл теги."}
+    assert repair[-1]["content"].startswith("В ответе нет ни одного тега")
+    assert (result.input_tokens, result.output_tokens) == (240, 60)
+
+
+def test_run_stage_gives_up_after_one_repair_attempt(llm: InstallResponses) -> None:
+    requests = llm([ok("Без тегов."), ok("Снова без тегов.")])
 
     with pytest.raises(StageError, match="got no <file> blocks") as exc_info:
         run_stage("intake", INPUTS)
-    assert exc_info.value.raw == "Вот идея: бот присылает список."
+
+    assert len(requests) == 2
+    assert exc_info.value.raw == "Снова без тегов."
