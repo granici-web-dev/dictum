@@ -96,12 +96,22 @@ def run_stage(
         {"role": "user", "content": build_user_message(inputs, user_edit, params)},
     ]
     started = time.perf_counter()
-    response = anthropic_client().messages.create(
-        model=model,
-        max_tokens=settings.anthropic_max_tokens,
-        system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
-        messages=messages,
-    )
+    try:
+        response = anthropic_client().messages.create(
+            model=model,
+            max_tokens=settings.anthropic_max_tokens,
+            system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
+            messages=messages,
+        )
+    except anthropic.APIError as error:
+        logger.warning(
+            "stage=%s model=%s duration_ms=%d error=%s",
+            stage,
+            model,
+            int((time.perf_counter() - started) * 1000),
+            type(error).__name__,
+        )
+        raise
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
         "stage=%s model=%s input_tokens=%d output_tokens=%d duration_ms=%d",

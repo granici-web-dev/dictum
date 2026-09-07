@@ -145,12 +145,16 @@ def test_run_stage_retries_twice_on_server_error(llm: InstallResponses) -> None:
     assert len(requests) == 3
 
 
-def test_run_stage_raises_after_third_server_error(llm: InstallResponses) -> None:
+def test_run_stage_raises_after_third_server_error(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
     requests = llm([server_error(), server_error(), server_error()])
 
     with pytest.raises(anthropic.InternalServerError):
         run_stage("intake", INPUTS)
     assert len(requests) == 3
+    assert "stage=intake" in caplog.text
+    assert "error=InternalServerError" in caplog.text
 
 
 def test_run_stage_raises_when_output_truncated(llm: InstallResponses) -> None:
