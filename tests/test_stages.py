@@ -1,5 +1,5 @@
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import anthropic
@@ -49,7 +49,7 @@ def request_body(request: httpx2.Request) -> dict[str, Any]:
 
 
 @pytest.fixture
-def llm(monkeypatch: pytest.MonkeyPatch) -> InstallResponses:
+def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
     def install(responses: list[httpx2.Response]) -> list[httpx2.Request]:
         requests: list[httpx2.Request] = []
 
@@ -57,15 +57,17 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> InstallResponses:
             requests.append(request)
             return responses.pop(0)
 
-        client = anthropic.Anthropic(
-            api_key="test",
-            max_retries=2,
-            http_client=DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+        monkeypatch.setattr(settings, "anthropic_api_key", "test")
+        monkeypatch.setattr(
+            stages,
+            "http_client",
+            lambda: DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
         )
-        monkeypatch.setattr(stages, "anthropic_client", lambda: client)
+        stages.anthropic_client.cache_clear()
         return requests
 
-    return install
+    yield install
+    stages.anthropic_client.cache_clear()
 
 
 def test_all_stage_prompts_exist() -> None:

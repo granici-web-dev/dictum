@@ -7,6 +7,7 @@ from functools import cache
 from pathlib import Path
 
 import anthropic
+from anthropic import DefaultHttpxClient
 from anthropic.types import MessageParam
 from pydantic import BaseModel
 
@@ -50,9 +51,17 @@ def load_prompt(stage: str) -> str:
     return (COMMANDS_DIR / f"{stage}.md").read_text(encoding="utf-8")
 
 
+def http_client() -> DefaultHttpxClient:
+    return DefaultHttpxClient()
+
+
 @cache
 def anthropic_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key or None, max_retries=2)
+    return anthropic.Anthropic(
+        api_key=settings.anthropic_api_key or None,
+        max_retries=2,
+        http_client=http_client(),
+    )
 
 
 def build_user_message(
