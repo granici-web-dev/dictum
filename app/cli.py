@@ -119,7 +119,6 @@ def main(argv: list[str] | None = None) -> int:
     body, lang_of_input = read_input(text)
     lang: str = args.lang or lang_of_input or settings.default_lang
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         return run_pipeline(body, lang)
     except (StageError, MissingApiKey, anthropic.APIError) as error:
@@ -128,4 +127,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(format="%(levelname)s %(message)s")
+    logging.getLogger("app").setLevel(logging.INFO)
     sys.exit(main())
