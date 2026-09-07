@@ -82,10 +82,8 @@ def put_on_board(
 def test_publish_creates_backlog_and_a_list_per_phase(board: FakeBoard, tmp_path: Path) -> None:
     publish(issues_file(tmp_path))
 
-    assert board.list_names() == [
-        "Backlog",
-        "Phase 1: Сквозной сценарий",
-        "Phase 2: Устойчивость и настройка",
+    assert board.list_names() == ["Backlog"] + [
+        f"Phase {phase.n}: {phase.title}" for phase in real_issues().phases
     ]
 
 
@@ -96,9 +94,10 @@ def test_publish_reuses_an_existing_list_with_the_same_name(
 
     publish(issues_file(tmp_path))
 
+    second = real_issues().phases[1]
     assert [fields["name"] for fields in board.posted("/1/lists")] == [
         "Backlog",
-        "Phase 2: Устойчивость и настройка",
+        f"Phase {second.n}: {second.title}",
     ]
 
 

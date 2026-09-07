@@ -114,7 +114,10 @@ def test_every_problem_is_reported_not_only_the_first() -> None:
     first, last = data["issues"][0], data["issues"][-1]
     first["depends_on"] = [last["id"]]
 
-    assert len(problems_of(data)) == 2
+    problems = problems_of(data)
+
+    assert any("I-404" in problem for problem in problems)
+    assert any("более поздней фазы" in problem for problem in problems)
 
 
 def test_a_cycle_away_from_the_first_issue_is_reported() -> None:
