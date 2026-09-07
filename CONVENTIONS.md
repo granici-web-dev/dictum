@@ -31,6 +31,10 @@ Engineering posture for this repo. Read together with `CLAUDE.md` (rules), `SPEC
 - **Generated code is edited.** Alembic autogenerate output is reviewed and corrected by hand before commit (names, indexes, data migrations). Never commit a migration you have not read.
 - **Never invent data, including in fixtures.** `[уточнить: ...]` instead of a plausible placeholder (`CLAUDE.md` rule 5).
 
+### Reversibility before risk
+- **A live API call on the user's keys needs an explicit ok in the chat, each time.** Editing files is free. Spending someone's credits, writing cards to Trello, sending a Telegram message: those leave the machine and cannot be taken back. Approval for one run is not approval for the next, and verifying a change is not a reason to make the call.
+- **The local pipeline is disarmed by default.** `ALLOW_LIVE_API=true` in `.env` arms it for a run you mean to pay for; without it `app/stages.py` builds no client and nothing leaves the process. Put it back to `false` when the run is done.
+
 ## STACK
 
 Do not change a row without recording the decision in `SPEC.md`.
