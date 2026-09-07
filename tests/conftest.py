@@ -39,4 +39,5 @@ def board(respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> Fake
     monkeypatch.setattr(settings, "trello_key", "test-key")
     monkeypatch.setattr(settings, "trello_token", "test-token")
     monkeypatch.setattr(settings, "trello_board_id", "board1")
+    monkeypatch.setattr(settings, "project_key", "DCT")
     return FakeBoard(respx_mock)

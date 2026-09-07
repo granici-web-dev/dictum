@@ -27,13 +27,17 @@ class Issue(BaseModel):
 
 
 class Deferred(BaseModel):
-    scope_id: str
+    scope_id: str = Field(pattern=r"^S\d+$")
+    title: str
     reason: str
 
 
 class IssuesFile(BaseModel):
     source: str
     lang: str
+    # Проставляется первой публикацией и дальше не меняется: по нему карточки прогона
+    # узнаются на доске, где локальные I-00N разных прогонов неразличимы.
+    run_id: str | None = None
     phases: list[Phase]
     issues: list[Issue]
     deferred: list[Deferred] = Field(default_factory=list)

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     trello_key: str = ""
     trello_token: str = ""
     trello_board_id: str = ""
+    project_key: str = ""
     database_url: str = "postgresql+psycopg://i2b:i2b@localhost:5432/i2b"
     redis_url: str = "redis://localhost:6379/0"
     default_lang: str = "de"
@@ -31,6 +32,10 @@ class MissingApiKey(ConfigError):
 
 
 class LiveApiNotAllowed(ConfigError):
+    pass
+
+
+class InvalidProjectKey(ConfigError):
     pass
 
 

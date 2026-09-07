@@ -50,8 +50,21 @@ REAL_ISSUES = (FIXTURES / "issues_real.json").read_text(encoding="utf-8")
 BROKEN_ISSUES = (FIXTURES / "issues_title_too_long.json").read_text(encoding="utf-8")
 
 
+DEPENDENCY_BELOW = (FIXTURES / "issues_dependency_below.json").read_text(encoding="utf-8")
+
+
 def real_issues() -> IssuesFile:
     return IssuesFile.model_validate_json(REAL_ISSUES)
+
+
+def issues_file(directory: Path, text: str = REAL_ISSUES, run_id: str | None = None) -> Path:
+    """Кладёт issues.json в каталог прогона, при надобности уже с проставленным run_id."""
+    data = json.loads(text)
+    if run_id is not None:
+        data["run_id"] = run_id
+    path = directory / "issues.json"
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def decompose_answer(issues_json: str = REAL_ISSUES) -> str:
