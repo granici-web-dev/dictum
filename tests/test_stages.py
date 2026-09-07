@@ -3,7 +3,7 @@ import pytest
 
 from app import stages
 from app.config import settings
-from app.stages import STAGES, StageError, load_prompt, run_stage
+from app.stages import STAGES, MissingApiKey, StageError, load_prompt, run_stage
 from tests.conftest import InstallResponses, ok, request_body, server_error
 
 IDEA_BLOCK = (
@@ -26,7 +26,7 @@ def test_anthropic_client_reports_a_missing_key(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(settings, "anthropic_api_key", "")
     stages.anthropic_client.cache_clear()
 
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is not set"):
+    with pytest.raises(MissingApiKey, match="ANTHROPIC_API_KEY is not set"):
         stages.anthropic_client()
 
 

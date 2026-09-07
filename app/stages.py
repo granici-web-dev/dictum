@@ -42,6 +42,10 @@ class StageResult(BaseModel):
     duration_ms: int
 
 
+class MissingApiKey(RuntimeError):
+    pass
+
+
 class StageError(Exception):
     def __init__(self, message: str, raw: str) -> None:
         super().__init__(message)
@@ -61,7 +65,7 @@ def http_client() -> DefaultHttpxClient:
 @cache
 def anthropic_client() -> anthropic.Anthropic:
     if not settings.anthropic_api_key:
-        raise RuntimeError(
+        raise MissingApiKey(
             "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in."
         )
     return anthropic.Anthropic(

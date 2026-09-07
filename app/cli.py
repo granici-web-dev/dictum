@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+import anthropic
+
 from app.config import settings
-from app.stages import ROOT, StageError, StageResult, run_stage
+from app.stages import ROOT, MissingApiKey, StageError, StageResult, run_stage
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +54,7 @@ def run_and_write(
     try:
         result = run_stage(stage, inputs, params=params)
     except StageError as error:
-        raw_path = f"outputs/{stage}.raw.md"
-        write_artifact(raw_path, error.raw)
-        logger.error("%s. Сырой ответ модели: %s", error, raw_path)
+        write_artifact(f"outputs/{stage}.raw.md", error.raw)
         raise
     for path, content in result.files.items():
         write_artifact(path, content)
@@ -110,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         return run_pipeline(text, args.lang)
-    except StageError:
+    except (StageError, MissingApiKey, anthropic.APIError) as error:
+        logger.error("%s", error)
         return EXIT_STAGE_FAILED
 
 

@@ -3,7 +3,9 @@ from pathlib import Path
 import pytest
 
 from app.cli import EXIT_NEEDS_A_DECISION, EXIT_OK, EXIT_STAGE_FAILED, EXIT_USAGE, main
-from tests.conftest import InstallResponses, ok, request_body
+from app import stages
+from app.config import settings
+from tests.conftest import InstallResponses, ok, request_body, server_error
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n---\nsource: text\nlang: ru\nconfidence: high\n---\n\n'
@@ -133,3 +135,22 @@ def test_a_typo_is_not_mistaken_for_a_pipeline_outcome() -> None:
         with pytest.raises(SystemExit) as exit_info:
             main(argv)
         assert exit_info.value.code == EXIT_USAGE
+
+
+def test_run_text_reports_a_missing_key_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    stages.anthropic_client.cache_clear()
+
+    assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
+
+
+def test_run_text_reports_an_api_error_without_a_traceback(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    llm([server_error(), server_error(), server_error()])
+
+    assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
