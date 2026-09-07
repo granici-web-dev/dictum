@@ -154,3 +154,31 @@ def test_run_text_reports_an_api_error_without_a_traceback(
     llm([server_error(), server_error(), server_error()])
 
     assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
+
+
+def test_run_text_takes_the_language_from_the_input_file(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    idea = tmp_path / "idea.md"
+    idea.write_text(f"---\nsource: text\nlang: ru\n---\n\n{TEXT}\n", encoding="utf-8")
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+
+    assert main(["--file", str(idea)]) == EXIT_OK
+
+    transcript = (tmp_path / "inputs/transcript.md").read_text(encoding="utf-8")
+    assert transcript.count("---") == 2
+    assert "lang: ru" in transcript
+    assert "lang: de" not in transcript
+
+
+def test_run_text_falls_back_to_the_configured_language(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+
+    main([TEXT])
+
+    transcript = (tmp_path / "inputs/transcript.md").read_text(encoding="utf-8")
+    assert f"lang: {settings.default_lang}" in transcript

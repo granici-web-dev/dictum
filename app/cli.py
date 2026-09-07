@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import anthropic
+import frontmatter
 
 from app.config import settings
 from app.stages import ROOT, MissingApiKey, StageError, StageResult, run_stage
@@ -40,6 +41,12 @@ def write_artifact(path: str, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     logger.info("записан %s", path)
+
+
+def read_input(text: str) -> tuple[str, str | None]:
+    post = frontmatter.loads(text)
+    lang = post.metadata.get("lang")
+    return post.content, lang if isinstance(lang, str) else None
 
 
 def build_transcript(text: str, lang: str) -> str:
@@ -97,7 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("text", nargs="?", help="Текст идеи.")
     source.add_argument("--file", help="Файл с текстом идеи вместо аргумента.")
-    parser.add_argument("--lang", default=settings.default_lang, help="Язык артефактов.")
+    parser.add_argument(
+        "--lang", help="Язык артефактов. По умолчанию из frontmatter входа, иначе DEFAULT_LANG."
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -107,9 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     if not text.strip():
         parser.error('текст пустой: make run-text TEXT="…" или --file путь')
 
+    body, lang_of_input = read_input(text)
+    lang: str = args.lang or lang_of_input or settings.default_lang
+
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
-        return run_pipeline(text, args.lang)
+        return run_pipeline(body, lang)
     except (StageError, MissingApiKey, anthropic.APIError) as error:
         logger.error("%s", error)
         return EXIT_STAGE_FAILED
