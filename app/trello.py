@@ -90,7 +90,11 @@ def worth_retrying(method: str, status: int) -> bool:
 class Trello:
     def __init__(self, client: httpx.Client, key: str, token: str, board_id: str) -> None:
         self.client = client
-        self.auth = {"key": key, "token": token}
+        # Ключ и токен идут заголовком, а не в query string: URL попадает в логи прокси
+        # и в тексты ошибок, и однажды уже унёс туда оба (CLAUDE.md, правило 7).
+        self.headers = {
+            "Authorization": f'OAuth oauth_consumer_key="{key}", oauth_token="{token}"'
+        }
         self.board_id = board_id
 
     def close(self) -> None:
@@ -108,8 +112,9 @@ class Trello:
             response = self.client.request(
                 method,
                 f"{API}{path}",
-                params={**self.auth, **(query or {})},
+                params=query,
                 data=fields,
+                headers=self.headers,
             )
             if attempt == ATTEMPTS - 1 or not worth_retrying(method, response.status_code):
                 # Своё исключение вместо raise_for_status: его текст несёт полный URL,

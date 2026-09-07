@@ -31,7 +31,9 @@ def client() -> Trello:
     return Trello(httpx.Client(), "test-key", "test-token", "board1")
 
 
-def test_every_request_carries_key_and_token(client: Trello, respx_mock: respx.MockRouter) -> None:
+def test_credentials_travel_in_the_header_and_never_in_the_url(
+    client: Trello, respx_mock: respx.MockRouter
+) -> None:
     respx_mock.get("https://api.trello.com/1/boards/board1/lists").mock(
         httpx.Response(200, json=[{"id": "list-1", "name": "Backlog"}])
     )
@@ -40,9 +42,13 @@ def test_every_request_carries_key_and_token(client: Trello, respx_mock: respx.M
     client.lists()
     client.create_card("list-1", "Заголовок", "Текст", ["label-1"], 1)
 
+    assert respx_mock.calls
     for call in respx_mock.calls:
-        assert call.request.url.params["key"] == "test-key"
-        assert call.request.url.params["token"] == "test-token"
+        assert call.request.headers["Authorization"] == (
+            'OAuth oauth_consumer_key="test-key", oauth_token="test-token"'
+        )
+        assert "test-key" not in str(call.request.url)
+        assert "test-token" not in str(call.request.url)
 
 
 def test_card_fields_go_in_the_body_not_the_url(
