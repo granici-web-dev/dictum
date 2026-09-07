@@ -130,19 +130,27 @@ def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
     assert content.startswith("<params>\nmode: batch\nlang: ru\n</params>")
 
 
-def test_run_stage_appends_user_edit_and_history(llm: InstallResponses) -> None:
+def test_run_stage_appends_user_edit(llm: InstallResponses) -> None:
+    requests = llm([ok(BRIEF_BLOCK)])
+
+    run_stage("brief", INPUTS, user_edit="Убери упоминание выходных")
+
+    edit = "<user_edit>\nУбери упоминание выходных\n</user_edit>"
+    assert request_body(requests[0])["messages"][0]["content"].endswith(edit)
+
+
+def test_run_stage_prepends_history(llm: InstallResponses) -> None:
     requests = llm([ok(BRIEF_BLOCK)])
     history: list[anthropic.types.MessageParam] = [
         {"role": "user", "content": "Кто пользователи?"},
         {"role": "assistant", "content": "Команда из пяти человек."},
     ]
 
-    run_stage("brief", INPUTS, user_edit="Убери упоминание выходных", history=history)
+    run_stage("brief", INPUTS, history=history)
 
     messages = request_body(requests[0])["messages"]
     assert messages[:2] == history
-    edit = "<user_edit>\nУбери упоминание выходных\n</user_edit>"
-    assert messages[2]["content"].endswith(edit)
+    assert len(messages) == 3
 
 
 def test_run_stage_uses_decompose_model(
