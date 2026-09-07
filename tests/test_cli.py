@@ -17,6 +17,7 @@ from app.stages import STAGE_OUTPUTS
 from app import stages
 from app.config import settings
 from tests.helpers import (
+    BROKEN_ISSUES,
     InstallResponses,
     decompose_answer,
     ok,
@@ -257,3 +258,21 @@ def test_from_does_not_take_a_text_as_well(
         main([TEXT, "--from", "prd"])
 
     assert exit_info.value.code == EXIT_USAGE
+
+
+def test_run_text_keeps_the_second_attempt_when_decompose_stays_invalid(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    second = BROKEN_ISSUES.replace('"outputs/prd.md"', '"вторая попытка"', 1)
+    requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer(second))])
+
+    assert main(["--from", "decompose"]) == EXIT_STAGE_FAILED
+
+    assert len(requests) == 2
+    assert not (tmp_path / "outputs/issues.json").exists()
+    assert not (tmp_path / "outputs/issues.md").exists()
+    raw = (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8")
+    assert "вторая попытка" in raw

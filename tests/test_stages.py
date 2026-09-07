@@ -77,7 +77,8 @@ def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
     result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
     assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
-    assert result.files["outputs/issues.md"].endswith("## Фаза 1\n")
+    assert result.files["outputs/issues.json"] == REAL_ISSUES
+    assert result.files["outputs/issues.md"] == "# Issues\n\n## Фаза 1\n"
     assert result.model == "claude-sonnet-5"
     assert (result.input_tokens, result.output_tokens) == (120, 30)
 

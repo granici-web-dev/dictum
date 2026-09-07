@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -103,3 +105,18 @@ def test_a_cycle_away_from_the_first_issue_is_reported() -> None:
     data["issues"][-2]["depends_on"] = [data["issues"][-1]["id"]]
 
     assert any("цикл в зависимостях" in problem for problem in problems_of(data))
+
+
+def test_the_module_exits_nonzero_when_run_as_a_command(tmp_path: Path) -> None:
+    broken = tmp_path / "issues.json"
+    broken.write_text('{"source": "x"}', encoding="utf-8")
+
+    finished = subprocess.run(
+        [sys.executable, "-m", "app.validate", str(broken)],
+        cwd=FIXTURES.parent,
+        capture_output=True,
+        text=True,
+    )
+
+    assert finished.returncode == 1
+    assert "проблем" in finished.stderr
