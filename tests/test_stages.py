@@ -4,7 +4,7 @@ import pytest
 from app import stages
 from app.config import settings
 from app.stages import STAGES, MissingApiKey, StageError, load_prompt, run_stage
-from tests.conftest import InstallResponses, ok, request_body, server_error
+from tests.helpers import InstallResponses, ok, request_body, server_error
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'

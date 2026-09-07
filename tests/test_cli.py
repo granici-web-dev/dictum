@@ -16,7 +16,7 @@ from app.cli import (
 from app.stages import STAGE_OUTPUTS
 from app import stages
 from app.config import settings
-from tests.conftest import InstallResponses, ok, request_body, server_error
+from tests.helpers import InstallResponses, ok, request_body, server_error
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n---\nsource: text\nlang: ru\nconfidence: high\n---\n\n'
