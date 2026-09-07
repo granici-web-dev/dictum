@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from app.config import ConfigError
 from app.models import Area, Deferred, Issue, IssuesFile, Phase
-from app.trello import Trello, TrelloCard, TrelloError, open_trello
+from app.trello import Trello, TrelloCard, TrelloChecklist, TrelloError, open_trello
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
@@ -196,14 +196,26 @@ def same_card(known: TrelloCard, planned: PlannedCard) -> bool:
     )
 
 
+def fill_checklist(
+    board: Trello, card_id: str, wanted: list[str], existing: TrelloChecklist | None
+) -> bool:
+    """Доводит чеклист DoD до полного набора пунктов, чем бы ни кончился прошлый прогон."""
+    if not wanted:
+        return False
+    checklist = existing or board.create_checklist(card_id, DOD)
+    present = {item.name for item in checklist.check_items}
+    missing = [item for item in wanted if item not in present]
+    for item in missing:
+        board.add_check_item(checklist.id, item)
+    return bool(missing)
+
+
 def finish_card(
     board: Trello, known: TrelloCard, planned: PlannedCard, journal: dict[str, PublishedCard]
 ) -> bool:
     """Дособирает карточку, которую оборвавшийся прогон успел создать, но не успел наполнить."""
-    finished = False
-    if planned.checklist and not any(item.name == DOD for item in known.checklists):
-        board.add_checklist(known.id, DOD, planned.checklist)
-        finished = True
+    checklist = next((item for item in known.checklists if item.name == DOD), None)
+    finished = fill_checklist(board, known.id, planned.checklist, checklist)
     attached = {item.name for item in known.attachments}
     for dependency in planned.depends_on:
         if dependency not in attached:
@@ -255,8 +267,7 @@ def publish(issues_text: str, log_path: Path) -> list[CardOutcome]:
                 planned.label_ids,
                 planned.position,
             )
-            if planned.checklist:
-                board.add_checklist(card.id, DOD, planned.checklist)
+            fill_checklist(board, card.id, planned.checklist, None)
             for dependency in planned.depends_on:
                 board.attach_url(card.id, journal[dependency].url, dependency)
             journal[planned.key] = PublishedCard(card_id=card.id, url=card.url)

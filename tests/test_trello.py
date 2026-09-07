@@ -112,6 +112,31 @@ def test_a_failing_read_is_repeated(client: Trello, respx_mock: respx.MockRouter
     assert len(route.calls) == 2
 
 
+def test_a_checklist_arrives_with_the_items_it_already_has(
+    client: Trello, respx_mock: respx.MockRouter
+) -> None:
+    respx_mock.get("https://api.trello.com/1/boards/board1/cards").mock(
+        httpx.Response(
+            200,
+            json=[
+                card_body(
+                    checklists=[
+                        {
+                            "id": "checklist-1",
+                            "name": "DoD",
+                            "checkItems": [{"id": "item-1", "name": "Первый пункт"}],
+                        }
+                    ]
+                )
+            ],
+        )
+    )
+
+    checklist = client.cards()[0].checklists[0]
+
+    assert [item.name for item in checklist.check_items] == ["Первый пункт"]
+
+
 def test_an_error_names_the_call_without_the_credentials(
     client: Trello, respx_mock: respx.MockRouter
 ) -> None:

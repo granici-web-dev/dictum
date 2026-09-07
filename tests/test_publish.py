@@ -29,8 +29,13 @@ def by_key(outcomes: list[CardOutcome]) -> dict[str, CardOutcome]:
     return {outcome.key: outcome for outcome in outcomes}
 
 
-def put_on_board(board: FakeBoard, issue: Issue, **changes: Any) -> dict[str, Any]:
-    """Кладёт на доску карточку, какой её сделал бы прошлый прогон: список и лейбл фазы на месте."""
+def put_on_board(
+    board: FakeBoard, issue: Issue, dod: list[str] | None = None, **changes: Any
+) -> dict[str, Any]:
+    """Кладёт на доску карточку, какой её оставил бы прошлый прогон: список, лейбл, DoD, ссылки.
+
+    `dod` задаёт пункты, которые прогон успел записать: None это полный набор.
+    """
     phase = next(item for item in real_issues().phases if item.n == issue.phase)
     fields: dict[str, Any] = {
         "name": issue.title,
@@ -38,7 +43,10 @@ def put_on_board(board: FakeBoard, issue: Issue, **changes: Any) -> dict[str, An
         "list_id": board.add_list(phase_list_name(phase))["id"],
         "label_ids": board.add_label(issue.area)["id"],
     }
-    return board.add_card(**{**fields, **changes})
+    card = board.add_card(**{**fields, **changes})
+    board.put_checklist(card, "DoD", issue.dod if dod is None else dod)
+    board.put_attachments(card, issue.depends_on)
+    return card
 
 
 def test_publish_creates_backlog_and_a_list_per_phase(board: FakeBoard, tmp_path: Path) -> None:
@@ -171,7 +179,6 @@ def test_publish_skips_an_issue_whose_marker_is_already_on_the_board(
     issues = real_issues()
     first = issues.issues[0]
     known = put_on_board(board, first)
-    known["checklists"].append({"id": "checklist-0", "name": "DoD"})
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
@@ -184,8 +191,7 @@ def test_publish_skips_an_issue_whose_marker_is_already_on_the_board(
 def test_publish_skips_an_issue_whose_card_was_archived(board: FakeBoard, tmp_path: Path) -> None:
     issues = real_issues()
     first = issues.issues[0]
-    archived = put_on_board(board, first, archived=True)
-    archived["checklists"].append({"id": "checklist-0", "name": "DoD"})
+    put_on_board(board, first, archived=True)
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
@@ -198,8 +204,7 @@ def test_publish_marks_a_changed_issue_as_differing_and_leaves_the_card_alone(
 ) -> None:
     issues = real_issues()
     first = issues.issues[0]
-    known = put_on_board(board, first, desc="Описания больше нет в issues.json\n\ndictum:I-001")
-    known["checklists"].append({"id": "checklist-0", "name": "DoD"})
+    put_on_board(board, first, desc="Описания больше нет в issues.json\n\ndictum:I-001")
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
@@ -212,8 +217,7 @@ def test_publish_notices_an_issue_that_moved_to_another_list(
 ) -> None:
     issues = real_issues()
     first = issues.issues[0]
-    known = put_on_board(board, first, list_id="список-из-прошлой-жизни")
-    known["checklists"].append({"id": "checklist-0", "name": "DoD"})
+    put_on_board(board, first, list_id="список-из-прошлой-жизни")
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
@@ -225,7 +229,8 @@ def test_publish_finishes_a_card_left_without_its_checklist(
 ) -> None:
     issues = real_issues()
     first = issues.issues[0]
-    half_made = put_on_board(board, first)
+    half_made = put_on_board(board, first, dod=[])
+    half_made["checklists"].clear()
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
@@ -239,14 +244,31 @@ def test_publish_finishes_a_card_left_without_its_dependency_links(
     issues = real_issues()
     dependent = one(issues, "I-006")
     half_made = put_on_board(board, dependent)
-    half_made["checklists"].append({"id": "checklist-0", "name": "DoD"})
-    half_made["attachments"].append({"id": "attachment-0", "name": "I-004"})
+    half_made["attachments"] = [{"id": "attachment-0", "name": "I-004"}]
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
     attached = board.posted(f"/1/cards/{half_made['id']}/attachments")
     assert [fields["name"] for fields in attached] == ["I-010"]
     assert by_key(outcomes)[dependent.id].status == "completed"
+
+
+def test_publish_adds_the_dod_items_a_broken_run_never_wrote(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    half_made = put_on_board(board, first, dod=first.dod[:1])
+    checklist_id = half_made["checklists"][0]["id"]
+
+    outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
+
+    assert not board.posted(f"/1/cards/{half_made['id']}/checklists")
+    added = board.posted(f"/1/checklists/{checklist_id}/checkItems")
+    written = [fields["name"] for fields in added]
+    assert written == first.dod[1:]
+    assert [item["name"] for item in half_made["checklists"][0]["checkItems"]] == first.dod
+    assert by_key(outcomes)[first.id].status == "completed"
 
 
 def test_publish_puts_deferred_scope_in_backlog_without_a_checklist(

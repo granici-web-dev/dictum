@@ -76,6 +76,7 @@ class FakeBoard:
         self.labels: list[dict[str, Any]] = []
         self.cards: list[dict[str, Any]] = []
         self.archived: set[str] = set()
+        self.checklists: dict[str, dict[str, Any]] = {}
         self.posts: list[tuple[str, dict[str, str]]] = []
         self.fail_after_cards: int | None = None
         self.busy_replies = 0
@@ -136,6 +137,19 @@ class FakeBoard:
         if archived:
             self.archived.add(card_id)
         return created
+
+    def put_checklist(self, card: dict[str, Any], name: str, items: list[str]) -> dict[str, Any]:
+        checklist: dict[str, Any] = {
+            "id": self.new_id("checklist"),
+            "name": name,
+            "checkItems": [{"id": self.new_id("item"), "name": item} for item in items],
+        }
+        card["checklists"].append(checklist)
+        self.checklists[checklist["id"]] = checklist
+        return checklist
+
+    def put_attachments(self, card: dict[str, Any], names: list[str]) -> None:
+        card["attachments"] += [{"id": self.new_id("attachment"), "name": name} for name in names]
 
     def card(self, card_id: str) -> dict[str, Any]:
         return next(item for item in self.cards if item["id"] == card_id)
@@ -198,9 +212,18 @@ class FakeBoard:
                 ),
             )
         if path.endswith("/checklists"):
-            checklist = {"id": self.new_id("checklist"), "name": fields["name"]}
+            checklist: dict[str, Any] = {
+                "id": self.new_id("checklist"),
+                "name": fields["name"],
+                "checkItems": [],
+            }
             self.card(path.split("/")[3])["checklists"].append(checklist)
+            self.checklists[checklist["id"]] = checklist
             return httpx.Response(200, json=checklist)
+        if path.endswith("/checkItems"):
+            item = {"id": self.new_id("item"), "name": fields["name"]}
+            self.checklists[path.split("/")[3]]["checkItems"].append(item)
+            return httpx.Response(200, json=item)
         if path.endswith("/attachments"):
             attachment = {"id": self.new_id("attachment"), "name": fields["name"]}
             self.card(path.split("/")[3])["attachments"].append(attachment)

@@ -31,9 +31,15 @@ class TrelloLabel(BaseModel):
     name: str
 
 
+class TrelloCheckItem(BaseModel):
+    id: str
+    name: str
+
+
 class TrelloChecklist(BaseModel):
     id: str
     name: str
+    check_items: list[TrelloCheckItem] = Field(alias="checkItems", default_factory=list)
 
 
 class TrelloAttachment(BaseModel):
@@ -184,13 +190,11 @@ class Trello:
             )
         )
 
-    def add_checklist(self, card_id: str, name: str, items: list[str]) -> TrelloChecklist:
-        checklist = TrelloChecklist.model_validate(
-            self.post(f"/cards/{card_id}/checklists", name=name)
-        )
-        for item in items:
-            self.post(f"/checklists/{checklist.id}/checkItems", name=item)
-        return checklist
+    def create_checklist(self, card_id: str, name: str) -> TrelloChecklist:
+        return TrelloChecklist.model_validate(self.post(f"/cards/{card_id}/checklists", name=name))
+
+    def add_check_item(self, checklist_id: str, name: str) -> None:
+        self.post(f"/checklists/{checklist_id}/checkItems", name=name)
 
     def attach_url(self, card_id: str, url: str, name: str) -> None:
         self.post(f"/cards/{card_id}/attachments", url=url, name=name)
