@@ -3,12 +3,11 @@ from pathlib import Path
 from typing import Any
 
 from app.validate import check_issues, main
-
-REAL = Path("fixtures/issues_real.json")
+from tests.helpers import BROKEN_ISSUES, FIXTURES, REAL_ISSUES
 
 
 def real_issues() -> dict[str, Any]:
-    data: dict[str, Any] = json.loads(REAL.read_text(encoding="utf-8"))
+    data: dict[str, Any] = json.loads(REAL_ISSUES)
     return data
 
 
@@ -17,13 +16,13 @@ def problems_of(data: dict[str, Any]) -> list[str]:
 
 
 def test_the_real_answer_has_no_problems() -> None:
-    assert check_issues(REAL.read_text(encoding="utf-8")) == []
+    assert check_issues(REAL_ISSUES) == []
 
 
 def test_a_title_over_the_limit_is_reported() -> None:
-    broken = Path("fixtures/issues_title_too_long.json").read_text(encoding="utf-8")
-
-    assert check_issues(broken) == ["issues.6.title: String should have at most 60 characters"]
+    assert check_issues(BROKEN_ISSUES) == [
+        "issues.6.title: String should have at most 60 characters"
+    ]
 
 
 def test_text_that_is_not_json_is_reported() -> None:
@@ -78,4 +77,4 @@ def test_the_command_exits_nonzero_on_a_broken_file(tmp_path: Path) -> None:
     broken.write_text('{"source": "x"}', encoding="utf-8")
 
     assert main(str(broken)) == 1
-    assert main(str(REAL)) == 0
+    assert main(str(FIXTURES / "issues_real.json")) == 0

@@ -39,9 +39,9 @@ def request_body(request: httpx2.Request) -> dict[str, Any]:
     return body
 
 
-REAL_ISSUES = (Path(__file__).parent.parent / "fixtures/issues_real.json").read_text(
-    encoding="utf-8"
-)
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+REAL_ISSUES = (FIXTURES / "issues_real.json").read_text(encoding="utf-8")
+BROKEN_ISSUES = (FIXTURES / "issues_title_too_long.json").read_text(encoding="utf-8")
 
 
 def decompose_answer(issues_json: str = REAL_ISSUES) -> str:

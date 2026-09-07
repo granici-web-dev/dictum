@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import anthropic
 import httpx2
 import pytest
@@ -16,8 +14,9 @@ from app.stages import (
     run_stage,
 )
 from tests.helpers import (
-    InstallResponses,
+    BROKEN_ISSUES,
     REAL_ISSUES,
+    InstallResponses,
     decompose_answer,
     ok,
     request_body,
@@ -212,8 +211,7 @@ def test_run_stage_asks_again_when_the_answer_has_no_file_blocks(llm: InstallRes
 def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
     llm: InstallResponses,
 ) -> None:
-    broken = (Path("fixtures/issues_title_too_long.json")).read_text(encoding="utf-8")
-    requests = llm([ok(decompose_answer(broken)), ok(decompose_answer())])
+    requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer())])
 
     result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
@@ -225,8 +223,7 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
 
 
 def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:
-    broken = (Path("fixtures/issues_title_too_long.json")).read_text(encoding="utf-8")
-    requests = llm([ok(decompose_answer(broken)), ok(decompose_answer(broken))])
+    requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer(BROKEN_ISSUES))])
 
     with pytest.raises(StageError, match="String should have at most 60 characters"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"})
