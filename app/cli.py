@@ -27,6 +27,9 @@ PRD = "outputs/prd.md"
 PRD_TEMPLATE = "templates/prd_oneshot.md"
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
+STAGE_ORDER = ("intake", "brief", "prd", "decompose")
+REQUIRED_INPUT = {"brief": IDEA, "prd": BRIEF, "decompose": PRD}
+
 EXIT_OK = 0
 EXIT_STAGE_FAILED = 1
 EXIT_NEEDS_A_DECISION = 2
@@ -72,47 +75,82 @@ def run_and_write(
     return result
 
 
-def run_pipeline(text: str, lang: str) -> int:
-    transcript = build_transcript(text, lang)
-    write_artifact(TRANSCRIPT, transcript)
+def read_artifact(path: str) -> str:
+    return Path(path).read_text(encoding="utf-8")
 
-    intake = run_and_write("intake", {TRANSCRIPT: transcript})
-    if CANDIDATES in intake.files:
-        logger.info(
-            "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.", CANDIDATES
+
+def run_pipeline(start: str, text: str, lang: str) -> int:
+    from_here = STAGE_ORDER.index(start)
+
+    if from_here == 0:
+        transcript = build_transcript(text, lang)
+        write_artifact(TRANSCRIPT, transcript)
+        intake = run_and_write("intake", {TRANSCRIPT: transcript})
+        if CANDIDATES in intake.files:
+            logger.info(
+                "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.", CANDIDATES
+            )
+            return EXIT_NEEDS_A_DECISION
+
+    if from_here <= 1:
+        run_and_write(
+            "brief",
+            {IDEA: read_artifact(IDEA)},
+            params={"mode": "batch", "interactive": "false", "lang": lang},
         )
-        return EXIT_NEEDS_A_DECISION
 
-    brief = run_and_write(
-        "brief",
-        {IDEA: intake.files[IDEA]},
-        params={"mode": "batch", "interactive": "false", "lang": lang},
-    )
-    write_artifact(RESEARCH, RESEARCH_SKIPPED)
-    prd = run_and_write(
-        "prd",
-        {
-            BRIEF: brief.files[BRIEF],
-            RESEARCH: RESEARCH_SKIPPED,
-            PRD_TEMPLATE: load_template("prd_oneshot.md"),
-        },
-    )
-    run_and_write("decompose", {PRD: prd.files[PRD]})
+    if from_here <= 2:
+        if not Path(RESEARCH).exists():
+            write_artifact(RESEARCH, RESEARCH_SKIPPED)
+        run_and_write(
+            "prd",
+            {
+                BRIEF: read_artifact(BRIEF),
+                RESEARCH: read_artifact(RESEARCH),
+                PRD_TEMPLATE: load_template("prd_oneshot.md"),
+            },
+        )
+
+    run_and_write("decompose", {PRD: read_artifact(PRD)})
     return EXIT_OK
+
+
+def start_pipeline(start: str, text: str, lang: str) -> int:
+    try:
+        return run_pipeline(start, text, lang)
+    except (StageError, ConfigError, anthropic.APIError) as error:
+        logger.error("%s", error)
+        return EXIT_STAGE_FAILED
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = CommandLineParser(
         prog="app.cli", description="Прогон идеи через стадии без Telegram."
     )
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("text", nargs="?", help="Текст идеи.")
     source.add_argument("--file", help="Файл с текстом идеи вместо аргумента.")
+    parser.add_argument(
+        "--from",
+        dest="start",
+        choices=STAGE_ORDER[1:],
+        help="Начать с этой стадии, взяв входные артефакты из outputs/.",
+    )
     parser.add_argument(
         "--lang", help="Язык артефактов. По умолчанию из frontmatter входа, иначе DEFAULT_LANG."
     )
     args = parser.parse_args(argv)
 
+    if args.start:
+        if args.text or args.file:
+            parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
+        needed = REQUIRED_INPUT[args.start]
+        if not Path(needed).exists():
+            parser.error(f"для --from {args.start} нужен {needed}, а его нет")
+        return start_pipeline(args.start, "", args.lang or settings.default_lang)
+
+    if not (args.text or args.file):
+        parser.error('нужен текст: make run-text TEXT="…", --file путь или --from стадия')
     try:
         text: str = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
     except OSError as error:
@@ -123,11 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     body, lang_of_input = read_input(text)
     lang: str = args.lang or lang_of_input or settings.default_lang
 
-    try:
-        return run_pipeline(body, lang)
-    except (StageError, ConfigError, anthropic.APIError) as error:
-        logger.error("%s", error)
-        return EXIT_STAGE_FAILED
+    return start_pipeline("intake", body, lang)
 
 
 if __name__ == "__main__":

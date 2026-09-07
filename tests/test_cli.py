@@ -40,6 +40,9 @@ ISSUES_BLOCKS = (
     '<file path="outputs/issues.md">\n# Issues\n\n## Фаза 1\n</file>'
 )
 TEXT = "Хочу, чтобы бот напоминал о дедлайнах в Trello"
+PRD_FROM_A_REAL_RUN = (Path(__file__).parent.parent / "fixtures/prd_real.md").read_text(
+    encoding="utf-8"
+)
 
 
 def test_run_text_writes_the_artifact_of_every_stage(
@@ -199,3 +202,55 @@ def test_the_paths_the_cli_expects_are_the_ones_the_stages_may_return() -> None:
     assert {IDEA, CANDIDATES} == set().union(*STAGE_OUTPUTS["intake"])
     assert {BRIEF} == set().union(*STAGE_OUTPUTS["brief"])
     assert {PRD} == set().union(*STAGE_OUTPUTS["prd"])
+
+
+def test_run_from_prd_uses_the_artifacts_already_on_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф с прошлого прогона\n", encoding="utf-8")
+    requests = llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "prd"]) == EXIT_OK
+
+    assert len(requests) == 2
+    assert "# Бриф с прошлого прогона" in request_body(requests[0])["messages"][0]["content"]
+    assert "Скоп MVP" in (tmp_path / PRD).read_text(encoding="utf-8")
+    assert not (tmp_path / "inputs/transcript.md").exists()
+
+
+def test_run_from_decompose_feeds_it_the_prd_from_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    requests = llm([ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "decompose"]) == EXIT_OK
+
+    assert len(requests) == 1
+    assert "| S1 |" in request_body(requests[0])["messages"][0]["content"]
+
+
+def test_run_from_a_stage_without_its_input_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "prd"])
+
+    assert exit_info.value.code == EXIT_USAGE
+
+
+def test_from_does_not_take_a_text_as_well(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main([TEXT, "--from", "prd"])
+
+    assert exit_info.value.code == EXIT_USAGE
