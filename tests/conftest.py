@@ -18,6 +18,7 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
             requests.append(request)
             return responses.pop(0)
 
+        monkeypatch.setattr(settings, "allow_live_api", True)
         monkeypatch.setattr(settings, "anthropic_api_key", "test")
         monkeypatch.setattr(
             stages,

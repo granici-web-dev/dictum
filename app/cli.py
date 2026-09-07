@@ -14,7 +14,7 @@ import anthropic
 import frontmatter
 
 from app.config import settings
-from app.stages import MissingApiKey, StageError, StageResult, load_template, run_stage
+from app.stages import ConfigError, StageError, StageResult, load_template, run_stage
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run_pipeline(body, lang)
-    except (StageError, MissingApiKey, anthropic.APIError) as error:
+    except (StageError, ConfigError, anthropic.APIError) as error:
         logger.error("%s", error)
         return EXIT_STAGE_FAILED
 

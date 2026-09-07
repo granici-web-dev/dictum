@@ -1,9 +1,18 @@
 import anthropic
+import httpx2
 import pytest
+from anthropic import DefaultHttpxClient
 
 from app import stages
 from app.config import settings
-from app.stages import STAGES, MissingApiKey, StageError, load_prompt, run_stage
+from app.stages import (
+    STAGES,
+    LiveApiNotAllowed,
+    MissingApiKey,
+    StageError,
+    load_prompt,
+    run_stage,
+)
 from tests.helpers import InstallResponses, ok, request_body, server_error
 
 IDEA_BLOCK = (
@@ -23,11 +32,35 @@ def test_all_stage_prompts_exist() -> None:
 
 
 def test_anthropic_client_reports_a_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "allow_live_api", True)
     monkeypatch.setattr(settings, "anthropic_api_key", "")
     stages.anthropic_client.cache_clear()
 
     with pytest.raises(MissingApiKey, match="ANTHROPIC_API_KEY is not set"):
         stages.anthropic_client()
+
+
+def test_no_request_leaves_the_process_without_the_live_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "allow_live_api", False)
+    monkeypatch.setattr(settings, "anthropic_api_key", "test")
+    sent: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        return httpx2.Response(200, json={})
+
+    monkeypatch.setattr(
+        stages,
+        "http_client",
+        lambda: DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+    stages.anthropic_client.cache_clear()
+
+    with pytest.raises(LiveApiNotAllowed, match="ALLOW_LIVE_API is not true"):
+        run_stage("intake", INPUTS)
+    assert sent == []
 
 
 def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:

@@ -42,7 +42,15 @@ class StageResult(BaseModel):
     duration_ms: int
 
 
-class MissingApiKey(RuntimeError):
+class ConfigError(RuntimeError):
+    pass
+
+
+class MissingApiKey(ConfigError):
+    pass
+
+
+class LiveApiNotAllowed(ConfigError):
     pass
 
 
@@ -68,6 +76,11 @@ def http_client() -> DefaultHttpxClient:
 
 @cache
 def anthropic_client() -> anthropic.Anthropic:
+    if not settings.allow_live_api:
+        raise LiveApiNotAllowed(
+            "ALLOW_LIVE_API is not true, nothing was sent. "
+            "Set ALLOW_LIVE_API=true in .env for a run you mean to pay for."
+        )
     if not settings.anthropic_api_key:
         raise MissingApiKey(
             "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in."
