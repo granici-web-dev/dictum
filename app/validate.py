@@ -64,9 +64,12 @@ def check_issues(text: str) -> list[str]:
         ]
 
     issues = issues_file.issues
+    # Отложенные попадают на доску такими же карточками, и их scope_id служит тем же локальным
+    # идентификатором, что и id у issue: дубль означал бы две карточки, спорящие за одну запись.
+    identifiers = [i.id for i in issues] + [d.scope_id for d in issues_file.deferred]
     duplicates = [
         f"идентификатор {id_} встречается несколько раз"
-        for id_, count in sorted(Counter(i.id for i in issues).items())
+        for id_, count in sorted(Counter(identifiers).items())
         if count > 1
     ]
     # Ниже граф строится по id как по ключу, а с дублями такой граф читается неоднозначно:

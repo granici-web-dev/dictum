@@ -119,6 +119,15 @@ class FakeBoard:
         self.lists.append(created)
         return created
 
+    def list_named(self, name: str) -> dict[str, Any]:
+        """Список доски, создаётся при первом обращении: двух списков с одним именем не бывает."""
+        here = [item for item in self.lists if item["name"] == name]
+        return here[0] if here else self.add_list(name)
+
+    def label_named(self, name: str) -> dict[str, Any]:
+        here = [item for item in self.labels if item["name"] == name]
+        return here[0] if here else self.add_label(name)
+
     def add_label(self, name: str) -> dict[str, Any]:
         created = {"id": self.new_id("label"), "name": name}
         self.labels.append(created)

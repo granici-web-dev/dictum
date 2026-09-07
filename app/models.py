@@ -37,7 +37,7 @@ class IssuesFile(BaseModel):
     lang: str
     # Проставляется первой публикацией и дальше не меняется: по нему карточки прогона
     # узнаются на доске, где локальные I-00N разных прогонов неразличимы.
-    run_id: str | None = None
+    run_id: str | None = Field(default=None, min_length=1)
     phases: list[Phase]
     issues: list[Issue]
     deferred: list[Deferred] = Field(default_factory=list)

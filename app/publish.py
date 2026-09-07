@@ -2,12 +2,14 @@
 
 python -m app.publish outputs/issues.json
 
-Что уже опубликовано, знает доска: в description каждой карточки стоит маркер dictum:<id>.
-Рядом с issues.json пишется publish.json — кэш этого отображения для человека, не источник.
+Что уже опубликовано, знает доска: в description каждой карточки стоит маркер
+dictum:<KEY-N> run:<run_id> local:<I-00N|S<N>>. Рядом с issues.json пишется publish.json —
+кэш этого отображения для человека, не источник.
 """
 
 import json
 import logging
+import os
 import re
 import secrets
 import sys
@@ -37,7 +39,7 @@ MARKER = re.compile(
     r"^[ \t]*dictum:(?P<key>\S+)[ \t]+run:(?P<run>\S+)[ \t]+local:(?P<local>\S+)[ \t\r]*$",
     re.MULTILINE,
 )
-PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
+PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 
 Status = Literal["created", "completed", "existing", "differs"]
 
@@ -74,9 +76,7 @@ class PublishedCard(BaseModel):
     url: str
 
 
-class BoardCard(BaseModel):
-    """Карточка доски, разобранная по маркеру: ключ, прогон и локальный идентификатор issue."""
-
+class MarkedCard(BaseModel):
     key: str
     run_id: str
     local_id: str
@@ -97,6 +97,7 @@ class PlannedCard(BaseModel):
 
 
 class CardOutcome(BaseModel):
+    local_id: str
     key: str
     phase: int | None
     status: Status
@@ -108,7 +109,7 @@ def phase_list_name(phase: Phase) -> str:
 
 
 def project_key() -> str:
-    if not PROJECT_KEY.match(settings.project_key):
+    if not PROJECT_KEY_PATTERN.match(settings.project_key):
         raise InvalidProjectKey(
             f"PROJECT_KEY={settings.project_key!r} не годится в префикс ключа. "
             "Нужны заглавные латинские буквы и цифры, от двух до десяти знаков, например DCT."
@@ -124,29 +125,33 @@ def card_name(key: str, title: str) -> str:
     return f"[{key}] {title}"
 
 
-def card_description(key: str, run_id: str, planned: "PlannedCard", keys: dict[str, str]) -> str:
+def card_description(
+    key: str, run_id: str, planned: PlannedCard, published: dict[str, PublishedCard]
+) -> str:
     lines = [planned.body, "", f"scope_id: {planned.scope_id}"]
     if planned.depends_on:
-        lines.append("Depends on: " + ", ".join(keys[local] for local in planned.depends_on))
+        lines.append(
+            "Depends on: " + ", ".join(published[local].key for local in planned.depends_on)
+        )
     lines.append(f"dictum:{key} run:{run_id} local:{planned.local_id}")
     return "\n".join(lines)
 
 
-def board_cards(cards: list[TrelloCard]) -> list[BoardCard]:
-    found = []
+def marked_cards(cards: list[TrelloCard]) -> list[MarkedCard]:
+    found: list[MarkedCard] = []
     for card in cards:
         markers = list(MARKER.finditer(card.desc))
         if markers:
             last = markers[-1]
             found.append(
-                BoardCard(
+                MarkedCard(
                     key=last["key"], run_id=last["run"], local_id=last["local"], card=card
                 )
             )
     return found
 
 
-def next_number(on_board: list[BoardCard], prefix: str) -> int:
+def next_number(on_board: list[MarkedCard], prefix: str) -> int:
     numbered = re.compile(rf"^{re.escape(prefix)}-(\d+)$")
     taken = [int(found[1]) for card in on_board if (found := numbered.match(card.key))]
     return max(taken, default=0) + 1
@@ -267,17 +272,81 @@ def finish_card(
     return finished
 
 
-def write_log(path: Path, journal: dict[str, PublishedCard], locals_of_run: list[str]) -> None:
+def write_log(
+    path: Path, published: dict[str, PublishedCard], local_ids_of_run: list[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = {local: journal[local].model_dump() for local in locals_of_run if local in journal}
+    body = {
+        local: published[local].model_dump()
+        for local in local_ids_of_run
+        if local in published
+    }
     path.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def stamp_run_id(path: Path, text: str, run_id: str) -> None:
-    """Проставляет run_id в issues.json, чтобы повторная публикация узнала свои карточки."""
+    """Проставляет run_id в issues.json, чтобы повторная публикация узнала свои карточки.
+
+    Пишет через соседний файл: issues.json стоил вызовов модели, и обрыв записи не должен
+    оставить от него половину.
+    """
     data = json.loads(text)
     data["run_id"] = run_id
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    beside = path.with_suffix(".json.new")
+    beside.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(beside, path)
+
+
+def key_number(key: str) -> int:
+    return int(key.rsplit("-", 1)[1])
+
+
+def revisit_card(
+    board: Trello,
+    known: MarkedCard,
+    run_id: str,
+    planned: PlannedCard,
+    published: dict[str, PublishedCard],
+) -> CardOutcome:
+    name = card_name(known.key, planned.title)
+    description = card_description(known.key, run_id, planned, published)
+    status: Status = "existing" if same_card(known.card, name, description, planned) else "differs"
+    # Дособранная карточка, которая вдобавок разошлась с файлом, остаётся differs:
+    # человеку важнее знать про расхождение, чем про дописанный чеклист.
+    if finish_card(board, known.card, planned, published) and status == "existing":
+        status = "completed"
+    return CardOutcome(
+        local_id=planned.local_id,
+        key=known.key,
+        phase=planned.phase,
+        status=status,
+        url=known.card.url,
+    )
+
+
+def make_card(
+    board: Trello,
+    key: str,
+    run_id: str,
+    planned: PlannedCard,
+    published: dict[str, PublishedCard],
+) -> CardOutcome:
+    card = board.create_card(
+        planned.list_id,
+        card_name(key, planned.title),
+        card_description(key, run_id, planned, published),
+        planned.label_ids,
+        planned.position,
+    )
+    fill_checklist(board, card.id, planned.checklist, None)
+    for dependency in planned.depends_on:
+        linked = published[dependency]
+        board.attach_url(card.id, linked.url, linked.key)
+    published[planned.local_id] = PublishedCard(key=key, card_id=card.id, url=card.url)
+    logger.info("Создана карточка %s (%s): %s", key, planned.local_id, card.url)
+    return CardOutcome(
+        local_id=planned.local_id, key=key, phase=planned.phase, status="created", url=card.url
+    )
 
 
 def publish(issues_path: Path) -> list[CardOutcome]:
@@ -288,69 +357,44 @@ def publish(issues_path: Path) -> list[CardOutcome]:
     issues = IssuesFile.model_validate_json(text)
     prefix = project_key()
     run_id = issues.run_id or new_run_id()
-    if issues.run_id is None:
-        stamp_run_id(issues_path, text, run_id)
-        logger.info("Прогон получил run_id %s", run_id)
     log_path = issues_path.parent / "publish.json"
 
     with closing(open_trello()) as board:
-        on_board = board_cards(board.cards())
-        number = next_number(on_board, prefix)
-        mine = {found.local_id: found for found in on_board if found.run_id == run_id}
-        journal = {
+        on_board = marked_cards(board.cards())
+        # Штамп ставится после первого удачного запроса: отказ по ключам или по флагу не должен
+        # оставлять в файле run_id прогона, которого не было.
+        if run_id != issues.run_id:
+            stamp_run_id(issues_path, text, run_id)
+            logger.info("Прогон получил run_id %s", run_id)
+        next_card_number = next_number(on_board, prefix)
+        cards_of_this_run = {found.local_id: found for found in on_board if found.run_id == run_id}
+        published = {
             local: PublishedCard(key=found.key, card_id=found.card.id, url=found.card.url)
-            for local, found in mine.items()
+            for local, found in cards_of_this_run.items()
         }
-        keys = {local: published.key for local, published in journal.items()}
 
         lists = ensure_lists(board, issues.phases)
         areas: list[LabelName] = sorted({issue.area for issue in issues.issues})
         labels = ensure_labels(board, areas + ([DEFERRED] if issues.deferred else []))
 
         planned_cards = plan_cards(issues, lists, labels)
-        locals_of_run = [planned.local_id for planned in planned_cards]
+        local_ids_of_run = [planned.local_id for planned in planned_cards]
         outcomes: list[CardOutcome] = []
         for planned in planned_cards:
-            known = mine.get(planned.local_id)
+            known = cards_of_this_run.get(planned.local_id)
             if known:
-                name = card_name(known.key, planned.title)
-                description = card_description(known.key, run_id, planned, keys)
-                status: Status = (
-                    "existing" if same_card(known.card, name, description, planned) else "differs"
-                )
-                if finish_card(board, known.card, planned, journal):
-                    status = "completed"
-                outcomes.append(
-                    CardOutcome(
-                        key=known.key, phase=planned.phase, status=status, url=known.card.url
-                    )
-                )
+                outcomes.append(revisit_card(board, known, run_id, planned, published))
                 continue
-            key = f"{prefix}-{number}"
-            number += 1
-            keys[planned.local_id] = key
-            card = board.create_card(
-                planned.list_id,
-                card_name(key, planned.title),
-                card_description(key, run_id, planned, keys),
-                planned.label_ids,
-                planned.position,
-            )
-            fill_checklist(board, card.id, planned.checklist, None)
-            for dependency in planned.depends_on:
-                board.attach_url(card.id, journal[dependency].url, keys[dependency])
-            journal[planned.local_id] = PublishedCard(key=key, card_id=card.id, url=card.url)
-            write_log(log_path, journal, locals_of_run)
-            logger.info("Создана карточка %s (%s): %s", key, planned.local_id, card.url)
-            outcomes.append(
-                CardOutcome(key=key, phase=planned.phase, status="created", url=card.url)
-            )
-        write_log(log_path, journal, locals_of_run)
+            key = f"{prefix}-{next_card_number}"
+            next_card_number += 1
+            outcomes.append(make_card(board, key, run_id, planned, published))
+            write_log(log_path, published, local_ids_of_run)
+        write_log(log_path, published, local_ids_of_run)
         return outcomes
 
 
 def report(outcomes: list[CardOutcome]) -> None:
-    ordered = sorted(outcomes, key=lambda o: (o.phase is None, o.phase or 0, o.key))
+    ordered = sorted(outcomes, key=lambda o: (o.phase is None, o.phase or 0, key_number(o.key)))
     key_width = max(len(outcome.key) for outcome in ordered)
     status_width = max(len(word) for word in STATUS_WORDS.values())
     heading = None
@@ -370,8 +414,10 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     path = Path(arguments[0])
-    if not path.is_file():
-        print(f"не читается {path}", file=sys.stderr)
+    try:
+        path.read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"не читается {path}: {error.strerror}", file=sys.stderr)
         return EXIT_USAGE
 
     try:

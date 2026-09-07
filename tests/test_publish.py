@@ -9,17 +9,19 @@ from app.config import InvalidProjectKey, LiveApiNotAllowed, settings
 from app.models import Issue, IssuesFile
 from app.publish import (
     CardOutcome,
+    PublishedCard,
     InvalidIssues,
     PlannedCard,
-    board_cards,
+    marked_cards,
     card_description,
     card_name,
     in_dependency_order,
     main,
     phase_list_name,
     publish,
+    report,
 )
-from app.trello import TrelloCard
+from app.trello import TrelloCard, TrelloError
 from tests.helpers import (
     BROKEN_ISSUES,
     DEPENDENCY_BELOW,
@@ -33,10 +35,8 @@ def one(issues: IssuesFile, issue_id: str) -> Issue:
     return next(issue for issue in issues.issues if issue.id == issue_id)
 
 
-def by_local(outcomes: list[CardOutcome], issues: IssuesFile) -> dict[str, CardOutcome]:
-    order = [issue.id for issue in in_dependency_order(issues.issues)]
-    order += [entry.scope_id for entry in issues.deferred]
-    return {local: outcome for local, outcome in zip(order, outcomes, strict=True)}
+def by_local(outcomes: list[CardOutcome]) -> dict[str, CardOutcome]:
+    return {outcome.local_id: outcome for outcome in outcomes}
 
 
 def put_on_board(
@@ -50,28 +50,32 @@ def put_on_board(
 ) -> dict[str, Any]:
     """Кладёт карточку, какой её оставил бы прошлый прогон: имя, маркер, DoD и ссылки на месте."""
     issues = real_issues()
+    linked = {
+        local: PublishedCard(key=key_of, card_id="card-known", url=f"https://trello.com/c/{key_of}")
+        for local, key_of in (keys or {}).items()
+    }
     phase = next(item for item in issues.phases if item.n == issue.phase)
     planned = PlannedCard(
         local_id=issue.id,
         phase=issue.phase,
-        list_id=board.add_list(phase_list_name(phase))["id"],
+        list_id=board.list_named(phase_list_name(phase))["id"],
         title=issue.title,
         body=issue.description,
         scope_id=issue.scope_id,
-        label_ids=[board.add_label(issue.area)["id"]],
+        label_ids=[board.label_named(issue.area)["id"]],
         checklist=issue.dod,
         depends_on=issue.depends_on,
         position=1,
     )
     fields: dict[str, Any] = {
         "name": card_name(key, planned.title),
-        "desc": card_description(key, run_id, planned, keys or {}),
+        "desc": card_description(key, run_id, planned, linked),
         "list_id": planned.list_id,
         "label_ids": planned.label_ids[0],
     }
     card = board.add_card(**{**fields, **changes})
     board.put_checklist(card, "DoD", issue.dod if dod is None else dod)
-    board.put_attachments(card, [(keys or {})[local] for local in issue.depends_on])
+    board.put_attachments(card, [linked[local].key for local in issue.depends_on])
     return card
 
 
@@ -112,7 +116,7 @@ def test_publish_names_every_card_with_its_key(board: FakeBoard, tmp_path: Path)
     outcomes = publish(issues_file(tmp_path))
 
     first = issues.issues[0]
-    assert by_local(outcomes, issues)[first.id].key == "DCT-1"
+    assert by_local(outcomes)[first.id].key == "DCT-1"
     assert board.card_named(f"[DCT-1] {first.title}")
 
 
@@ -136,8 +140,8 @@ def test_publish_numbers_deferred_scopes_from_the_same_counter(
     issued = [outcome.key for outcome in outcomes]
     assert issued == [f"DCT-{number}" for number in range(1, len(issued) + 1)]
     deferred = issues.deferred[0]
-    assert by_local(outcomes, issues)[deferred.scope_id].key == f"DCT-{len(issues.issues) + 1}"
-    assert board.card_named(f"DCT-{len(issues.issues) + 1}".join(["[", "] "]) + deferred.title)
+    assert by_local(outcomes)[deferred.scope_id].key == f"DCT-{len(issues.issues) + 1}"
+    assert board.card_named(card_name(f"DCT-{len(issues.issues) + 1}", deferred.title))
 
 
 def test_publish_writes_the_description_with_global_dependencies_and_the_marker(
@@ -147,7 +151,7 @@ def test_publish_writes_the_description_with_global_dependencies_and_the_marker(
 
     outcomes = publish(issues_file(tmp_path))
 
-    keys = {local: outcome.key for local, outcome in by_local(outcomes, issues).items()}
+    keys = {local: outcome.key for local, outcome in by_local(outcomes).items()}
     dependent = one(issues, "I-008")
     card = board.card_named(card_name(keys["I-008"], dependent.title))
     expected_dependencies = ", ".join(keys[local] for local in dependent.depends_on)
@@ -172,7 +176,7 @@ def test_publish_leaves_out_the_depends_on_line_when_there_is_nothing_to_depend_
 
     independent = one(issues, "I-001")
     assert independent.depends_on == []
-    card = board.card_named(card_name(by_local(outcomes, issues)["I-001"].key, independent.title))
+    card = board.card_named(card_name(by_local(outcomes)["I-001"].key, independent.title))
     assert "Depends on:" not in card["desc"]
 
 
@@ -183,7 +187,7 @@ def test_publish_attaches_every_dependency_under_its_global_key(
 
     outcomes = publish(issues_file(tmp_path))
 
-    keys = {local: outcome.key for local, outcome in by_local(outcomes, issues).items()}
+    keys = {local: outcome.key for local, outcome in by_local(outcomes).items()}
     dependent = one(issues, "I-008")
     card = board.card_named(card_name(keys["I-008"], dependent.title))
     attached = board.posted(f"/1/cards/{card['id']}/attachments")
@@ -210,15 +214,16 @@ def test_publish_finds_its_cards_on_the_board_without_a_journal(
     issues = real_issues()
     first = issues.issues[0]
     known = put_on_board(board, first, "DCT-7", "прогон-семь")
+    path = issues_file(tmp_path, run_id="прогон-семь")
+    assert not (tmp_path / "publish.json").exists()
 
-    outcomes = publish(issues_file(tmp_path, run_id="прогон-семь"))
+    outcomes = publish(path)
 
-    assert not (tmp_path / "publish.json").exists() or True
     assert card_name("DCT-7", first.title) not in [
         fields["name"] for fields in board.posted("/1/cards")
     ]
-    assert by_local(outcomes, issues)[first.id] == CardOutcome(
-        key="DCT-7", phase=first.phase, status="existing", url=known["url"]
+    assert by_local(outcomes)[first.id] == CardOutcome(
+        local_id=first.id, key="DCT-7", phase=first.phase, status="existing", url=known["url"]
     )
 
 
@@ -234,7 +239,7 @@ def test_two_runs_of_the_same_local_ids_get_two_cards(board: FakeBoard, tmp_path
     second_run = publish(issues_file(later))
 
     assert run_id_of(earlier) != run_id_of(later)
-    assert by_local(first_run, issues)[first.id].key != by_local(second_run, issues)[first.id].key
+    assert by_local(first_run)[first.id].key != by_local(second_run)[first.id].key
     made = [fields["name"] for fields in board.posted("/1/cards")]
     assert sum(1 for name in made if name.endswith(first.title)) == 2
 
@@ -245,7 +250,7 @@ def test_publish_adds_a_dod_checklist_with_every_item(board: FakeBoard, tmp_path
     outcomes = publish(issues_file(tmp_path))
 
     first = issues.issues[0]
-    card = board.card_named(card_name(by_local(outcomes, issues)[first.id].key, first.title))
+    card = board.card_named(card_name(by_local(outcomes)[first.id].key, first.title))
     assert [item["name"] for item in card["checklists"]] == ["DoD"]
     checklist_id = card["checklists"][0]["id"]
     items = board.posted(f"/1/checklists/{checklist_id}/checkItems")
@@ -264,7 +269,7 @@ def test_publish_adds_the_dod_items_a_broken_run_never_wrote(
 
     added = board.posted(f"/1/checklists/{checklist_id}/checkItems")
     assert [fields["name"] for fields in added] == first.dod[:1]
-    assert by_local(outcomes, issues)[first.id].status == "completed"
+    assert by_local(outcomes)[first.id].status == "completed"
 
 
 def test_publish_finishes_a_card_left_without_its_dependency_links(
@@ -281,7 +286,7 @@ def test_publish_finishes_a_card_left_without_its_dependency_links(
 
     attached = board.posted(f"/1/cards/{half_made['id']}/attachments")
     assert [fields["name"] for fields in attached] == ["DCT-1"]
-    assert by_local(outcomes, issues)[dependent.id].status == "completed"
+    assert by_local(outcomes)[dependent.id].status == "completed"
 
 
 def test_publish_marks_a_changed_issue_as_differing_and_leaves_the_card_alone(
@@ -299,10 +304,96 @@ def test_publish_marks_a_changed_issue_as_differing_and_leaves_the_card_alone(
 
     outcomes = publish(issues_file(tmp_path, run_id="прогон-девять"))
 
-    assert by_local(outcomes, issues)[first.id].status == "differs"
+    assert by_local(outcomes)[first.id].status == "differs"
     assert card_name("DCT-9", first.title) not in [
         fields["name"] for fields in board.posted("/1/cards")
     ]
+
+
+def test_publish_notices_a_card_that_moved_to_another_list(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    put_on_board(board, first, "DCT-9", "прогон-девять", list_id="список-из-прошлой-жизни")
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-девять"))
+
+    assert by_local(outcomes)[first.id].status == "differs"
+
+
+def test_a_card_that_both_differs_and_lacks_its_checklist_reports_the_difference(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    put_on_board(
+        board,
+        first,
+        "DCT-9",
+        "прогон-девять",
+        dod=[],
+        name="[DCT-9] Кто-то переписал заголовок",
+    )
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-девять"))
+
+    assert by_local(outcomes)[first.id].status == "differs"
+
+
+def test_publish_notices_a_card_that_was_renamed(board: FakeBoard, tmp_path: Path) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    put_on_board(board, first, "DCT-9", "прогон-девять", name="[DCT-9] Кто-то переписал заголовок")
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-девять"))
+
+    assert by_local(outcomes)[first.id].status == "differs"
+
+
+def test_publish_notices_a_card_that_lost_its_label(board: FakeBoard, tmp_path: Path) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    put_on_board(board, first, "DCT-9", "прогон-девять", label_ids="")
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-девять"))
+
+    assert by_local(outcomes)[first.id].status == "differs"
+
+
+def test_publish_writes_the_log_even_when_it_creates_nothing(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    path = issues_file(tmp_path)
+    publish(path)
+    (tmp_path / "publish.json").unlink()
+    created_before = len(board.posted("/1/cards"))
+
+    publish(path)
+
+    assert len(board.posted("/1/cards")) == created_before
+    assert json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
+
+
+def test_publish_ignores_keys_of_other_projects_when_numbering(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    board.add_card("[OTHER-99] Чужой проект", "т\n\ndictum:OTHER-99 run:чужой local:I-001")
+    board.add_card("[DCT-5] Наш прошлый", "т\n\ndictum:DCT-5 run:прошлый local:I-002")
+
+    outcomes = publish(issues_file(tmp_path))
+
+    assert outcomes[0].key == "DCT-6"
+
+
+def test_publish_starts_over_when_the_board_was_emptied(board: FakeBoard, tmp_path: Path) -> None:
+    path = issues_file(tmp_path, run_id="прогон-которого-нет-на-доске")
+
+    outcomes = publish(path)
+
+    assert [outcome.status for outcome in outcomes] == ["created"] * len(outcomes)
+    assert outcomes[0].key == "DCT-1"
+    assert run_id_of(tmp_path) == "прогон-которого-нет-на-доске"
 
 
 def test_publish_skips_an_issue_whose_card_was_archived(board: FakeBoard, tmp_path: Path) -> None:
@@ -312,7 +403,7 @@ def test_publish_skips_an_issue_whose_card_was_archived(board: FakeBoard, tmp_pa
 
     outcomes = publish(issues_file(tmp_path, run_id="прогон-пять"))
 
-    assert by_local(outcomes, issues)[first.id].status == "existing"
+    assert by_local(outcomes)[first.id].status == "existing"
 
 
 def test_publish_lays_cards_out_in_the_order_of_the_file(board: FakeBoard, tmp_path: Path) -> None:
@@ -321,7 +412,7 @@ def test_publish_lays_cards_out_in_the_order_of_the_file(board: FakeBoard, tmp_p
 
     outcomes = publish(issues_file(tmp_path, DEPENDENCY_BELOW))
 
-    keys = {local: outcome.key for local, outcome in by_local(outcomes, issues).items()}
+    keys = {local: outcome.key for local, outcome in by_local(outcomes).items()}
     made = [fields["name"] for fields in board.posted("/1/cards")]
     assert made.index(card_name(keys["I-010"], dependency.title)) < made.index(
         card_name(keys["I-006"], dependent.title)
@@ -350,7 +441,7 @@ def test_publish_puts_deferred_scope_in_backlog_without_a_checklist(
 
     outcomes = publish(issues_file(tmp_path))
 
-    key = by_local(outcomes, issues)[deferred.scope_id].key
+    key = by_local(outcomes)[deferred.scope_id].key
     backlog = next(item for item in board.lists if item["name"] == "Backlog")
     label = next(item for item in board.labels if item["name"] == "deferred")
     card = board.card_named(card_name(key, deferred.title))
@@ -358,10 +449,14 @@ def test_publish_puts_deferred_scope_in_backlog_without_a_checklist(
     assert card["idLabels"] == [label["id"]]
     assert deferred.reason in card["desc"]
     assert not card["checklists"]
-    assert board.card_names("Backlog") == [
-        card_name(by_local(outcomes, issues)[entry.scope_id].key, entry.title)
+    in_backlog = board.card_names("Backlog")
+    assert in_backlog == [
+        card_name(by_local(outcomes)[entry.scope_id].key, entry.title)
         for entry in issues.deferred
     ]
+    positions = [fields["pos"] for fields in board.posted("/1/cards")][-len(issues.deferred) :]
+    assert positions == sorted(positions, key=int)
+    assert len(set(positions)) == len(issues.deferred)
 
 
 def test_publish_logs_every_issue_and_deferred_scope(board: FakeBoard, tmp_path: Path) -> None:
@@ -385,12 +480,26 @@ def test_publish_keeps_other_runs_out_of_the_log(board: FakeBoard, tmp_path: Pat
     assert all(entry["key"] != "DCT-77" for entry in journal.values())
 
 
+def test_the_log_leaves_out_a_card_whose_issue_is_gone_from_the_file(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    board.add_card(
+        "[DCT-40] Issue, которого больше нет в файле",
+        "т\n\ndictum:DCT-40 run:прогон-сорок local:I-404",
+    )
+
+    publish(issues_file(tmp_path, run_id="прогон-сорок"))
+
+    journal = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
+    assert "I-404" not in journal
+
+
 def test_publish_records_the_cards_it_made_before_a_later_one_failed(
     board: FakeBoard, tmp_path: Path
 ) -> None:
     board.fail_after_cards = 3
 
-    with pytest.raises(Exception):
+    with pytest.raises(TrelloError):
         publish(issues_file(tmp_path))
 
     journal = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
@@ -425,8 +534,28 @@ def test_publish_refuses_an_invalid_issues_file_before_touching_the_board(
     with pytest.raises(InvalidIssues) as refused:
         publish(issues_file(tmp_path, BROKEN_ISSUES))
 
-    assert refused.value.problems
+    assert any("title" in problem for problem in refused.value.problems)
     assert not respx_mock.calls
+
+
+def test_a_marker_without_the_run_and_the_local_is_not_a_marker() -> None:
+    old_format = TrelloCard(
+        id="card-1", name="имя", desc="текст\n\ndictum:I-001", url="u", idList="list-1"
+    )
+
+    assert marked_cards([old_format]) == []
+
+
+def test_the_report_orders_keys_by_number_not_by_text(capsys: pytest.CaptureFixture[str]) -> None:
+    made = [
+        CardOutcome(local_id=f"I-{n:03}", key=f"DCT-{n}", phase=1, status="created", url="u")
+        for n in range(1, 13)
+    ]
+
+    report(made)
+
+    printed = [line.split()[0] for line in capsys.readouterr().out.splitlines() if "DCT-" in line]
+    assert printed == [f"DCT-{n}" for n in range(1, 13)]
 
 
 def test_marker_survives_indentation_carriage_returns_and_quotation() -> None:
@@ -434,14 +563,14 @@ def test_marker_survives_indentation_carriage_returns_and_quotation() -> None:
         return TrelloCard(id="card-1", name="имя", desc=desc, url="u", idList="list-1")
 
     crlf = "текст\r\n\r\ndictum:DCT-1 run:abc local:I-001\r\n"
-    assert board_cards([card(crlf)])[0].key == "DCT-1"
+    assert marked_cards([card(crlf)])[0].key == "DCT-1"
     indented = "текст\n  dictum:DCT-1 run:abc local:I-001  "
-    assert board_cards([card(indented)])[0].local_id == "I-001"
+    assert marked_cards([card(indented)])[0].local_id == "I-001"
     quoted = (
         "как в dictum:DCT-9 run:x local:I-009, только наоборот\n"
         "dictum:DCT-9 run:x local:I-009\n\nтекст\n\ndictum:DCT-1 run:abc local:I-001"
     )
-    assert board_cards([card(quoted)])[0].key == "DCT-1"
+    assert marked_cards([card(quoted)])[0].key == "DCT-1"
 
 
 def test_main_reports_the_problems_of_an_invalid_issues_file(

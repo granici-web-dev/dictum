@@ -42,6 +42,24 @@ def test_a_duplicate_identifier_is_reported() -> None:
     assert problems_of(data) == ["идентификатор I-001 встречается несколько раз"]
 
 
+def test_a_deferred_scope_without_a_title_is_reported() -> None:
+    data = real_issues()
+    del data["deferred"][0]["title"]
+
+    problems = check_issues(json.dumps(data, ensure_ascii=False))
+
+    assert any("title" in problem for problem in problems)
+
+
+def test_a_scope_id_shared_by_two_deferred_scopes_is_reported() -> None:
+    data = real_issues()
+    data["deferred"][1]["scope_id"] = data["deferred"][0]["scope_id"]
+
+    problems = check_issues(json.dumps(data, ensure_ascii=False))
+
+    assert any("встречается несколько раз" in problem for problem in problems)
+
+
 def test_a_dependency_on_a_missing_issue_is_reported() -> None:
     data = real_issues()
     data["issues"][2]["depends_on"] = ["I-404"]
