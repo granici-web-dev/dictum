@@ -8,6 +8,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from typing import Any
+
 from pydantic import ValidationError
 
 from app.models import IssuesFile
@@ -38,6 +40,16 @@ def find_cycle(graph: dict[str, list[str]]) -> list[str] | None:
     return None
 
 
+def problem_location(parsed: Any, location: tuple[Any, ...]) -> str:
+    path = ".".join(str(part) for part in location)
+    if len(location) < 2 or location[0] != "issues":
+        return path
+    try:
+        return ".".join([parsed["issues"][location[1]]["id"], *(str(p) for p in location[2:])])
+    except (KeyError, IndexError, TypeError):
+        return path
+
+
 def check_issues(text: str) -> list[str]:
     try:
         parsed = json.loads(text)
@@ -47,7 +59,7 @@ def check_issues(text: str) -> list[str]:
         issues_file = IssuesFile.model_validate(parsed)
     except ValidationError as error:
         return [
-            f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
+            f"{problem_location(parsed, problem['loc'])}: {problem['msg']}"
             for problem in error.errors()
         ]
 
@@ -96,8 +108,8 @@ def main(path: str) -> int:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    issues_file = IssuesFile.model_validate(json.loads(text))
-    print(f"ok: {len(issues_file.issues)} issues, {len(issues_file.phases)} phases")
+    parsed = json.loads(text)
+    print(f"ok: {len(parsed['issues'])} issues, {len(parsed['phases'])} phases")
     return 0
 
 

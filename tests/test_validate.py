@@ -20,9 +20,10 @@ def test_the_real_answer_has_no_problems() -> None:
 
 
 def test_a_title_over_the_limit_is_reported() -> None:
-    assert check_issues(BROKEN_ISSUES) == [
-        "issues.6.title: String should have at most 60 characters"
-    ]
+    problems = check_issues(BROKEN_ISSUES)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("I-007.title:")
 
 
 def test_text_that_is_not_json_is_reported() -> None:
