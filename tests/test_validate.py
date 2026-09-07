@@ -36,7 +36,7 @@ def test_a_duplicate_identifier_is_reported() -> None:
     data = real_issues()
     data["issues"][1]["id"] = data["issues"][0]["id"]
 
-    assert "идентификатор I-001 встречается 2 раза" in problems_of(data)
+    assert problems_of(data) == ["идентификатор I-001 встречается несколько раз"]
 
 
 def test_a_dependency_on_a_missing_issue_is_reported() -> None:
@@ -78,3 +78,27 @@ def test_the_command_exits_nonzero_on_a_broken_file(tmp_path: Path) -> None:
 
     assert main(str(broken)) == 1
     assert main(str(FIXTURES / "issues_real.json")) == 0
+
+
+def test_a_phase_that_is_not_declared_is_reported() -> None:
+    data = real_issues()
+    data["issues"][3]["phase"] = 9
+
+    assert "I-004 стоит в фазе 9, которой нет в phases" in problems_of(data)
+
+
+def test_every_problem_is_reported_not_only_the_first() -> None:
+    data = real_issues()
+    data["issues"][2]["depends_on"] = ["I-404"]
+    first, last = data["issues"][0], data["issues"][-1]
+    first["depends_on"] = [last["id"]]
+
+    assert len(problems_of(data)) == 2
+
+
+def test_a_cycle_away_from_the_first_issue_is_reported() -> None:
+    data = real_issues()
+    data["issues"][-1]["depends_on"] = [data["issues"][-2]["id"]]
+    data["issues"][-2]["depends_on"] = [data["issues"][-1]["id"]]
+
+    assert any("цикл в зависимостях" in problem for problem in problems_of(data))

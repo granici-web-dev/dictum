@@ -52,10 +52,21 @@ def check_issues(text: str) -> list[str]:
         ]
 
     issues = issues_file.issues
-    problems = [
-        f"идентификатор {id_} встречается {count} раза"
+    duplicates = [
+        f"идентификатор {id_} встречается несколько раз"
         for id_, count in sorted(Counter(i.id for i in issues).items())
         if count > 1
+    ]
+    # Ниже граф строится по id как по ключу, а с дублями такой граф читается неоднозначно:
+    # настоящий цикл на дублирующемся id потерялся бы молча.
+    if duplicates:
+        return duplicates
+
+    declared_phases = {phase.n for phase in issues_file.phases}
+    problems = [
+        f"{i.id} стоит в фазе {i.phase}, которой нет в phases"
+        for i in issues
+        if i.phase not in declared_phases
     ]
     phase_of = {i.id: i.phase for i in issues}
     problems += [
