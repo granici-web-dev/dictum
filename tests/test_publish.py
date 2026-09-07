@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 import respx
 
@@ -18,7 +17,7 @@ from app.publish import (
     publish,
     published_cards,
 )
-from app.trello import TrelloCard
+from app.trello import TrelloCard, TrelloError
 from tests.helpers import BROKEN_ISSUES, REAL_ISSUES, FakeBoard, real_issues
 
 
@@ -277,12 +276,26 @@ def test_publish_records_the_cards_it_made_before_a_later_one_failed(
     log_path = tmp_path / "publish.json"
     board.fail_after_cards = 3
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(TrelloError):
         publish(REAL_ISSUES, log_path)
 
     journal = json.loads(log_path.read_text(encoding="utf-8"))
     assert len(journal) == 3
     assert all(entry["url"].startswith("https://trello.com/c/") for entry in journal.values())
+
+
+def test_a_failing_publish_never_shows_the_key_or_the_token(
+    board: FakeBoard, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(settings, "trello_key", "key-that-must-not-leak")
+    monkeypatch.setattr(settings, "trello_token", "token-that-must-not-leak")
+    board.fail_after_cards = 1
+
+    with pytest.raises(TrelloError) as refused:
+        publish(REAL_ISSUES, tmp_path / "publish.json")
+
+    assert "must-not-leak" not in str(refused.value)
+    assert "POST /cards" in str(refused.value)
 
 
 def test_publish_logs_every_issue_and_deferred_scope(board: FakeBoard, tmp_path: Path) -> None:

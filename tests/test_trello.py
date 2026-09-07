@@ -5,7 +5,13 @@ import pytest
 import respx
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
-from app.trello import RETRY_PAUSE_SECONDS, Trello, open_trello, pause_before_retry
+from app.trello import (
+    RETRY_PAUSE_SECONDS,
+    Trello,
+    TrelloError,
+    open_trello,
+    pause_before_retry,
+)
 
 
 def card_body(**changes: Any) -> dict[str, Any]:
@@ -88,7 +94,7 @@ def test_a_failing_write_is_not_repeated(client: Trello, respx_mock: respx.MockR
         httpx.Response(500, json={"message": "Trello is down"})
     )
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(TrelloError):
         client.create_card("list-1", "Заголовок", "Текст", ["label-1"], 1)
 
     assert len(route.calls) == 1
@@ -104,6 +110,23 @@ def test_a_failing_read_is_repeated(client: Trello, respx_mock: respx.MockRouter
 
     assert [item.name for item in client.lists()] == ["Backlog"]
     assert len(route.calls) == 2
+
+
+def test_an_error_names_the_call_without_the_credentials(
+    client: Trello, respx_mock: respx.MockRouter
+) -> None:
+    respx_mock.get("https://api.trello.com/1/boards/board1/lists").mock(
+        httpx.Response(401, text="invalid token")
+    )
+
+    with pytest.raises(TrelloError) as refused:
+        client.lists()
+
+    message = str(refused.value)
+    assert "test-key" not in message and "test-token" not in message
+    assert "401" in message and "/boards/board1/lists" in message
+    assert "invalid token" in message
+    assert "TRELLO_KEY" in message
 
 
 def test_open_trello_refuses_without_allow_live_api(monkeypatch: pytest.MonkeyPatch) -> None:

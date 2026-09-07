@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from app.config import ConfigError
 from app.models import Area, Deferred, Issue, IssuesFile, Phase
-from app.trello import Trello, TrelloCard, open_trello
+from app.trello import Trello, TrelloCard, TrelloError, open_trello
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         for problem in invalid.problems:
             print(f"  {problem}", file=sys.stderr)
         return EXIT_FAILED
-    except (ConfigError, httpx.HTTPError) as error:
+    except (ConfigError, TrelloError, httpx.HTTPError) as error:
         logger.error("%s", error)
         return EXIT_FAILED
     report(outcomes)

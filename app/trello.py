@@ -60,6 +60,21 @@ def pause_before_retry(response: httpx.Response, attempt: int) -> float:
     return RETRY_PAUSE_SECONDS * doubling
 
 
+class TrelloError(RuntimeError):
+    pass
+
+
+CREDENTIAL_STATUSES = frozenset({401, 403})
+
+
+def failure_detail(response: httpx.Response) -> str:
+    text = response.text.strip()
+    said = text[:200] if text else response.reason_phrase
+    if response.status_code in CREDENTIAL_STATUSES:
+        return f"{said}. Проверьте TRELLO_KEY и TRELLO_TOKEN в .env."
+    return said
+
+
 def worth_retrying(method: str, status: int) -> bool:
     # Ошибку сервера повторяем только на чтении: POST мог дойти до Trello и потерять ответ,
     # и второй такой же создал бы вторую карточку. Дубль на доске хуже упавшего прогона.
@@ -91,7 +106,13 @@ class Trello:
                 data=fields,
             )
             if attempt == ATTEMPTS - 1 or not worth_retrying(method, response.status_code):
-                response.raise_for_status()
+                # Своё исключение вместо raise_for_status: его текст несёт полный URL,
+                # а в нём ключ и токен, и дальше они уходят в лог (CLAUDE.md, правило 7).
+                if response.is_error:
+                    raise TrelloError(
+                        f"Trello ответил {response.status_code} на {method} {path}: "
+                        f"{failure_detail(response)}"
+                    )
                 return response.json()
             pause = pause_before_retry(response, attempt)
             logger.warning(
