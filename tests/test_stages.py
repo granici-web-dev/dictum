@@ -100,6 +100,15 @@ def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
     ]
 
 
+def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
+    requests = llm([ok('<file path="outputs/brief.md">\n# Бриф\n</file>')])
+
+    run_stage("brief", {"inputs/idea.md": "# Идея"}, params={"mode": "batch", "lang": "ru"})
+
+    content = request_body(requests[0])["messages"][0]["content"]
+    assert content.startswith("<params>\nmode: batch\nlang: ru\n</params>")
+
+
 def test_run_stage_appends_user_edit_and_history(llm: InstallResponses) -> None:
     requests = llm([ok(IDEA_BLOCK)])
     history: list[anthropic.types.MessageParam] = [

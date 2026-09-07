@@ -65,10 +65,11 @@
 - Идемпотентность: повторный publish того же `issues.json` не создаёт дублей (`publish_log`).
 
 ## 7. Вызов LLM-стадий
-`app/stages.py::run_stage(stage, inputs: dict[str, str], user_edit: str | None, history: list[MessageParam] | None) -> StageResult`
+`app/stages.py::run_stage(stage, inputs: dict[str, str], user_edit=None, history=None, params=None) -> StageResult`
 - `inputs`: путь → содержимое; пути те же, что упоминают промпты (`inputs/transcript.md`, `outputs/brief.md`, `templates/prd_oneshot.md`).
 - system = `.claude/commands/<stage>.md` + `templates/api_mode.md` (режим API: файлы приложены в тегах `<file path="...">`, сохранять нельзя, итоговые файлы выводятся в таких же тегах, ничего вне тегов).
-- user = `<file>`-блоки входов + `<user_edit>`, если есть. `history` — предыдущие ходы диалога (brief, P2-04), вставляются перед текущим сообщением.
+- user = `<params>` (если есть) + `<file>`-блоки входов + `<user_edit>`, если есть. `history` — предыдущие ходы диалога (brief, P2-04), вставляются перед текущим сообщением.
+- `params` — параметры запуска стадии (`mode`, `lang`): `brief` вызывается с `mode: batch`, `research` — с `mode` по `kind` брифа. Промпты написаны для Claude Code, где стадия ведёт диалог; в режиме API диалога нет, поэтому `templates/api_mode.md` запрещает вопросы и требует помечать неясное как `[уточнить: ...]`.
 - `StageResult`: `files` (путь → содержимое из `<file>`-тегов ответа), `model`, `input_tokens`, `output_tokens`, `duration_ms`. Файлы на диск пишет вызывающий: CLI в `outputs/`, воркер в `runs/<run_id>/` с версиями (§4).
 - Модель: `ANTHROPIC_MODEL` (по умолчанию Claude Sonnet); для `decompose` — `ANTHROPIC_MODEL_DECOMPOSE`. Thinking-блоки ответа игнорируются, берутся text-блоки.
 - Каждый вызов логируется: stage, model, токены, длительность; run_id добавляет воркер (фаза 2).

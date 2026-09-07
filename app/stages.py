@@ -47,12 +47,16 @@ def anthropic_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.anthropic_api_key or None, max_retries=2)
 
 
-def build_system_prompt(stage: str) -> str:
-    return load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8")
-
-
-def build_user_message(inputs: dict[str, str], user_edit: str | None) -> str:
-    parts = [f'<file path="{path}">\n{content}\n</file>' for path, content in inputs.items()]
+def build_user_message(
+    inputs: dict[str, str],
+    user_edit: str | None,
+    params: dict[str, str] | None,
+) -> str:
+    parts = []
+    if params:
+        rendered = "\n".join(f"{name}: {value}" for name, value in params.items())
+        parts.append(f"<params>\n{rendered}\n</params>")
+    parts += [f'<file path="{path}">\n{content}\n</file>' for path, content in inputs.items()]
     if user_edit:
         parts.append(f"<user_edit>\n{user_edit}\n</user_edit>")
     return "\n\n".join(parts)
@@ -67,17 +71,18 @@ def run_stage(
     inputs: dict[str, str],
     user_edit: str | None = None,
     history: list[MessageParam] | None = None,
+    params: dict[str, str] | None = None,
 ) -> StageResult:
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
     messages: list[MessageParam] = [
         *(history or []),
-        {"role": "user", "content": build_user_message(inputs, user_edit)},
+        {"role": "user", "content": build_user_message(inputs, user_edit, params)},
     ]
     started = time.perf_counter()
     response = anthropic_client().messages.create(
         model=model,
         max_tokens=settings.anthropic_max_tokens,
-        system=build_system_prompt(stage),
+        system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
         messages=messages,
     )
     duration_ms = int((time.perf_counter() - started) * 1000)
