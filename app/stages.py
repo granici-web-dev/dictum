@@ -15,6 +15,7 @@ from anthropic.types import Message, MessageParam
 from pydantic import BaseModel
 
 from app.config import settings
+from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +34,26 @@ STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
 
-REPAIR_REQUEST = (
-    "В ответе нет ни одного тега <file path=\"...\">. "
-    "Верни тот же самый текст целиком, ничего не переписывая и не сокращая, "
-    "обёрнутый в теги по формату из системного промпта."
-)
+NO_FILE_BLOCKS = 'в ответе нет ни одного тега <file path="...">'
+
+
+def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
+    if not files:
+        return [NO_FILE_BLOCKS]
+    if frozenset(files) not in STAGE_OUTPUTS[stage]:
+        return []
+    if stage == "decompose":
+        return check_issues(files["outputs/issues.json"])
+    return []
+
+
+def repair_request(problems: list[str]) -> str:
+    listed = "\n".join(f"- {problem}" for problem in problems)
+    return (
+        f"Предыдущий ответ не прошёл проверку:\n{listed}\n\n"
+        "Исправь перечисленное и верни результат целиком в тегах <file path=\"...\">. "
+        "Больше ничего не меняй: идентификаторы, зависимости и оценки должны остаться прежними."
+    )
 
 
 class StageResult(BaseModel):
@@ -178,14 +194,15 @@ def run_stage(
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
 
-    if not files:
+    problems = repairable_problems(stage, files)
+    if problems:
         repair, repair_ms = ask_model(
             stage,
             model,
             [
                 *messages,
                 {"role": "assistant", "content": raw},
-                {"role": "user", "content": REPAIR_REQUEST},
+                {"role": "user", "content": repair_request(problems)},
             ],
         )
         duration_ms += repair_ms
@@ -194,11 +211,14 @@ def run_stage(
         response = repair
         raw = answer_text(stage, repair)
         files = parse_file_blocks(raw)
+        problems = repairable_problems(stage, files)
 
     if frozenset(files) not in STAGE_OUTPUTS[stage]:
         expected = " or ".join(", ".join(sorted(paths)) for paths in STAGE_OUTPUTS[stage])
         got = ", ".join(sorted(files)) or "no <file> blocks"
         raise StageError(f"{stage}: expected {expected}, got {got}", raw)
+    if problems:
+        raise StageError(f"{stage}: " + "; ".join(problems), raw)
     return StageResult(
         files=files,
         model=response.model,

@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -36,3 +37,15 @@ def server_error() -> httpx2.Response:
 def request_body(request: httpx2.Request) -> dict[str, Any]:
     body: dict[str, Any] = json.loads(request.content)
     return body
+
+
+REAL_ISSUES = (Path(__file__).parent.parent / "fixtures/issues_real.json").read_text(
+    encoding="utf-8"
+)
+
+
+def decompose_answer(issues_json: str = REAL_ISSUES) -> str:
+    return (
+        f'<file path="outputs/issues.json">\n{issues_json}\n</file>\n'
+        '<file path="outputs/issues.md">\n# Issues\n\n## Фаза 1\n</file>'
+    )

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import anthropic
 import httpx2
 import pytest
@@ -13,7 +15,14 @@ from app.stages import (
     load_prompt,
     run_stage,
 )
-from tests.helpers import InstallResponses, ok, request_body, server_error
+from tests.helpers import (
+    InstallResponses,
+    REAL_ISSUES,
+    decompose_answer,
+    ok,
+    request_body,
+    server_error,
+)
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'
@@ -64,18 +73,12 @@ def test_no_request_leaves_the_process_without_the_live_flag(
 
 
 def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
-    two_files = (
-        '<file path="outputs/issues.json">\n{"issues": []}\n</file>\n'
-        '<file path="outputs/issues.md">\n# Issues\n</file>'
-    )
-    llm([ok(two_files)])
+    llm([ok(decompose_answer())])
 
     result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
-    assert result.files == {
-        "outputs/issues.json": '{"issues": []}\n',
-        "outputs/issues.md": "# Issues\n",
-    }
+    assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
+    assert result.files["outputs/issues.md"].endswith("## Фаза 1\n")
     assert result.model == "claude-sonnet-5"
     assert (result.input_tokens, result.output_tokens) == (120, 30)
 
@@ -131,11 +134,7 @@ def test_run_stage_uses_decompose_model(
     llm: InstallResponses, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(settings, "anthropic_model_decompose", "claude-opus-5")
-    both = (
-        '<file path="outputs/issues.json">\n{}\n</file>\n'
-        '<file path="outputs/issues.md">\n# Issues\n</file>'
-    )
-    requests = llm([ok(both)])
+    requests = llm([ok(decompose_answer())])
 
     run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
@@ -180,7 +179,7 @@ def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: Install
 
 
 def test_run_stage_raises_when_decompose_returns_only_one_file(llm: InstallResponses) -> None:
-    llm([ok('<file path="outputs/issues.json">\n{}\n</file>')])
+    llm([ok(f'<file path="outputs/issues.json">\n{REAL_ISSUES}\n</file>')])
 
     with pytest.raises(StageError, match="expected outputs/issues.json, outputs/issues.md"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"})
@@ -206,8 +205,33 @@ def test_run_stage_asks_again_when_the_answer_has_no_file_blocks(llm: InstallRes
     assert len(requests) == 2
     repair = request_body(requests[1])["messages"]
     assert repair[-2] == {"role": "assistant", "content": "Вот идея, но я забыл теги."}
-    assert repair[-1]["content"].startswith("В ответе нет ни одного тега")
+    assert 'в ответе нет ни одного тега <file path="...">' in repair[-1]["content"]
     assert (result.input_tokens, result.output_tokens) == (240, 60)
+
+
+def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
+    llm: InstallResponses,
+) -> None:
+    broken = (Path("fixtures/issues_title_too_long.json")).read_text(encoding="utf-8")
+    requests = llm([ok(decompose_answer(broken)), ok(decompose_answer())])
+
+    result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
+
+    assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
+    assert len(requests) == 2
+    complaint = request_body(requests[1])["messages"][-1]["content"]
+    assert "issues.6.title: String should have at most 60 characters" in complaint
+    assert "идентификаторы, зависимости и оценки должны остаться прежними" in complaint
+
+
+def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:
+    broken = (Path("fixtures/issues_title_too_long.json")).read_text(encoding="utf-8")
+    requests = llm([ok(decompose_answer(broken)), ok(decompose_answer(broken))])
+
+    with pytest.raises(StageError, match="String should have at most 60 characters"):
+        run_stage("decompose", {"outputs/prd.md": "# PRD"})
+
+    assert len(requests) == 2
 
 
 def test_run_stage_gives_up_after_one_repair_attempt(llm: InstallResponses) -> None:

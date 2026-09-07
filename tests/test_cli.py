@@ -16,7 +16,13 @@ from app.cli import (
 from app.stages import STAGE_OUTPUTS
 from app import stages
 from app.config import settings
-from tests.helpers import InstallResponses, ok, request_body, server_error
+from tests.helpers import (
+    InstallResponses,
+    decompose_answer,
+    ok,
+    request_body,
+    server_error,
+)
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n---\nsource: text\nlang: ru\nconfidence: high\n---\n\n'
@@ -35,10 +41,7 @@ PRD_BLOCK = (
     "| ID | Сценарий | Приоритет | Зависит от | Критерий готовности |\n"
     "|---|---|---|---|---|\n| S1 | Утренний список | Must | — | Список пришёл в 9:00 |\n</file>"
 )
-ISSUES_BLOCKS = (
-    '<file path="outputs/issues.json">\n{"issues": []}\n</file>\n'
-    '<file path="outputs/issues.md">\n# Issues\n\n## Фаза 1\n</file>'
-)
+ISSUES_BLOCKS = decompose_answer()
 TEXT = "Хочу, чтобы бот напоминал о дедлайнах в Trello"
 PRD_FROM_A_REAL_RUN = (Path(__file__).parent.parent / "fixtures/prd_real.md").read_text(
     encoding="utf-8"
