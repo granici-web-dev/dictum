@@ -84,7 +84,7 @@ def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
 
     result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
-    assert result.files == {"outputs/issues.json": '{"issues": []}', "outputs/issues.md": "# Issues"}
+    assert result.files == {"outputs/issues.json": '{"issues": []}\n', "outputs/issues.md": "# Issues\n"}
     assert (result.model, result.input_tokens, result.output_tokens) == ("claude-sonnet-5", 120, 30)
 
 
@@ -177,6 +177,14 @@ def test_run_stage_raises_when_decompose_returns_only_one_file(llm: InstallRespo
 
     with pytest.raises(StageError, match="expected outputs/issues.json, outputs/issues.md"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"})
+
+
+def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) -> None:
+    twice = '<file path="inputs/idea.md">\n# Первая\n</file>\n<file path="inputs/idea.md">\n# Вторая\n</file>'
+    llm([ok(twice)])
+
+    with pytest.raises(StageError, match="two <file> blocks share the path inputs/idea.md"):
+        run_stage("intake", INPUTS)
 
 
 def test_run_stage_raises_when_no_file_block(llm: InstallResponses) -> None:

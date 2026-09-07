@@ -28,7 +28,7 @@ STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
     "decompose": (frozenset({"outputs/issues.json", "outputs/issues.md"}),),
 }
 
-FILE_BLOCK = re.compile(r'<file path="([^"]+)">\n?(.*?)</file>', re.DOTALL)
+FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
 
 
 class StageResult(BaseModel):
@@ -80,7 +80,12 @@ def build_user_message(
 
 
 def parse_file_blocks(text: str) -> dict[str, str]:
-    return {path: body.strip() for path, body in FILE_BLOCK.findall(text)}
+    files: dict[str, str] = {}
+    for path, body in FILE_BLOCK.findall(text):
+        if path in files:
+            raise StageError(f"two <file> blocks share the path {path}", text)
+        files[path] = body.strip("\r\n") + "\n"
+    return files
 
 
 def run_stage(
