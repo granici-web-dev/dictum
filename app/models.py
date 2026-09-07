@@ -20,8 +20,8 @@ class Issue(BaseModel):
     description: str
     dod: list[str] = Field(min_length=2)
     depends_on: list[str] = Field(default_factory=list)
-    estimate: Literal["S", "M", "L"] = "M"
-    test_hint: str = ""
+    estimate: Literal["S", "M", "L"]
+    test_hint: str
 
 
 class Deferred(BaseModel):
