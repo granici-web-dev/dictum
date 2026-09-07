@@ -3,6 +3,7 @@
 Отображение issues на карточки живёт в app/publish.py, здесь его нет.
 """
 
+import logging
 import time
 from typing import Any
 
@@ -10,6 +11,8 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
+
+logger = logging.getLogger(__name__)
 
 API = "https://api.trello.com/1"
 TOO_MANY_REQUESTS = 429
@@ -90,7 +93,15 @@ class Trello:
             if attempt == ATTEMPTS - 1 or not worth_retrying(method, response.status_code):
                 response.raise_for_status()
                 return response.json()
-            time.sleep(pause_before_retry(response, attempt))
+            pause = pause_before_retry(response, attempt)
+            logger.warning(
+                "trello %s %s ответил %d, повтор через %.1f с",
+                method,
+                path,
+                response.status_code,
+                pause,
+            )
+            time.sleep(pause)
             attempt += 1
 
     def get(self, path: str, **query: str) -> Any:
