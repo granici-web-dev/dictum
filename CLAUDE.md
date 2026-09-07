@@ -8,14 +8,7 @@
 - `.claude/commands/*.md` — пять промпт-стадий (`/intake /brief /research /prd /decompose`) + `/publish`. Это **движок продукта**: в коде они вызываются как системные промпты через Anthropic API. Правишь промпт — правишь продукт.
 - `templates/prd_oneshot.md` — шаблон PRD. Формат таблицы «Скоп MVP» — контракт для `/decompose`.
 - `inputs/`, `outputs/` — рабочие файлы одного прогона (в git не идут).
-
-## Стек (не менять без записи в SPEC.md)
-- Python 3.12, `uv`, `ruff`, `mypy --strict`, `pytest`
-- `python-telegram-bot` (long polling на MVP, webhook позже)
-- Celery + Redis для стадий пайплайна; PostgreSQL + SQLAlchemy 2.0 + Alembic для runs/gates
-- Anthropic API (Claude) для всех LLM-стадий; OpenAI Whisper API для транскрипции; `ffmpeg` на воркере
-- Trello REST через `httpx` (без тяжёлых SDK)
-- Хостинг и обработка только в EU
+- Соглашения — в `CONVENTIONS.md` (принципы, стек, тестирование). Стек не менять без записи в `SPEC.md`.
 
 ## Правила работы
 1. **Ворота — не опция.** После `intake` (если идей > 1 или confidence low), после `brief`, после `decompose` пайплайн останавливается и ждёт кнопку в Telegram. Режим `auto_approve` существует только для демо и включается явно флагом.
