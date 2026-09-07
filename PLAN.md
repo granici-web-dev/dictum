@@ -4,7 +4,7 @@
 
 ## Фаза 1 — Сквозной сценарий (текст → Trello)  ← ТЕКУЩАЯ
 - [x] P1-01 Скелет: uv, ruff, mypy strict, pytest, Makefile, docker-compose (postgres, redis), `.env.example` — проверить, что `make test` зелёный на заглушках
-- [ ] P1-02 `app/stages.py`: чтение промпта из `.claude/commands/`, вызов Anthropic, запись артефакта; тест с замоканным клиентом
+- [x] P1-02 `app/stages.py`: чтение промпта из `.claude/commands/`, вызов Anthropic, запись артефакта; тест с замоканным клиентом
 - [ ] P1-03 `make run-text`: текст → intake → brief(batch, без диалога: «хватит» сразу) → prd → decompose; артефакты в `outputs/`
 - [ ] P1-04 Валидация `issues.json`: ids уникальны, `depends_on` существуют, нет циклов; тест на фикстуре
 - [ ] P1-05 `app/trello.py`: списки по фазам, карточки, чеклист DoD, labels по area; идемпотентность через `publish_log`; тест с замоканным httpx (respx)

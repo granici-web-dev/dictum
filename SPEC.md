@@ -65,12 +65,14 @@
 - Идемпотентность: повторный publish того же `issues.json` не создаёт дублей (`publish_log`).
 
 ## 7. Вызов LLM-стадий
-`app/stages.py::run_stage(name, inputs: dict, user_edit: str | None) -> str`
-- system = содержимое `.claude/commands/<name>.md`
-- user = конкатенация входных артефактов + `user_edit`
-- Модель: по умолчанию Claude Sonnet; для `decompose` допустим более сильный (флаг в .env).
-- Все вызовы логируются с run_id, стадией, токенами, длительностью.
-- Ретрай ×2 на сетевые ошибки; невалидный JSON от `decompose` → один повтор с сообщением об ошибке валидации.
+`app/stages.py::run_stage(stage, inputs: dict[str, str], user_edit: str | None, history: list[MessageParam] | None) -> StageResult`
+- `inputs`: путь → содержимое; пути те же, что упоминают промпты (`inputs/transcript.md`, `outputs/brief.md`, `templates/prd_oneshot.md`).
+- system = `.claude/commands/<stage>.md` + `templates/api_mode.md` (режим API: файлы приложены в тегах `<file path="...">`, сохранять нельзя, итоговые файлы выводятся в таких же тегах, ничего вне тегов).
+- user = `<file>`-блоки входов + `<user_edit>`, если есть. `history` — предыдущие ходы диалога (brief, P2-04), вставляются перед текущим сообщением.
+- `StageResult`: `files` (путь → содержимое из `<file>`-тегов ответа), `model`, `input_tokens`, `output_tokens`, `duration_ms`. Файлы на диск пишет вызывающий: CLI в `outputs/`, воркер в `runs/<run_id>/` с версиями (§4).
+- Модель: `ANTHROPIC_MODEL` (по умолчанию Claude Sonnet); для `decompose` — `ANTHROPIC_MODEL_DECOMPOSE`. Thinking-блоки ответа игнорируются, берутся text-блоки.
+- Каждый вызов логируется: stage, model, токены, длительность; run_id добавляет воркер (фаза 2).
+- Ретраи: `max_retries=2` SDK Anthropic (сетевые ошибки, 408/409/429/5xx, экспоненциальный backoff). Ответ со `stop_reason != end_turn` или без `<file>`-тегов → `StageError` с полем `raw` (текст ответа), без повтора. Невалидный JSON от `decompose` → один повтор с сообщением об ошибке валидации через `user_edit` (P1-04).
 
 ## 8. Нефункциональное
 - EU-only: API-эндпоинты Anthropic/OpenAI с EU-регионом, где доступны; хостинг Hetzner.
