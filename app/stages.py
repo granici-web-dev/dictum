@@ -58,6 +58,10 @@ def load_prompt(stage: str) -> str:
     return (COMMANDS_DIR / f"{stage}.md").read_text(encoding="utf-8")
 
 
+def load_template(name: str) -> str:
+    return (ROOT / "templates" / name).read_text(encoding="utf-8")
+
+
 def http_client() -> DefaultHttpxClient:
     return DefaultHttpxClient()
 

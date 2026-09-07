@@ -1,4 +1,8 @@
-"""make run-text: прогон текста через стадии без Telegram. См. SPEC.md §7.1."""
+"""make run-text: прогон текста через стадии без Telegram.
+
+Артефакты пишутся относительно текущей директории, файлы репозитория читаются от его корня.
+См. SPEC.md §7.1.
+"""
 
 import argparse
 import logging
@@ -10,7 +14,7 @@ import anthropic
 import frontmatter
 
 from app.config import settings
-from app.stages import ROOT, MissingApiKey, StageError, StageResult, run_stage
+from app.stages import MissingApiKey, StageError, StageResult, load_template, run_stage
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +94,7 @@ def run_pipeline(text: str, lang: str) -> int:
         {
             BRIEF: brief.files[BRIEF],
             RESEARCH: RESEARCH_SKIPPED,
-            PRD_TEMPLATE: (ROOT / PRD_TEMPLATE).read_text(encoding="utf-8"),
+            PRD_TEMPLATE: load_template("prd_oneshot.md"),
         },
     )
     run_and_write("decompose", {PRD: prd.files[PRD]})
