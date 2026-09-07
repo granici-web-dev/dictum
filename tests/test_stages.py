@@ -75,6 +75,14 @@ def test_all_stage_prompts_exist() -> None:
         assert "description:" in load_prompt(s)
 
 
+def test_anthropic_client_reports_a_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    stages.anthropic_client.cache_clear()
+
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is not set"):
+        stages.anthropic_client()
+
+
 def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
     two_files = (
         '<file path="outputs/issues.json">\n{"issues": []}\n</file>\n'
