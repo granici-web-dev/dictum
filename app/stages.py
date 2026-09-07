@@ -1,4 +1,7 @@
-"""LLM-стадии: промпт из .claude/commands/<stage>.md, вызов Anthropic, файлы из ответа. См. SPEC.md §7."""
+"""LLM-стадии: промпт из .claude/commands/<stage>.md, вызов Anthropic, файлы из ответа.
+
+См. SPEC.md §7.
+"""
 
 import logging
 import re
@@ -58,7 +61,9 @@ def http_client() -> DefaultHttpxClient:
 @cache
 def anthropic_client() -> anthropic.Anthropic:
     if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in."
+        )
     return anthropic.Anthropic(
         api_key=settings.anthropic_api_key,
         max_retries=2,

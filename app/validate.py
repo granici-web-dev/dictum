@@ -1,4 +1,7 @@
-"""python -m app.validate outputs/issues.json — проверка контракта. Задача P1-04 добавит поиск циклов."""
+"""python -m app.validate outputs/issues.json — проверка контракта.
+
+Задача P1-04 добавит поиск циклов.
+"""
 
 import json
 import sys

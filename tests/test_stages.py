@@ -11,8 +11,14 @@ from app import stages
 from app.config import settings
 from app.stages import STAGES, StageError, load_prompt, run_stage
 
-IDEA_BLOCK = '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n## Суть\nБот присылает список.\n</file>'
-BRIEF_BLOCK = '<file path="outputs/brief.md">\n# Бриф: напоминания\n\n## 1. Пользователи\nКоманда из пяти человек.\n</file>'
+IDEA_BLOCK = (
+    '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'
+    "## Суть\nБот присылает список.\n</file>"
+)
+BRIEF_BLOCK = (
+    '<file path="outputs/brief.md">\n# Бриф: напоминания\n\n'
+    "## 1. Пользователи\nКоманда из пяти человек.\n</file>"
+)
 INPUTS = {"inputs/transcript.md": "---\nsource: text\nlang: ru\n---\nХочу бота."}
 
 InstallResponses = Callable[[list[httpx2.Response]], list[httpx2.Request]]
@@ -92,8 +98,12 @@ def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
 
     result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
-    assert result.files == {"outputs/issues.json": '{"issues": []}\n', "outputs/issues.md": "# Issues\n"}
-    assert (result.model, result.input_tokens, result.output_tokens) == ("claude-sonnet-5", 120, 30)
+    assert result.files == {
+        "outputs/issues.json": '{"issues": []}\n',
+        "outputs/issues.md": "# Issues\n",
+    }
+    assert result.model == "claude-sonnet-5"
+    assert (result.input_tokens, result.output_tokens) == (120, 30)
 
 
 def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
@@ -106,9 +116,9 @@ def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
     assert body["max_tokens"] == settings.anthropic_max_tokens
     assert body["system"].startswith(load_prompt("intake"))
     assert "## Режим API" in body["system"]
-    assert body["messages"] == [
-        {"role": "user", "content": f'<file path="inputs/transcript.md">\n{INPUTS["inputs/transcript.md"]}\n</file>'}
-    ]
+    transcript = INPUTS["inputs/transcript.md"]
+    expected = f'<file path="inputs/transcript.md">\n{transcript}\n</file>'
+    assert body["messages"] == [{"role": "user", "content": expected}]
 
 
 def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
@@ -131,12 +141,18 @@ def test_run_stage_appends_user_edit_and_history(llm: InstallResponses) -> None:
 
     messages = request_body(requests[0])["messages"]
     assert messages[:2] == history
-    assert messages[2]["content"].endswith("<user_edit>\nУбери упоминание выходных\n</user_edit>")
+    edit = "<user_edit>\nУбери упоминание выходных\n</user_edit>"
+    assert messages[2]["content"].endswith(edit)
 
 
-def test_run_stage_uses_decompose_model(llm: InstallResponses, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_stage_uses_decompose_model(
+    llm: InstallResponses, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(settings, "anthropic_model_decompose", "claude-opus-5")
-    both = '<file path="outputs/issues.json">\n{}\n</file>\n<file path="outputs/issues.md">\n# Issues\n</file>'
+    both = (
+        '<file path="outputs/issues.json">\n{}\n</file>\n'
+        '<file path="outputs/issues.md">\n# Issues\n</file>'
+    )
     requests = llm([ok(both)])
 
     run_stage("decompose", {"outputs/prd.md": "# PRD"})
@@ -166,11 +182,12 @@ def test_run_stage_raises_after_third_server_error(
 
 
 def test_run_stage_raises_when_output_truncated(llm: InstallResponses) -> None:
-    llm([ok('<file path="inputs/idea.md">\n# Обрыв', stop_reason="max_tokens")])
+    truncated = '<file path="inputs/idea.md">\n# Обрыв'
+    llm([ok(truncated, stop_reason="max_tokens")])
 
     with pytest.raises(StageError, match="Raise ANTHROPIC_MAX_TOKENS") as exc_info:
         run_stage("intake", INPUTS)
-    assert exc_info.value.raw == '<file path="inputs/idea.md">\n# Обрыв'
+    assert exc_info.value.raw == truncated
 
 
 def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: InstallResponses) -> None:
@@ -188,7 +205,10 @@ def test_run_stage_raises_when_decompose_returns_only_one_file(llm: InstallRespo
 
 
 def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) -> None:
-    twice = '<file path="inputs/idea.md">\n# Первая\n</file>\n<file path="inputs/idea.md">\n# Вторая\n</file>'
+    twice = (
+        '<file path="inputs/idea.md">\n# Первая\n</file>\n'
+        '<file path="inputs/idea.md">\n# Вторая\n</file>'
+    )
     llm([ok(twice)])
 
     with pytest.raises(StageError, match="two <file> blocks share the path inputs/idea.md"):
