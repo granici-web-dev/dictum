@@ -100,7 +100,7 @@ def test_run_text_feeds_prd_the_brief_research_and_template(
 
     prd_message = request_body(requests[2])["messages"][0]["content"]
     assert '<file path="outputs/brief.md">' in prd_message
-    assert "Ресёрч пропущен по решению пользователя" in prd_message
+    assert "Ресёрч не запускался" in prd_message
     assert "Скоп MVP" in prd_message
 
 

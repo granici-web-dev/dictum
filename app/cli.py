@@ -21,7 +21,7 @@ BRIEF = "outputs/brief.md"
 RESEARCH = "outputs/research.md"
 PRD = "outputs/prd.md"
 PRD_TEMPLATE = "templates/prd_oneshot.md"
-RESEARCH_SKIPPED = "Ресёрч пропущен по решению пользователя\n"
+RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
 EXIT_OK = 0
 EXIT_STAGE_FAILED = 1
