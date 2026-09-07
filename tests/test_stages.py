@@ -219,7 +219,7 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
     assert len(requests) == 2
     complaint = request_body(requests[1])["messages"][-1]["content"]
     assert "issues.6.title: String should have at most 60 characters" in complaint
-    assert "идентификаторы, зависимости и оценки должны остаться прежними" in complaint
+    assert "Меняй только то, на что указано" in complaint
 
 
 def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:
