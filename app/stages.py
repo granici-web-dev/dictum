@@ -19,6 +19,14 @@ COMMANDS_DIR = ROOT / ".claude" / "commands"
 API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 STAGES = ("intake", "brief", "research", "prd", "decompose")
 
+STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
+    "intake": (frozenset({"inputs/idea.md"}), frozenset({"outputs/candidates.md"})),
+    "brief": (frozenset({"outputs/brief.md"}),),
+    "research": (frozenset({"outputs/research.md"}),),
+    "prd": (frozenset({"outputs/prd.md"}),),
+    "decompose": (frozenset({"outputs/issues.json", "outputs/issues.md"}),),
+}
+
 FILE_BLOCK = re.compile(r'<file path="([^"]+)">\n?(.*?)</file>', re.DOTALL)
 
 
@@ -96,10 +104,13 @@ def run_stage(
     )
     raw = "".join(block.text for block in response.content if block.type == "text")
     if response.stop_reason != "end_turn":
-        raise StageError(f"{stage}: model stopped with {response.stop_reason}", raw)
+        hint = " Raise ANTHROPIC_MAX_TOKENS." if response.stop_reason == "max_tokens" else ""
+        raise StageError(f"{stage}: model stopped with {response.stop_reason}.{hint}", raw)
     files = parse_file_blocks(raw)
-    if not files:
-        raise StageError(f"{stage}: response has no <file> blocks", raw)
+    if frozenset(files) not in STAGE_OUTPUTS[stage]:
+        expected = " or ".join(", ".join(sorted(paths)) for paths in STAGE_OUTPUTS[stage])
+        got = ", ".join(sorted(files)) or "no <file> blocks"
+        raise StageError(f"{stage}: expected {expected}, got {got}", raw)
     return StageResult(
         files=files,
         model=response.model,

@@ -12,6 +12,7 @@ from app.config import settings
 from app.stages import STAGES, StageError, load_prompt, run_stage
 
 IDEA_BLOCK = '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n## Суть\nБот присылает список.\n</file>'
+BRIEF_BLOCK = '<file path="outputs/brief.md">\n# Бриф: напоминания\n\n## 1. Пользователи\nКоманда из пяти человек.\n</file>'
 INPUTS = {"inputs/transcript.md": "---\nsource: text\nlang: ru\n---\nХочу бота."}
 
 InstallResponses = Callable[[list[httpx2.Response]], list[httpx2.Request]]
@@ -101,7 +102,7 @@ def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
 
 
 def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
-    requests = llm([ok('<file path="outputs/brief.md">\n# Бриф\n</file>')])
+    requests = llm([ok(BRIEF_BLOCK)])
 
     run_stage("brief", {"inputs/idea.md": "# Идея"}, params={"mode": "batch", "lang": "ru"})
 
@@ -110,7 +111,7 @@ def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
 
 
 def test_run_stage_appends_user_edit_and_history(llm: InstallResponses) -> None:
-    requests = llm([ok(IDEA_BLOCK)])
+    requests = llm([ok(BRIEF_BLOCK)])
     history: list[anthropic.types.MessageParam] = [
         {"role": "user", "content": "Кто пользователи?"},
         {"role": "assistant", "content": "Команда из пяти человек."},
@@ -125,7 +126,8 @@ def test_run_stage_appends_user_edit_and_history(llm: InstallResponses) -> None:
 
 def test_run_stage_uses_decompose_model(llm: InstallResponses, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "anthropic_model_decompose", "claude-opus-5")
-    requests = llm([ok('<file path="outputs/issues.json">\n{}\n</file>')])
+    both = '<file path="outputs/issues.json">\n{}\n</file>\n<file path="outputs/issues.md">\n# Issues\n</file>'
+    requests = llm([ok(both)])
 
     run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
@@ -152,14 +154,28 @@ def test_run_stage_raises_after_third_server_error(llm: InstallResponses) -> Non
 def test_run_stage_raises_when_output_truncated(llm: InstallResponses) -> None:
     llm([ok('<file path="inputs/idea.md">\n# Обрыв', stop_reason="max_tokens")])
 
-    with pytest.raises(StageError, match="max_tokens") as exc_info:
+    with pytest.raises(StageError, match="Raise ANTHROPIC_MAX_TOKENS") as exc_info:
         run_stage("intake", INPUTS)
     assert exc_info.value.raw == '<file path="inputs/idea.md">\n# Обрыв'
+
+
+def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: InstallResponses) -> None:
+    llm([ok('<file path="outputs/notes.md">\n# Заметки\n</file>')])
+
+    with pytest.raises(StageError, match="expected inputs/idea.md or outputs/candidates.md"):
+        run_stage("intake", INPUTS)
+
+
+def test_run_stage_raises_when_decompose_returns_only_one_file(llm: InstallResponses) -> None:
+    llm([ok('<file path="outputs/issues.json">\n{}\n</file>')])
+
+    with pytest.raises(StageError, match="expected outputs/issues.json, outputs/issues.md"):
+        run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
 
 def test_run_stage_raises_when_no_file_block(llm: InstallResponses) -> None:
     llm([ok("Вот идея: бот присылает список.")])
 
-    with pytest.raises(StageError, match="no <file> blocks") as exc_info:
+    with pytest.raises(StageError, match="got no <file> blocks") as exc_info:
         run_stage("intake", INPUTS)
     assert exc_info.value.raw == "Вот идея: бот присылает список."
