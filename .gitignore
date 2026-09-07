@@ -13,3 +13,8 @@ runs/
 *.wav
 .DS_Store
 .idea/
+
+# Инструментарий агентов: репозиторий помнит, какие скиллы стоят (skills-lock.json), а не их байты
+.agents/skills/
+.claude/skills/
+.impeccable/
