@@ -32,7 +32,7 @@ def test_every_request_carries_key_and_token(client: Trello, respx_mock: respx.M
     respx_mock.post("https://api.trello.com/1/cards").mock(httpx.Response(200, json=card_body()))
 
     client.lists()
-    client.create_card("list-1", "Заголовок", "Текст", ["label-1"])
+    client.create_card("list-1", "Заголовок", "Текст", ["label-1"], 1)
 
     for call in respx_mock.calls:
         assert call.request.url.params["key"] == "test-key"
@@ -46,7 +46,7 @@ def test_card_fields_go_in_the_body_not_the_url(
         httpx.Response(200, json=card_body())
     )
 
-    client.create_card("list-1", "Заголовок", "Текст", ["label-1", "label-2"])
+    client.create_card("list-1", "Заголовок", "Текст", ["label-1", "label-2"], 1)
 
     body = route.calls.last.request.content.decode()
     assert "idLabels=label-1%2Clabel-2" in body
@@ -77,7 +77,7 @@ def test_a_rate_limited_request_is_repeated(client: Trello, respx_mock: respx.Mo
         ]
     )
 
-    card = client.create_card("list-1", "Заголовок", "Текст", ["label-1"])
+    card = client.create_card("list-1", "Заголовок", "Текст", ["label-1"], 1)
 
     assert card.id == "card-1"
     assert len(route.calls) == 2
@@ -89,7 +89,7 @@ def test_a_failing_write_is_not_repeated(client: Trello, respx_mock: respx.MockR
     )
 
     with pytest.raises(httpx.HTTPStatusError):
-        client.create_card("list-1", "Заголовок", "Текст", ["label-1"])
+        client.create_card("list-1", "Заголовок", "Текст", ["label-1"], 1)
 
     assert len(route.calls) == 1
 

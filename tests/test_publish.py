@@ -129,6 +129,24 @@ def test_publish_attaches_the_card_of_every_dependency(board: FakeBoard, tmp_pat
     )
 
 
+def test_publish_lays_cards_out_in_the_order_of_the_file(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+
+    publish(REAL_ISSUES, tmp_path / "publish.json")
+
+    created = board.posted("/1/cards")
+    ordered = [fields["name"] for fields in created]
+    dependent, dependency = one(issues, "I-006"), one(issues, "I-010")
+    assert ordered.index(dependency.title) < ordered.index(dependent.title)
+    position = {fields["name"]: int(fields["pos"]) for fields in created}
+    assert position[dependent.title] < position[dependency.title]
+    assert [position[issue.title] for issue in issues.issues] == list(
+        range(1, len(issues.issues) + 1)
+    )
+
+
 def test_publish_orders_every_issue_after_all_of_its_dependencies() -> None:
     issues = real_issues()
     ordered = [issue.id for issue in in_dependency_order(issues.issues)]

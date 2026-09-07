@@ -97,6 +97,7 @@ class FakeBoard:
         list_id: str = "list-0",
         label_ids: str = "",
         archived: bool = False,
+        pos: str = "1",
     ) -> dict[str, Any]:
         card_id = self.new_id("card")
         created: dict[str, Any] = {
@@ -106,6 +107,7 @@ class FakeBoard:
             "url": f"https://trello.com/c/{card_id}",
             "idList": list_id,
             "idLabels": [item for item in label_ids.split(",") if item],
+            "pos": float(pos),
             "checklists": [],
             "attachments": [],
         }
@@ -159,7 +161,11 @@ class FakeBoard:
             return httpx.Response(
                 200,
                 json=self.add_card(
-                    fields["name"], fields["desc"], fields["idList"], fields["idLabels"]
+                    fields["name"],
+                    fields["desc"],
+                    fields["idList"],
+                    fields["idLabels"],
+                    pos=fields["pos"],
                 ),
             )
         if path.endswith("/checklists"):

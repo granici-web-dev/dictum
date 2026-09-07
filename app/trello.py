@@ -136,7 +136,7 @@ class Trello:
         ]
 
     def create_card(
-        self, list_id: str, name: str, description: str, label_ids: list[str]
+        self, list_id: str, name: str, description: str, label_ids: list[str], position: int
     ) -> TrelloCard:
         return TrelloCard.model_validate(
             self.post(
@@ -145,6 +145,7 @@ class Trello:
                 name=name,
                 desc=description,
                 idLabels=",".join(label_ids),
+                pos=str(position),
             )
         )
 

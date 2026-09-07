@@ -77,6 +77,7 @@ class PlannedCard(BaseModel):
     label_ids: list[str]
     checklist: list[str]
     depends_on: list[str]
+    position: int
 
 
 class CardOutcome(BaseModel):
@@ -152,6 +153,9 @@ def plan_cards(
     issues: IssuesFile, lists: dict[str, str], labels: dict[str, str]
 ) -> list[PlannedCard]:
     list_of_phase = {phase.n: lists[phase_list_name(phase)] for phase in issues.phases}
+    # Позиция берётся из порядка в файле, а не из порядка публикации: публикуем по зависимостям,
+    # и без этого I-010 лёг бы на доске выше I-006, что читается как сбитая нумерация.
+    position_of = {issue.id: number for number, issue in enumerate(issues.issues, 1)}
     planned = [
         PlannedCard(
             key=issue.id,
@@ -162,6 +166,7 @@ def plan_cards(
             label_ids=[labels[issue.area]],
             checklist=issue.dod,
             depends_on=issue.depends_on,
+            position=position_of[issue.id],
         )
         for issue in in_dependency_order(issues.issues)
     ]
@@ -175,8 +180,9 @@ def plan_cards(
             label_ids=[labels[DEFERRED]],
             checklist=[],
             depends_on=[],
+            position=number,
         )
-        for entry in issues.deferred
+        for number, entry in enumerate(issues.deferred, 1)
     ]
     return planned
 
@@ -243,7 +249,11 @@ def publish(issues_text: str, log_path: Path) -> list[CardOutcome]:
                 )
                 continue
             card = board.create_card(
-                planned.list_id, planned.name, planned.description, planned.label_ids
+                planned.list_id,
+                planned.name,
+                planned.description,
+                planned.label_ids,
+                planned.position,
             )
             if planned.checklist:
                 board.add_checklist(card.id, DOD, planned.checklist)
