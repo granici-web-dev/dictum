@@ -73,7 +73,7 @@ Do not change a row without recording the decision in `SPEC.md`.
 
 ### Worth testing
 - **Artifact contracts and validation.** `issues.json` schema, unknown `depends_on`, cycles, `estimate` and `test_hint`; frontmatter of `transcript.md` and `brief.md`; parsing of the PRD "Скоп MVP" table.
-- **External clients through mocks.** Trello: list creation, card, checklist and label creation, publish idempotency via the `dictum:<id>` marker read back from the board, one repeat on 429. Anthropic: prompt assembly, `user_edit` appended, retry on network error, one retry on invalid JSON. Whisper: chunking and merging of long audio.
+- **External clients through mocks.** Trello: list creation, card, checklist and label creation, publish idempotency via the `dictum:<KEY-N> run:<run_id> local:<id>` marker read back from the board, one repeat on 429. Anthropic: prompt assembly, `user_edit` appended, retry on network error, one retry on invalid JSON. Whisper: chunking and merging of long audio.
 - **Gates and run status transitions.** Pipeline stops after intake (candidates or low confidence), brief and decompose; consent blocks audio; `auto_approve` skips every gate except consent; 24 h timeout → `stalled`.
 - **Prompts and templates exist and have the right shape.** Each `.claude/commands/<stage>.md` exists with frontmatter; `templates/prd_oneshot.md` contains the scope table header.
 
