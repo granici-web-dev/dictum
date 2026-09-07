@@ -2,11 +2,12 @@ from collections.abc import Iterator
 
 import httpx2
 import pytest
+import respx
 from anthropic import DefaultHttpxClient
 
 from app import stages
 from app.config import settings
-from tests.helpers import InstallResponses
+from tests.helpers import FakeBoard, InstallResponses
 
 
 @pytest.fixture
@@ -30,3 +31,12 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
 
     yield install
     stages.anthropic_client.cache_clear()
+
+
+@pytest.fixture
+def board(respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> FakeBoard:
+    monkeypatch.setattr(settings, "allow_live_api", True)
+    monkeypatch.setattr(settings, "trello_key", "test-key")
+    monkeypatch.setattr(settings, "trello_token", "test-token")
+    monkeypatch.setattr(settings, "trello_board_id", "board1")
+    return FakeBoard(respx_mock)

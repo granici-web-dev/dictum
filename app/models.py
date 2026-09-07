@@ -4,18 +4,20 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+Area = Literal["frontend", "backend", "design", "infra", "research"]
+
 
 class Phase(BaseModel):
-    n: int
+    n: int = Field(ge=1)
     title: str
     goal: str
 
 
 class Issue(BaseModel):
     id: str = Field(pattern=r"^I-\d{3}$")
-    phase: int
+    phase: int = Field(ge=1)
     scope_id: str = Field(pattern=r"^S\d+$")
-    area: Literal["frontend", "backend", "design", "infra", "research"]
+    area: Area
     title: str = Field(max_length=60)
     description: str
     dod: list[str] = Field(min_length=2)
