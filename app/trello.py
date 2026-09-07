@@ -105,7 +105,10 @@ class Trello:
         ]
 
     def create_list(self, name: str) -> TrelloList:
-        return TrelloList.model_validate(self.post("/lists", name=name, idBoard=self.board_id))
+        # Без pos Trello кладёт новый список первым, и фазы выстраиваются справа налево.
+        return TrelloList.model_validate(
+            self.post("/lists", name=name, idBoard=self.board_id, pos="bottom")
+        )
 
     def labels(self) -> list[TrelloLabel]:
         return [

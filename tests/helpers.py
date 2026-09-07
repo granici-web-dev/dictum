@@ -61,6 +61,12 @@ def decompose_answer(issues_json: str = REAL_ISSUES) -> str:
     )
 
 
+def in_board_order(item: dict[str, Any]) -> tuple[float, str]:
+    # Позиции равны, когда publish их не задал: тогда порядок решает Trello, а не мы,
+    # и двойник не должен изображать, будто порядок вставки что-то гарантирует.
+    return item["pos"], item["name"]
+
+
 class FakeBoard:
     """Доска Trello в памяти: отвечает на запросы клиента и запоминает, что на неё положили."""
 
@@ -80,8 +86,22 @@ class FakeBoard:
         self.counter += 1
         return f"{kind}-{self.counter}"
 
-    def add_list(self, name: str) -> dict[str, Any]:
-        created = {"id": self.new_id("list"), "name": name}
+    def next_position(self, among: list[dict[str, Any]], asked: str) -> float:
+        # Trello сажает "bottom" за последний элемент, "top" перед первым, число берёт как есть.
+        # Первый элемент получает 16384, иначе "top" от нуля дал бы ноль и порядок не различался бы.
+        if asked not in ("top", "bottom"):
+            return float(asked)
+        positions: list[float] = [item["pos"] for item in among]
+        if not positions:
+            return 16384.0
+        return max(positions) + 16384 if asked == "bottom" else min(positions) / 2
+
+    def add_list(self, name: str, pos: str = "bottom") -> dict[str, Any]:
+        created = {
+            "id": self.new_id("list"),
+            "name": name,
+            "pos": self.next_position(self.lists, pos),
+        }
         self.lists.append(created)
         return created
 
@@ -97,9 +117,10 @@ class FakeBoard:
         list_id: str = "list-0",
         label_ids: str = "",
         archived: bool = False,
-        pos: str = "1",
+        pos: str = "bottom",
     ) -> dict[str, Any]:
         card_id = self.new_id("card")
+        here = [card for card in self.cards if card["idList"] == list_id]
         created: dict[str, Any] = {
             "id": card_id,
             "name": name,
@@ -107,7 +128,7 @@ class FakeBoard:
             "url": f"https://trello.com/c/{card_id}",
             "idList": list_id,
             "idLabels": [item for item in label_ids.split(",") if item],
-            "pos": float(pos),
+            "pos": self.next_position(here, pos),
             "checklists": [],
             "attachments": [],
         }
@@ -125,6 +146,14 @@ class FakeBoard:
     def posted(self, path: str) -> list[dict[str, str]]:
         return [fields for posted_path, fields in self.posts if posted_path == path]
 
+    def list_names(self) -> list[str]:
+        return [item["name"] for item in sorted(self.lists, key=in_board_order)]
+
+    def card_names(self, list_name: str) -> list[str]:
+        list_id = next(item["id"] for item in self.lists if item["name"] == list_name)
+        here = [card for card in self.cards if card["idList"] == list_id]
+        return [card["name"] for card in sorted(here, key=in_board_order)]
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.busy_replies > 0:
             self.busy_replies -= 1
@@ -136,7 +165,7 @@ class FakeBoard:
     def handle_get(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == f"/1/boards/{self.board_id}/lists":
-            return httpx.Response(200, json=self.lists)
+            return httpx.Response(200, json=sorted(self.lists, key=in_board_order))
         if path == f"/1/boards/{self.board_id}/labels":
             return httpx.Response(200, json=self.labels)
         if path != f"/1/boards/{self.board_id}/cards":
@@ -145,14 +174,14 @@ class FakeBoard:
         visible = [
             card for card in self.cards if wanted == "all" or card["id"] not in self.archived
         ]
-        return httpx.Response(200, json=visible)
+        return httpx.Response(200, json=sorted(visible, key=in_board_order))
 
     def handle_post(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         fields = dict(parse_qsl(request.content.decode()))
         self.posts.append((path, fields))
         if path == "/1/lists":
-            return httpx.Response(200, json=self.add_list(fields["name"]))
+            return httpx.Response(200, json=self.add_list(fields["name"], fields["pos"]))
         if path == "/1/labels":
             return httpx.Response(200, json=self.add_label(fields["name"]))
         if path == "/1/cards":

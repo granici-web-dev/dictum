@@ -52,6 +52,18 @@ def test_publish_creates_backlog_and_a_list_per_phase(board: FakeBoard, tmp_path
     ]
 
 
+def test_publish_appends_every_new_list_to_the_right_of_the_board(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    publish(REAL_ISSUES, tmp_path / "publish.json")
+
+    assert board.list_names() == [
+        "Backlog",
+        "Phase 1: Сквозной сценарий",
+        "Phase 2: Обработка краевых случаев и гибкость расписания",
+    ]
+
+
 def test_publish_reuses_an_existing_list_with_the_same_name(
     board: FakeBoard, tmp_path: Path
 ) -> None:
@@ -136,15 +148,12 @@ def test_publish_lays_cards_out_in_the_order_of_the_file(
 
     publish(REAL_ISSUES, tmp_path / "publish.json")
 
-    created = board.posted("/1/cards")
-    ordered = [fields["name"] for fields in created]
     dependent, dependency = one(issues, "I-006"), one(issues, "I-010")
-    assert ordered.index(dependency.title) < ordered.index(dependent.title)
-    position = {fields["name"]: int(fields["pos"]) for fields in created}
-    assert position[dependent.title] < position[dependency.title]
-    assert [position[issue.title] for issue in issues.issues] == list(
-        range(1, len(issues.issues) + 1)
-    )
+    made = [fields["name"] for fields in board.posted("/1/cards")]
+    assert made.index(dependency.title) < made.index(dependent.title)
+
+    first_phase = [issue.title for issue in issues.issues if issue.phase == 1]
+    assert board.card_names("Phase 1: Сквозной сценарий") == first_phase
 
 
 def test_publish_orders_every_issue_after_all_of_its_dependencies() -> None:
@@ -258,6 +267,7 @@ def test_publish_puts_deferred_scope_in_backlog_without_a_checklist(
     assert card["idLabels"] == label["id"]
     assert deferred.reason in card["desc"]
     assert not board.card_named(deferred.scope_id)["checklists"]
+    assert board.card_names("Backlog") == [entry.scope_id for entry in issues.deferred]
     assert by_key(outcomes)[deferred.scope_id].phase is None
 
 
