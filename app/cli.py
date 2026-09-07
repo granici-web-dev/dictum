@@ -44,7 +44,7 @@ def write_artifact(path: str, content: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    logger.info("записан %s", path)
+    logger.info("Записан %s", path)
 
 
 def read_input(text: str) -> tuple[str, str | None]:

@@ -31,7 +31,7 @@
 - Audio file (mp3/m4a/wav): проверка `consent_confirmed`, иначе отказ с пояснением.
 - Файлы > 24 МБ или > 20 мин: нарезка по тишине (ffmpeg `silencedetect`), куски ≤ 10 мин с перекрытием 5 с, транскрипция каждого, склейка по перекрытию.
 - Text: без транскрипции, `duration: null`, `consent_confirmed` не пишется: записи нет.
-- Frontmatter transcript.md: `source`, `duration`, `lang` (Whisper language detection), `consent_confirmed`.
+- Frontmatter transcript.md: `source`, `duration`, `lang` (Whisper language detection); `consent_confirmed` — только для аудио.
 
 ### 3.2 Ворота
 Сообщение в Telegram с кратким содержанием артефакта + inline-кнопки: **Дальше** / **Править** / **Стоп**. «Править» — пользователь пишет текст, он попадает как `user_edit` в следующий вызов той же стадии (стадия перезапускается с правкой). Таймаут ворот — 24 ч, после этого run → `stalled`.
