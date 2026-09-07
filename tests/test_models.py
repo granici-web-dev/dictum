@@ -1,11 +1,11 @@
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from app.models import IssuesFile
+from tests.helpers import BROKEN_ISSUES, REAL_ISSUES
 
 
 def test_the_real_answer_satisfies_the_contract() -> None:
@@ -17,16 +17,14 @@ def test_the_real_answer_satisfies_the_contract() -> None:
 
 
 def test_the_saved_invalid_answer_is_still_invalid() -> None:
-    data = json.loads(Path("fixtures/issues_title_too_long.json").read_text(encoding="utf-8"))
+    data = json.loads(BROKEN_ISSUES)
 
     with pytest.raises(ValidationError, match="title"):
         IssuesFile.model_validate(data)
 
 
 def sample() -> dict[str, Any]:
-    data: dict[str, Any] = json.loads(
-        Path("fixtures/issues_real.json").read_text(encoding="utf-8")
-    )
+    data: dict[str, Any] = json.loads(REAL_ISSUES)
     return data
 
 
