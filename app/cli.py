@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 from app.config import settings
 from app.stages import ROOT, StageError, StageResult, run_stage
@@ -22,6 +23,14 @@ RESEARCH_SKIPPED = "Ресёрч пропущен по решению польз
 EXIT_OK = 0
 EXIT_STAGE_FAILED = 1
 EXIT_NEEDS_A_DECISION = 2
+EXIT_USAGE = 64
+
+
+class CommandLineParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: {message}", file=sys.stderr)
+        raise SystemExit(EXIT_USAGE)
 
 
 def write_artifact(path: str, content: str) -> None:
@@ -82,7 +91,7 @@ def run_pipeline(text: str, lang: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = CommandLineParser(
         prog="app.cli", description="Прогон идеи через стадии без Telegram."
     )
     source = parser.add_mutually_exclusive_group(required=True)
@@ -91,7 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lang", default=settings.default_lang, help="Язык артефактов.")
     args = parser.parse_args(argv)
 
-    text: str = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
+    try:
+        text: str = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
+    except OSError as error:
+        parser.error(f"не читается {args.file}: {error.strerror}")
     if not text.strip():
         parser.error('текст пустой: make run-text TEXT="…" или --file путь')
 

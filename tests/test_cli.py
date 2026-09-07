@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.cli import EXIT_NEEDS_A_DECISION, EXIT_OK, EXIT_STAGE_FAILED, main
+from app.cli import EXIT_NEEDS_A_DECISION, EXIT_OK, EXIT_STAGE_FAILED, EXIT_USAGE, main
 from tests.conftest import InstallResponses, ok, request_body
 
 IDEA_BLOCK = (
@@ -126,3 +126,10 @@ def test_run_text_saves_the_raw_answer_of_a_failed_stage(
 
     assert (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8") == half
     assert not (tmp_path / "outputs/issues.md").exists()
+
+
+def test_a_typo_is_not_mistaken_for_a_pipeline_outcome() -> None:
+    for argv in ([], [""], ["--lng", "ru", TEXT], ["--file", "/nope/nope.md"]):
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv)
+        assert exit_info.value.code == EXIT_USAGE
