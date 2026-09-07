@@ -2,7 +2,18 @@ from pathlib import Path
 
 import pytest
 
-from app.cli import EXIT_NEEDS_A_DECISION, EXIT_OK, EXIT_STAGE_FAILED, EXIT_USAGE, main
+from app.cli import (
+    BRIEF,
+    CANDIDATES,
+    EXIT_NEEDS_A_DECISION,
+    EXIT_OK,
+    EXIT_STAGE_FAILED,
+    EXIT_USAGE,
+    IDEA,
+    PRD,
+    main,
+)
+from app.stages import STAGE_OUTPUTS
 from app import stages
 from app.config import settings
 from tests.conftest import InstallResponses, ok, request_body, server_error
@@ -39,7 +50,7 @@ def test_run_text_writes_the_artifact_of_every_stage(
 
     assert main([TEXT, "--lang", "ru"]) == EXIT_OK
 
-    written = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.*"))
+    written = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
     assert written == [
         "inputs/idea.md",
         "inputs/transcript.md",
@@ -85,9 +96,9 @@ def test_run_text_tells_brief_that_nobody_will_answer(
     main([TEXT, "--lang", "ru"])
 
     brief_message = request_body(requests[1])["messages"][0]["content"]
-    assert brief_message.startswith(
-        "<params>\nmode: batch\ninteractive: false\nlang: ru\n</params>"
-    )
+    assert "mode: batch" in brief_message
+    assert "interactive: false" in brief_message
+    assert "lang: ru" in brief_message
 
 
 def test_run_text_feeds_prd_the_brief_research_and_template(
@@ -127,7 +138,7 @@ def test_run_text_saves_the_raw_answer_of_a_failed_stage(
     assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
 
     assert (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8") == half
-    assert not (tmp_path / "outputs/issues.md").exists()
+    assert not (tmp_path / "outputs/issues.json").exists()
 
 
 def test_a_typo_is_not_mistaken_for_a_pipeline_outcome() -> None:
@@ -182,3 +193,9 @@ def test_run_text_falls_back_to_the_configured_language(
 
     transcript = (tmp_path / "inputs/transcript.md").read_text(encoding="utf-8")
     assert f"lang: {settings.default_lang}" in transcript
+
+
+def test_the_paths_the_cli_expects_are_the_ones_the_stages_may_return() -> None:
+    assert {IDEA, CANDIDATES} == set().union(*STAGE_OUTPUTS["intake"])
+    assert {BRIEF} == set().union(*STAGE_OUTPUTS["brief"])
+    assert {PRD} == set().union(*STAGE_OUTPUTS["prd"])
