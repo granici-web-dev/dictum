@@ -24,12 +24,14 @@ COMMANDS_DIR = ROOT / ".claude" / "commands"
 API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 STAGES = ("intake", "brief", "research", "prd", "decompose")
 
+ISSUES_JSON = "outputs/issues.json"
+
 STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
     "intake": (frozenset({"inputs/idea.md"}), frozenset({"outputs/candidates.md"})),
     "brief": (frozenset({"outputs/brief.md"}),),
     "research": (frozenset({"outputs/research.md"}),),
     "prd": (frozenset({"outputs/prd.md"}),),
-    "decompose": (frozenset({"outputs/issues.json", "outputs/issues.md"}),),
+    "decompose": (frozenset({ISSUES_JSON, "outputs/issues.md"}),),
 }
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
@@ -40,10 +42,12 @@ NO_FILE_BLOCKS = 'в ответе нет ни одного тега <file path="
 def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
     if not files:
         return [NO_FILE_BLOCKS]
+    # Чужой набор файлов ремонту не подлежит, и run_stage обязан упасть на нём раньше,
+    # чем на претензиях: иначе порядок двух проверок в конце run_stage перестанет быть верным.
     if frozenset(files) not in STAGE_OUTPUTS[stage]:
         return []
     if stage == "decompose":
-        return check_issues(files["outputs/issues.json"])
+        return check_issues(files[ISSUES_JSON])
     return []
 
 
@@ -218,7 +222,8 @@ def run_stage(
         got = ", ".join(sorted(files)) or "no <file> blocks"
         raise StageError(f"{stage}: expected {expected}, got {got}", raw)
     if problems:
-        raise StageError(f"{stage}: " + "; ".join(problems), raw)
+        listed = "\n".join(f"- {problem}" for problem in problems)
+        raise StageError(f"{stage}: ответ не прошёл проверку и после повтора:\n{listed}", raw)
     return StageResult(
         files=files,
         model=response.model,
