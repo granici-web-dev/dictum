@@ -25,7 +25,7 @@
 - `make bot` — бот в polling-режиме
 - `make worker` — celery worker
 - `make test` — ruff + mypy + pytest
-- `make run-text "текст идеи"` — прогон пайплайна без Telegram (для отладки стадий)
+- `make run-text TEXT="текст идеи"` — прогон пайплайна без Telegram (для отладки стадий)
 
 ## Определение готовности задачи
 Тест есть и зелёный; `make test` чист; `PLAN.md` обновлён; если менялось поведение — `SPEC.md` тоже.
