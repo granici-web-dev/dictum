@@ -72,9 +72,9 @@
 - `params` — параметры запуска стадии (`mode`, `lang`): `brief` вызывается с `mode: batch`, `research` — с `mode` по `kind` брифа. Промпты написаны для Claude Code, где стадия ведёт диалог; в режиме API диалога нет, поэтому `templates/api_mode.md` запрещает вопросы и требует помечать неясное как `[уточнить: ...]`.
 - `StageResult`: `files` (путь → содержимое из `<file>`-тегов ответа), `model`, `input_tokens`, `output_tokens`, `duration_ms`.
 - Набор файлов проверяется: `intake` → ровно один из `inputs/idea.md` / `outputs/candidates.md`; `decompose` → оба `outputs/issues.json` и `outputs/issues.md`; остальные стадии → ровно один свой файл. Любой другой набор — `StageError`. Файлы на диск пишет вызывающий: CLI в `outputs/`, воркер в `runs/<run_id>/` с версиями (§4).
-- Модель: `ANTHROPIC_MODEL` (по умолчанию Claude Sonnet); для `decompose` — `ANTHROPIC_MODEL_DECOMPOSE`. Thinking-блоки ответа игнорируются, берутся text-блоки.
+- Модель: `ANTHROPIC_MODEL`, для `decompose` — `ANTHROPIC_MODEL_DECOMPOSE`. Обе по умолчанию `claude-sonnet-5`; смена дефолта — правка этой строки и `.env.example`. Из ответа берутся text-блоки.
 - Каждый вызов логируется: stage, model, токены, длительность; run_id добавляет воркер (фаза 2).
-- Ретраи: `max_retries=2` SDK Anthropic (сетевые ошибки, 408/409/429/5xx, экспоненциальный backoff). Ответ со `stop_reason != end_turn` или без `<file>`-тегов → `StageError` с полем `raw` (текст ответа), без повтора. Невалидный JSON от `decompose` → один повтор с сообщением об ошибке валидации через `user_edit` (P1-04).
+- Ретраи: `max_retries=2` SDK Anthropic (сетевые ошибки, 408/409/429/5xx, экспоненциальный backoff). Ответ со `stop_reason != end_turn`, с чужим набором файлов или с двумя блоками на один путь → `StageError` с полем `raw` (текст ответа), без повтора. Содержимое файла нормализуется: ровно один перевод строки в конце. Невалидный JSON от `decompose` → один повтор с сообщением об ошибке валидации через `user_edit` (P1-04).
 
 ## 8. Нефункциональное
 - EU-only: API-эндпоинты Anthropic/OpenAI с EU-регионом, где доступны; хостинг Hetzner.

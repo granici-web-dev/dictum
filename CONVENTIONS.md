@@ -49,7 +49,7 @@ Do not change a row without recording the decision in `SPEC.md`.
 | LLM | Anthropic SDK direct, prompts in `.claude/commands/*.md` | ≥0.40 |
 | Transcription | OpenAI Whisper API, ffmpeg on the worker | |
 | Trello | REST via httpx | ≥0.27 |
-| HTTP mocking | respx | |
+| HTTP mocking | respx for httpx; `httpx2.MockTransport` for the Anthropic SDK | |
 | Local infra | docker compose: postgres, redis | |
 | Hosting | Hetzner, EU only; all processing stays in EU | |
 
@@ -79,7 +79,7 @@ Do not change a row without recording the decision in `SPEC.md`.
 - The wording of LLM output. Structure yes, prose no.
 
 ### Mocking
-- **No test touches the network.** httpx via respx; Anthropic and OpenAI clients replaced with a fake returning canned content from `fixtures/`. A test that needs a real API key is a bug.
+- **No test touches the network.** Our own httpx calls (Trello) go through respx. The Anthropic SDK runs on `httpx2`, which respx does not patch, so its tests inject an `httpx2.MockTransport` into the client the production factory builds. Mocking the SDK object instead would leave the client's own settings, retries included, untested. A test that needs a real API key is a bug.
 - **Postgres is real.** DB tests run against the docker Postgres from `make up`, are marked `@pytest.mark.db`, and skip when the database is unreachable. No SQLite substitute: dialect differences hide bugs. Register the marker in `pyproject.toml` with the first DB test.
 - **Fixtures are files in `fixtures/`**, realistic and honest (rule 5). Prefer a fixture file over a factory in `conftest.py`; add a factory only when three tests build the same object inline.
 
