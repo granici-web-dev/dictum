@@ -258,16 +258,17 @@ def test_publish_adds_the_dod_items_a_broken_run_never_wrote(
 ) -> None:
     issues = real_issues()
     first = issues.issues[0]
-    half_made = put_on_board(board, first, dod=first.dod[:1])
+    # недостающим берём первый пункт: дописанный уходит в конец, и набор сходится, а порядок нет
+    half_made = put_on_board(board, first, dod=first.dod[1:])
     checklist_id = half_made["checklists"][0]["id"]
 
     outcomes = publish(REAL_ISSUES, tmp_path / "publish.json")
 
     assert not board.posted(f"/1/cards/{half_made['id']}/checklists")
     added = board.posted(f"/1/checklists/{checklist_id}/checkItems")
-    written = [fields["name"] for fields in added]
-    assert written == first.dod[1:]
-    assert [item["name"] for item in half_made["checklists"][0]["checkItems"]] == first.dod
+    assert [fields["name"] for fields in added] == first.dod[:1]
+    on_board = [item["name"] for item in half_made["checklists"][0]["checkItems"]]
+    assert sorted(on_board) == sorted(first.dod)
     assert by_key(outcomes)[first.id].status == "completed"
 
 
