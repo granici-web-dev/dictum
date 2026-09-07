@@ -13,8 +13,8 @@ from typing import NoReturn
 import anthropic
 import frontmatter
 
-from app.config import settings
-from app.stages import ConfigError, StageError, StageResult, load_template, run_stage
+from app.config import ConfigError, settings
+from app.stages import StageError, StageResult, load_template, run_stage
 
 logger = logging.getLogger(__name__)
 

@@ -4,11 +4,9 @@ import pytest
 from anthropic import DefaultHttpxClient
 
 from app import stages
-from app.config import settings
+from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.stages import (
     STAGES,
-    LiveApiNotAllowed,
-    MissingApiKey,
     StageError,
     load_prompt,
     run_stage,

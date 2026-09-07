@@ -14,7 +14,7 @@ from anthropic import DefaultHttpxClient
 from anthropic.types import Message, MessageParam
 from pydantic import BaseModel
 
-from app.config import settings
+from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
@@ -66,18 +66,6 @@ class StageResult(BaseModel):
     input_tokens: int
     output_tokens: int
     duration_ms: int
-
-
-class ConfigError(RuntimeError):
-    pass
-
-
-class MissingApiKey(ConfigError):
-    pass
-
-
-class LiveApiNotAllowed(ConfigError):
-    pass
 
 
 class StageError(Exception):

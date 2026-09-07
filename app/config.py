@@ -1,3 +1,5 @@
+"""Настройки из .env и ошибки конфигурации, общие для всех исходящих клиентов."""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,18 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     default_lang: str = "de"
     keep_audio: bool = False
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+class MissingApiKey(ConfigError):
+    pass
+
+
+class LiveApiNotAllowed(ConfigError):
+    pass
 
 
 settings = Settings()
