@@ -2,6 +2,10 @@
 
 Раньше его писала модель вторым файлом: половина выхода стадии уходила на копию, потолок
 токенов срезал ответ, и две копии могли разойтись, не поспорив об этом вслух.
+
+Подписи английские при любом lang: содержимое приходит на языке прогона, и русские заголовки
+вокруг немецкого текста читались как ошибка. Английские нейтральны ко всем трём языкам, которые
+нам встречались, и не заводят словарь ради одного файла.
 """
 
 from app.models import Issue, IssuesFile
@@ -19,33 +23,33 @@ def issue_lines(issue: Issue) -> list[str]:
     depends_on = ", ".join(issue.depends_on) or NOTHING
     return [
         f"### {issue.id} · {issue.title}",
-        f"- **Скоп:** {issue.scope_id} · **Область:** {issue.area} "
-        f"· **Оценка:** {issue.estimate} · **Зависит от:** {depends_on}",
+        f"- **Scope:** {issue.scope_id} · **Area:** {issue.area} "
+        f"· **Estimate:** {issue.estimate} · **Depends on:** {depends_on}",
         f"- {issue.description}",
         "- DoD:",
         *(f"  - [ ] {item}" for item in issue.dod),
-        f"- Проверка: {issue.test_hint}",
+        f"- Check: {issue.test_hint}",
     ]
 
 
 def issues_markdown(issues_file: IssuesFile) -> str:
     lines = [
-        "# Бэклог",
+        "# Backlog",
         "",
-        f"Источник: `{issues_file.source}`. Черновик для правки перед публикацией: "
-        "после подтверждения `/publish` берёт `outputs/issues.json`.",
+        f"Source: `{issues_file.source}`. Draft to edit before publishing: once approved, "
+        "`/publish` takes `outputs/issues.json`.",
     ]
     for phase in issues_file.phases:
-        lines += ["", f"## Фаза {phase.n} — {phase.title}", "", f"Цель: {phase.goal}"]
+        lines += ["", f"## Phase {phase.n} — {phase.title}", "", f"Goal: {phase.goal}"]
         for issue in issues_file.issues:
             if issue.phase == phase.n:
                 lines += ["", *issue_lines(issue)]
     if issues_file.deferred:
-        lines += ["", "## Отложено", "", "| Скоп | Название | Причина |", "|---|---|---|"]
+        lines += ["", "## Deferred", "", "| Scope | Title | Reason |", "|---|---|---|"]
         lines += [
             f"| {d.scope_id} | {cell(d.title)} | {cell(d.reason)} |" for d in issues_file.deferred
         ]
     if issues_file.open_questions:
-        lines += ["", "## Открытые вопросы", ""]
+        lines += ["", "## Open questions", ""]
         lines += [f"- {question}" for question in issues_file.open_questions]
     return "\n".join(lines) + "\n"

@@ -12,7 +12,7 @@ def test_the_rendered_backlog_matches_the_snapshot() -> None:
 def test_an_issue_without_dependencies_shows_a_dash() -> None:
     rendered = issues_markdown(real_issues())
 
-    assert "**Зависит от:** —" in rendered
+    assert "**Depends on:** —" in rendered
 
 
 def test_a_reason_with_a_pipe_does_not_break_the_table() -> None:
@@ -32,8 +32,8 @@ def test_sections_without_content_are_not_printed() -> None:
 
     rendered = issues_markdown(issues_file)
 
-    assert "Отложено" not in rendered
-    assert "Открытые вопросы" not in rendered
+    assert "Deferred" not in rendered
+    assert "Open questions" not in rendered
 
 
 def test_every_issue_of_the_answer_reaches_the_page() -> None:
@@ -49,7 +49,7 @@ def test_an_issue_is_printed_under_its_own_phase() -> None:
     second_phase = issues_file.phases[1]
     of_second = [issue for issue in issues_file.issues if issue.phase == second_phase.n]
 
-    head, tail = issues_markdown(issues_file).split(f"## Фаза {second_phase.n} — ")
+    head, tail = issues_markdown(issues_file).split(f"## Phase {second_phase.n} — ")
 
     assert all(issue.id not in head for issue in of_second)
     assert all(issue.id in tail for issue in of_second)
