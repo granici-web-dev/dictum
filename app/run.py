@@ -1,0 +1,125 @@
+"""Обход пайплайна: одна дорога для make run-text и для бота. См. SPEC.md §7.2.
+
+Список стадий лежит в app/pipeline.py и остаётся данными; здесь — как по нему идти. Обратно
+импортировать нельзя: stages берёт из pipeline контракт выходов, и обход внутри него замкнул бы
+цикл.
+"""
+
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from app.ingest import build_transcript
+from app.pipeline import (
+    CANDIDATES,
+    ISSUES_JSON,
+    RESEARCH,
+    RESEARCH_SKIPPED,
+    TRANSCRIPT,
+    Stage,
+    stages_between,
+)
+from app.publish import publish
+from app.stages import StageError, StageResult, load_template, run_stage
+
+logger = logging.getLogger(__name__)
+
+
+class Run(BaseModel):
+    root: Path
+    run_id: str
+    lang: str
+    text: str = ""
+
+
+def ingest_body(run: Run) -> dict[str, str]:
+    return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id)}
+
+
+def research_body(run: Run) -> dict[str, str]:
+    # Настоящий ресёрч, положенный руками или прошлым прогоном, затирать нечем.
+    if (run.root / RESEARCH).exists():
+        return {}
+    return {RESEARCH: RESEARCH_SKIPPED}
+
+
+def publish_body(run: Run) -> dict[str, str]:
+    publish(run.root / ISSUES_JSON)
+    return {}
+
+
+BODIES: dict[str, Callable[[Run], dict[str, str]]] = {
+    "ingest": ingest_body,
+    "research": research_body,
+    "publish": publish_body,
+}
+
+
+def write_artifact(root: Path, path: str, content: str) -> None:
+    target = root / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    logger.info("Записан %s", target)
+
+
+def read_artifact(root: Path, path: str) -> str:
+    return (root / path).read_text(encoding="utf-8")
+
+
+def missing_before(root: Path, start: str, stop: str) -> list[str]:
+    """Артефакты, которых обход не создаст сам, а прочитать попробует.
+
+    Проверять только входы стартовой стадии мало: следующие читают то, что пропущенные должны
+    были положить, и прогон падал бы посреди работы, успев записать часть файлов.
+    """
+    written: set[str] = set()
+    missing = []
+    for stage in stages_between(start, stop):
+        missing += [
+            path for path in stage.inputs if path not in written and not (root / path).exists()
+        ]
+        # Объединение по всем наборам выходов: intake отдаёт либо idea.md, либо candidates.md, но
+        # ветка с кандидатами останавливает обход, и стадия, читающая idea.md, до неё не доходит.
+        written |= set().union(*stage.outputs)
+    return missing
+
+
+def run_llm_stage(run: Run, stage: Stage) -> StageResult:
+    inputs = {path: read_artifact(run.root, path) for path in stage.inputs}
+    if stage.template:
+        inputs[f"templates/{stage.template}"] = load_template(stage.template)
+    params = dict(stage.params)
+    if stage.needs_lang:
+        params["lang"] = run.lang
+    try:
+        return run_stage(stage.name, inputs, run.run_id, params=params)
+    except StageError as error:
+        write_artifact(run.root, f"outputs/{stage.name}.raw.md", error.raw)
+        raise
+
+
+def walk(
+    run: Run,
+    start: str,
+    stop: str,
+    on_done: Callable[[Stage], None] = lambda stage: None,
+) -> str | None:
+    """Идёт по списку от start до stop включительно. Отдаёт артефакт, который ждёт человека.
+
+    Ждать человека может только intake со своим candidates.md; на всём остальном обход доходит
+    до конца или падает.
+    """
+    for stage in stages_between(start, stop):
+        if stage.runs == "code":
+            files = BODIES[stage.name](run)
+        else:
+            files = run_llm_stage(run, stage).files
+        for path, content in files.items():
+            write_artifact(run.root, path, content)
+        on_done(stage)
+        # candidates.md объявляет в выходах только intake, поэтому спрашивать про стадию незачем.
+        if CANDIDATES in files:
+            return CANDIDATES
+    return None

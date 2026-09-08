@@ -7,7 +7,7 @@ CLI — от стадии в `--from`, бот — от начала. Раньш�
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 TRANSCRIPT = "inputs/transcript.md"
 IDEA = "inputs/idea.md"
@@ -33,21 +33,14 @@ class Stage(BaseModel):
     # Язык — свойство прогона, а не стадии, поэтому подмешивается на ходу. Сегодня его получает
     # только brief: остальным промптам его не показывали, и менять их вход — отдельное решение.
     needs_lang: bool = False
-    # Содержимое, которое стадия-код кладёт в свой единственный выход. У стадий llm пустое:
-    # что писать, решает модель.
-    content: str = ""
-
-    @model_validator(mode="after")
-    def a_code_stage_knows_exactly_what_it_writes(self) -> "Stage":
-        # Обходчик кладёт content стадии-кода в единственный путь её единственного набора выходов
-        # и не проверяет ни того, ни другого: инвариант держится здесь.
-        writes_one_file = [len(paths) for paths in self.outputs] == [1]
-        if self.runs == "code" and not (self.content and writes_one_file):
-            raise ValueError(f"{self.name}: стадия-код пишет один файл и знает его содержимое")
-        return self
 
 
 STAGES: tuple[Stage, ...] = (
+    Stage(
+        name="ingest",
+        runs="code",
+        outputs=(frozenset({TRANSCRIPT}),),
+    ),
     Stage(
         name="intake",
         runs="llm",
@@ -64,12 +57,11 @@ STAGES: tuple[Stage, ...] = (
     ),
     # Пока ресёрча нет, стадия исполняется кодом и кладёт фиксированную строку: /prd просит файл на
     # вход. Формулировку пользовательского skip («по решению пользователя») здесь брать нельзя,
-    # никто ничего не решал. Придёт P4-01 — запись станет llm.
+    # никто ничего не решал. Придёт P4-01 — запись станет llm и получит inputs.
     Stage(
         name="research",
         runs="code",
         outputs=(frozenset({RESEARCH}),),
-        content=RESEARCH_SKIPPED,
     ),
     Stage(
         name="prd",
@@ -83,6 +75,14 @@ STAGES: tuple[Stage, ...] = (
         runs="llm",
         inputs=(PRD,),
         outputs=(frozenset({ISSUES_JSON}),),
+    ),
+    # Карточки на доске — не артефакт прогона, и publish.json стадия пишет сама, по карточке за
+    # раз, чтобы оборванная публикация оставила журнал: обходчику отдавать нечего.
+    Stage(
+        name="publish",
+        runs="code",
+        inputs=(ISSUES_JSON,),
+        outputs=(frozenset(),),
     ),
 )
 
@@ -103,5 +103,7 @@ def produced_by(path: str) -> str | None:
     return None
 
 
-def stages_from(name: str) -> tuple[Stage, ...]:
-    return STAGES[NAMES.index(stage_named(name).name) :]
+def stages_between(start: str, stop: str) -> tuple[Stage, ...]:
+    first = NAMES.index(stage_named(start).name)
+    last = NAMES.index(stage_named(stop).name)
+    return STAGES[first : last + 1]
