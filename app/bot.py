@@ -14,16 +14,17 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from pydantic import BaseModel
 from telegram import Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from app.candidates import parse_candidates
+from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import ISSUES_JSON, Stage, stages_between
+from app.pipeline import ISSUES_JSON, NAMES, Stage, stages_between
 from app.publish import journal_of
-from app.run import Run, read_artifact, walk
+from app.run import Redo, Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
@@ -78,7 +79,7 @@ VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram
 
 HEARD = "Вот что я услышал:"
 
-PICK_ONE = "Пришлите одну из них отдельным сообщением, своими словами и чуть подробнее."
+PICK_ONE = "Пришлите номер или саму идею словами — я продолжу этот же прогон."
 
 NOTHING_HEARD = "Задания в записи я не нашёл."
 
@@ -87,6 +88,25 @@ DISCUSSED = "Вот о чём в ней говорили:"
 ASK_AGAIN = "Пришлите идею одним сообщением и чуть подробнее: что нужно сделать и для кого."
 
 running = asyncio.Lock()
+
+
+class Waiting(BaseModel):
+    """Прогон, вставший на выборе и ждущий ответа из этого чата: куда возвращаться и с чем."""
+
+    run: Run
+    stage: str
+    artifact: str
+
+
+class Ending(BaseModel):
+    """Чем кончился прогон: что сказать человеку и ждать ли от него ответа."""
+
+    text: str
+    waiting: Waiting | None = None
+
+
+# Остановка живёт в памяти процесса, как и сам прогон: строкой в runs она станет в P2-02.
+paused: dict[int, Waiting] = {}
 
 
 def allowed_chats() -> frozenset[int]:
@@ -184,6 +204,7 @@ async def save_voice(voice: Voice, target: Path) -> None:
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
+        paused.pop(update.message.chat_id, None)
         await update.message.reply_text(GREETING)
 
 
@@ -196,9 +217,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
-        run = demo_run(new_run_id(), text=message.text)
-        note = await message.reply_text(progress_text(run, []))
-        await follow(note, run, message.date)
+        stopped = paused.get(message.chat_id)
+        if stopped is None:
+            run, start, redo = demo_run(new_run_id(), text=message.text), FIRST_STAGE, None
+        else:
+            found = parse_candidates(read_artifact(stopped.run.root, stopped.artifact))
+            edit = chosen_edit(message.text, found)
+            if edit is None:
+                await refuse(message, "unknown_number", out_of_range(found))
+                return
+            del paused[message.chat_id]
+            run, start = stopped.run, stopped.stage
+            redo = Redo(user_edit=edit, artifact=stopped.artifact)
+        note = await message.reply_text(progress_text(run, done_before(start)))
+        keep = await follow(note, run, message.date, start, redo)
+        if keep:
+            paused[message.chat_id] = keep
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,6 +249,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
+        # Голосовое всегда начинает новый прогон и снимает остановку: на стенде следующий
+        # человек говорит голосом, и его запись не должна стать правкой к чужому выбору.
+        paused.pop(message.chat_id, None)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
         run = demo_run(run_id, audio=audio)
@@ -237,9 +274,15 @@ async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await refuse(message, "unsupported", UNSUPPORTED)
 
 
-async def follow(note: Message, run: Run, asked_at: datetime) -> None:
+async def follow(
+    note: Message,
+    run: Run,
+    asked_at: datetime,
+    start: str = FIRST_STAGE,
+    redo: Redo | None = None,
+) -> Waiting | None:
     """Гонит прогон в потоке и правит одно сообщение до самого конца."""
-    done: list[str] = []
+    done = done_before(start)
     loop = asyncio.get_running_loop()
     progress: list[Future[Message | bool]] = []
 
@@ -252,7 +295,7 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
             )
         )
 
-    ending = await outcome(run, report)
+    ending = await outcome(run, report, start, redo)
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -260,19 +303,40 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
     for edit in progress:
         with suppress(TelegramError):
             await asyncio.wrap_future(edit)
-    await note.edit_text(ending)
+    await note.edit_text(ending.text)
     # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
     # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
     waited = datetime.now(timezone.utc) - asked_at
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
+    return ending.waiting
 
 
-def choice_text(run: Run, artifact: str) -> str:
+def done_before(start: str) -> list[str]:
+    """Стадии, пройденные до start: продолженный прогон не показывает их незаконченными."""
+    return list(NAMES[: NAMES.index(start)])
+
+
+def chosen_edit(text: str, found: Candidates) -> str | None:
+    """Ответ человека как правка для стадии. None — прислали номер, которого в списке нет."""
+    written = text.strip()
+    if not written.isdigit():
+        return written
+    picked = next((idea for idea in found.ideas if idea.number == int(written)), None)
+    return f"Выбрана идея {picked.number}: {picked.title}" if picked else None
+
+
+def out_of_range(found: Candidates) -> str:
+    return (
+        f"Идей всего {len(found.ideas)}. Пришлите номер от 1 до {len(found.ideas)} "
+        "или саму идею словами."
+    )
+
+
+def choice_text(found: Candidates) -> str:
     """Что показать, когда одной идеи не вышло: список из candidates.md.
 
-    Кнопки — P3-07; до них человек присылает выбранную идею обычным сообщением.
+    Кнопки — P3-07; до них человек присылает номер или идею обычным сообщением.
     """
-    found = parse_candidates(read_artifact(run.root, artifact))
     listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
     if found.outcome == "multiple":
         return "\n".join([HEARD, "", *listed, "", PICK_ONE])
@@ -281,33 +345,47 @@ def choice_text(run: Run, artifact: str) -> str:
     return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
 
 
-async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
-    """Чем кончился прогон, одной строкой человеку."""
+async def outcome(
+    run: Run,
+    report: Callable[[Stage], None],
+    start: str = FIRST_STAGE,
+    redo: Redo | None = None,
+) -> Ending:
+    """Чем кончился прогон: строка человеку и остановка, если от него ждут ответа."""
     # Ответ человеку собирается внутри того же try: и концовка, и выбор читают файл с диска
     # уже после обхода, а сбой такого чтения оставлял человека со списком галочек без
     # концовки — прогон выглядел незаконченным, хотя карточки стояли на доске.
     try:
-        waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
+        waiting = await asyncio.to_thread(walk, run, start, LAST_STAGE, report, redo)
         if waiting and waiting.kind == "choice":
             logger.info("stop=choice run=%s", run.run_id)
-            return choice_text(run, waiting.artifact)
+            found = parse_candidates(read_artifact(run.root, waiting.artifact))
+            # Ждать ответа есть смысл, только когда есть из чего выбирать: при none в записи
+            # не было ничего, и следующее сообщение — новый прогон, а не правка к пустому.
+            keep = found.outcome == "multiple"
+            return Ending(
+                text=choice_text(found),
+                waiting=Waiting(run=run, stage=waiting.stage, artifact=waiting.artifact)
+                if keep
+                else None,
+            )
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
-            return (
-                f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
+            return Ending(
+                text=f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
                 "подтвердить их в чате пока нечем."
             )
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
-        return finished_text(run.root)
+        return Ending(text=finished_text(run.root))
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        return str(error)
+        return Ending(text=str(error))
     except Exception:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
-        return f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
+        return Ending(text=f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз.")
 
 
 def main() -> None:
