@@ -37,7 +37,10 @@ VOICE_FILE = "inputs/voice.oga"
 
 # Ограничение стенда, а не Whisper: минута записи стоит копейки, а вот стадии за ней думают тем
 # дольше, чем длиннее идея, и очередь у стенда этого не прощает. Нарезка длинного — P3-03.
-MAX_VOICE_SECONDS = 120
+# В минутах, потому что в минутах об этом говорят человеку: с секундами отказ однажды сказал бы
+# «длиннее 1 минут» на лимите в 90 с.
+MAX_VOICE_MINUTES = 2
+MAX_VOICE_SECONDS = MAX_VOICE_MINUTES * 60
 
 LABEL = {
     "ingest": "принял идею",
@@ -61,7 +64,7 @@ GREETING = (
 BUSY = "Прогон уже идёт, дождитесь его конца."
 
 TOO_LONG = (
-    f"Голосовое длиннее {MAX_VOICE_SECONDS // 60} минут я пока не расшифровываю. "
+    f"Голосовое длиннее {MAX_VOICE_MINUTES} минут я пока не расшифровываю. "
     "Наговорите покороче или пришлите текстом."
 )
 
@@ -299,6 +302,13 @@ def main() -> None:
             "он отвечал бы отказом на каждое сообщение."
         )
     allowed_chats()
+    # Ключ и ffmpeg — на старте по одной причине: без любого из них голосовое не расшифровать, а
+    # узнать об этом на первом сообщении со стенда значит показать людям «прогон сорвался».
+    if not settings.openai_api_key:
+        raise MissingApiKey(
+            "OPENAI_API_KEY не задан, а без него голосовое не расшифровать. "
+            "Скопируйте .env.example в .env и заполните."
+        )
     if not ffmpeg_installed():
         raise ConfigError(FFMPEG_MISSING)
 
@@ -315,12 +325,11 @@ def main() -> None:
     application.add_handler(CommandHandler("start", on_start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
-    # Последним и почти без фильтра по типу: молчание в ответ на присланный файл человек у стенда
-    # читает как поломку бота. Служебные события чата (кто-то вошёл, сменилось название) под отказ
-    # не попадают — им никто ничего не присылал.
-    application.add_handler(
-        MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, on_anything_else)
-    )
+    # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
+    # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
+    # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не
+    # попадают — им никто ничего не присылал.
+    application.add_handler(MessageHandler(~filters.StatusUpdate.ALL, on_anything_else))
     application.run_polling()
 
 

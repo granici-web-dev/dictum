@@ -26,7 +26,7 @@ from app.bot import (
     refuse,
     too_long,
 )
-from app.config import ConfigError, settings
+from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
 
@@ -139,14 +139,32 @@ def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> No
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
 
 
+def ready_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Всё, без чего бот не поднимется. Каждый тест старта ломает ровно одно."""
+    monkeypatch.setattr(settings, "telegram_bot_token", "1:token")
+    monkeypatch.setattr(settings, "allow_live_api", True)
+    monkeypatch.setattr(settings, "openai_api_key", "test")
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "ffmpeg_installed", lambda: True)
+
+
 def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     """Проверка на старте, а не на первом голосовом: у стенда это уже поздно."""
-    monkeypatch.setattr(settings, "telegram_bot_token", "token")
-    monkeypatch.setattr(settings, "allow_live_api", True)
-    listed(monkeypatch, "12")
+    ready_to_start(monkeypatch)
     monkeypatch.setattr(bot, "ffmpeg_installed", lambda: False)
 
     with pytest.raises(ConfigError, match="ffmpeg"):
+        main()
+
+
+def test_the_bot_does_not_start_without_the_key_that_transcribes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Тот же довод, что и у ffmpeg: без ключа голосовое доедет до «прогон сорвался»."""
+    ready_to_start(monkeypatch)
+    monkeypatch.setattr(settings, "openai_api_key", "")
+
+    with pytest.raises(MissingApiKey, match="OPENAI_API_KEY"):
         main()
 
 
@@ -251,10 +269,7 @@ def test_the_bot_answers_while_a_run_is_walking(monkeypatch: pytest.MonkeyPatch)
     оплаченными прогонами вместо одного и двух отказов.
     """
     started: list[Application[Any, Any, Any, Any, Any, Any]] = []
-    monkeypatch.setattr(settings, "telegram_bot_token", "1:token")
-    monkeypatch.setattr(settings, "allow_live_api", True)
-    listed(monkeypatch, "12")
-    monkeypatch.setattr(bot, "ffmpeg_installed", lambda: True)
+    ready_to_start(monkeypatch)
     monkeypatch.setattr(Application, "run_polling", lambda self, **kwargs: started.append(self))
 
     main()
