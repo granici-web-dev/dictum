@@ -1,12 +1,10 @@
-.PHONY: up down bot worker test run-text clean-board clean-runs
+.PHONY: up down bot test run-text clean-board clean-runs
 up:
 	docker compose up -d
 down:
 	docker compose down
 bot:
 	uv run python -m app.bot
-worker:
-	uv run celery -A app.worker worker -l info
 test:
 	uv run ruff check . && uv run mypy app tests && uv run pytest -q
 run-text:

@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     trello_board_id: str = ""
     project_key: str = ""
     database_url: str = "postgresql+psycopg://i2b:i2b@localhost:5432/i2b"
-    redis_url: str = "redis://localhost:6379/0"
     default_lang: str = "de"
     keep_audio: bool = False
 

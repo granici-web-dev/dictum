@@ -6,7 +6,7 @@ Engineering posture for this repo. Read together with `CLAUDE.md` (rules), `SPEC
 
 ### Posture
 - **The failure that matters is a broken output.** Invalid `issues.json`, duplicate or garbage cards in Trello, invented data in an artifact. Shipping a week later costs less than the team losing trust in the board. Optimise for correctness of contracts first, speed second.
-- **Contracts first, plumbing later.** Artifact schemas (`app/models.py`), gate behaviour and the `runs` / `gates` / `publish_log` tables are designed once and treated as stable. Bot handlers, CLI and worker wiring may be rewritten freely.
+- **Contracts first, plumbing later.** Artifact schemas (`app/models.py`), gate behaviour and the `runs` / `gates` / `publish_log` tables are designed once and treated as stable. Bot handlers and CLI wiring may be rewritten freely.
 - **Under time pressure, cut scope, not quality.** Every task still ships with a test and a green `make test`. If it does not fit, split it or move it in `PLAN.md`. No "ship now, test later".
 
 ### Abstractions
@@ -21,7 +21,7 @@ Engineering posture for this repo. Read together with `CLAUDE.md` (rules), `SPEC
 
 ### Validation and errors
 - **Validate at boundaries and at every stage input.** External boundaries (LLM output, Whisper and Trello responses, Telegram input, env) go through Pydantic. Each stage additionally validates its own input artifact (frontmatter, required sections, schema) even though the previous stage produced it: artifacts are re-run with `user_edit` and can be hand-edited. Inside a function, trust the types; mypy strict is the guard. No defensive `if not arg` in internal helpers.
-- **Raise, catch once.** Stage code raises. The Celery task is the single catch point: run → `failed`, one Telegram message, one log record. No log-and-continue, no partial publishes.
+- **Raise, catch once.** Stage code raises. The entry point that started the run is the single catch point: run → `failed`, one Telegram message, one log record. No log-and-continue, no partial publishes.
 - **Retries are listed in `SPEC.md` §7 and nowhere else.** Network errors ×2, invalid JSON from decompose ×1 with the validation error fed back. Any other retry is a spec change first.
 - **Logging lives at boundaries.** Worker, bot and external clients log with stdlib `logging`. Every LLM call writes one record: run_id, stage, tokens in and out, duration in ms. Pure logic (validation, prompt assembly, cycle detection) does not log. No structlog on MVP.
 
@@ -48,24 +48,25 @@ Do not change a row without recording the decision in `SPEC.md`.
 | Types | mypy `--strict` on `app/` | ≥1.11 |
 | Tests | pytest, pytest-asyncio | ≥8 |
 | Telegram | python-telegram-bot, long polling on MVP | ≥21 |
-| Pipeline execution | Celery + Redis | ≥5.4 |
+| Pipeline execution | A thread in the process that took the request (`asyncio.to_thread` in the bot) | |
 | Persistence | PostgreSQL 16, SQLAlchemy 2.0 `Mapped`, Alembic, psycopg 3 | |
 | Data models | Pydantic v2 everywhere, pydantic-settings for env | ≥2.8 |
 | LLM | Anthropic SDK direct, prompts in `.claude/commands/*.md` | ≥0.40 |
-| Transcription | OpenAI Whisper API, ffmpeg on the worker | |
+| Transcription | OpenAI Whisper API, ffmpeg on the machine running the bot | |
 | Trello | REST via httpx | ≥0.27 |
 | HTTP mocking | respx for httpx; `httpx2.MockTransport` for the Anthropic SDK | |
-| Local infra | docker compose: postgres, redis | |
+| Local infra | docker compose: postgres | |
 | Hosting | Hetzner, EU only; all processing stays in EU | |
 
 ### Decisions
-- **Sync stages, async bot.** All pipeline code (stages, clients, DB access, Celery tasks) is synchronous: `anthropic.Anthropic`, `httpx.Client`, SQLAlchemy sync session. Only `app/bot.py` is async, because python-telegram-bot requires it. Never maintain sync and async variants of the same function.
+- **Sync stages, async bot.** All pipeline code (stages, clients, DB access) is synchronous: `anthropic.Anthropic`, `httpx.Client`, SQLAlchemy sync session. Only `app/bot.py` is async, because python-telegram-bot requires it. Never maintain sync and async variants of the same function.
 - **Pydantic everywhere.** Artifact contracts, internal structures, settings: all `BaseModel`. One model style to hold in your head. SQLAlchemy `Mapped` classes stay separate from Pydantic models; convert explicitly at the DB boundary.
 - **Prompts are files, not code.** `app/stages.py` reads `.claude/commands/<stage>.md` as the system prompt. Editing a prompt is a product change and gets its own commit.
 - **Describe the good answer before bounding the bad one.** A rule of form beats the number that follows it: raising the title limit from 60 to 80 characters only moved the wall, while saying what a title is ("a verb and an object, at most eight words, no subordinate clause") halved their length on the next run. Write the shape first, then the limit as a backstop.
 - **State lives in Postgres.** Run status, gates and `publish_log` are rows. Files under `runs/<run_id>/` (or `outputs/` locally) hold artifacts only.
 
 ### Rejected
+- **Celery and Redis, until a second process exists.** They were pinned from day one for a worker that never got written: `make worker` pointed at a module holding nothing but a docstring, and five live runs went through a thread inside the bot. Brought back on either condition, not before: a second process appears (P4-03 splits the webhook from the executor), or several people run the pipeline at once and one lock in one process stops being the answer.
 - **LangChain, LlamaIndex, agent frameworks.** Five prompts and one SDK do not need an orchestration layer; frameworks hide the exact prompt and the token usage we log.
 - **Trello SDKs (py-trello and similar).** Six REST endpoints via httpx are easier to test with respx than a wrapper with its own auth and pagination behaviour.
 - **Web frameworks (FastAPI, Django) before P4-03.** The bot is the only UI. A webhook endpoint arrives with the Hetzner deploy, not earlier.
@@ -81,7 +82,7 @@ Do not change a row without recording the decision in `SPEC.md`.
 
 ### Not worth testing
 - Pydantic itself. A field with a pattern does not need a "rejects bad pattern" test unless the pattern is ours and subtle.
-- python-telegram-bot handler wiring, Celery routing, SQLAlchemy sessions.
+- python-telegram-bot handler wiring, SQLAlchemy sessions.
 - The wording of LLM output. Structure yes, prose no.
 
 ### Mocking
