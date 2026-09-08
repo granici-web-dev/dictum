@@ -8,9 +8,17 @@
 нам встречались, и не заводят словарь ради одного файла.
 """
 
+import re
+
 from app.models import Issue, IssuesFile
 
 NOTHING = "—"
+
+# Строка списка идей в candidates.md (см. /intake). Разбирать выход модели можно только потому,
+# что этот формат объявлен контрактом в SPEC §3.2: боту нужно показать человеку, между чем
+# выбирать, а без разбора он мог бы сказать только «идей несколько».
+CANDIDATE = re.compile(r"^\s*(\d+)\.\s*(.+?)\s*$", re.MULTILINE)
+CANDIDATE_NAME = re.compile(r"\*\*(.+?)\*\*")
 
 
 def cell(text: str) -> str:
@@ -53,3 +61,16 @@ def issues_markdown(issues_file: IssuesFile) -> str:
         lines += ["", "## Open questions", ""]
         lines += [f"- {question}" for question in issues_file.open_questions]
     return "\n".join(lines) + "\n"
+
+
+def candidate_titles(candidates: str) -> list[str]:
+    """Пронумерованные названия идей для сообщения в чат.
+
+    Берётся имя из жирного начертания, а не строка целиком: за ним в той же строке идут
+    пояснение, кто сказал и статус — человеку в чате они не нужны, он выбирает по названию.
+    """
+    titles = []
+    for number, body in CANDIDATE.findall(candidates):
+        named = CANDIDATE_NAME.search(body)
+        titles.append(f"{number}. {named.group(1) if named else body}")
+    return titles

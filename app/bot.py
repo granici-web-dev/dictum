@@ -20,8 +20,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import Source, new_run_id
-from app.pipeline import Stage, stages_between
-from app.run import Run, walk
+from app.pipeline import CANDIDATES, Stage, stages_between
+from app.render import candidate_titles
+from app.run import Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
@@ -82,6 +83,10 @@ NO_SINGLE_IDEA = (
     "Не смог выделить одну идею. Пришлите её одним сообщением и чуть подробнее: "
     "что нужно сделать и для кого."
 )
+
+HEARD = "Вот что я услышал:"
+
+PICK_ONE = "Пришлите одну из них отдельным сообщением, своими словами и чуть подробнее."
 
 running = asyncio.Lock()
 
@@ -269,6 +274,17 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
 
 
+def choice_text(run: Run) -> str:
+    """Что показать, когда idea одна не вышла: список того, между чем выбирать.
+
+    Кнопки — P3-04; до них человек присылает выбранную идею обычным сообщением.
+    """
+    listed = candidate_titles(read_artifact(run.root, CANDIDATES))
+    if not listed:
+        return NO_SINGLE_IDEA
+    return "\n".join([HEARD, "", *listed, "", PICK_ONE])
+
+
 async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
     """Чем кончился прогон, одной строкой человеку."""
     try:
@@ -284,7 +300,7 @@ async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
 
     if waiting and waiting.kind == "choice":
         logger.info("stop=choice run=%s", run.run_id)
-        return NO_SINGLE_IDEA
+        return choice_text(run)
     if waiting:
         logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
         return (

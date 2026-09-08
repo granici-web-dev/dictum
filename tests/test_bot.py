@@ -15,6 +15,7 @@ from app.bot import (
     LABEL,
     MAX_VOICE_SECONDS,
     NO_SINGLE_IDEA,
+    PICK_ONE,
     VOICE_INGEST_LABEL,
     allowed_chats,
     cards_published,
@@ -30,6 +31,7 @@ from app.bot import (
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
+from tests.test_render import REAL_CANDIDATES
 
 
 def a_voice(duration: int) -> Voice:
@@ -216,25 +218,17 @@ async def test_the_link_is_the_last_thing_the_message_shows(
     assert len(note.edits) == len(NAMES) + 1
 
 
-@pytest.mark.asyncio
-async def test_the_refusal_after_intake_does_not_count_ideas_it_did_not_find(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Кандидаты бывают и от пустоты: на двухсекундном голосовом idea не нашлась вовсе."""
+def walk_stopping_on_choice(
+    run: Run, start: str, stop: str, on_done: Callable[[Stage], None]
+) -> Pause | None:
+    return Pause(stage="intake", artifact=CANDIDATES, kind="choice")
 
-    def walk_stopping_on_choice(
-        run: Run, start: str, stop: str, on_done: Callable[[Stage], None]
-    ) -> Pause | None:
-        return Pause(stage="intake", artifact=CANDIDATES, kind="choice")
 
+def a_stopped_run(root: Path, monkeypatch: pytest.MonkeyPatch, candidates: str) -> Run:
+    (root / "outputs").mkdir(exist_ok=True)
+    (root / CANDIDATES).write_text(candidates, encoding="utf-8")
     monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
-
-    said = await outcome(
-        Run(root=tmp_path, run_id="прогон", lang="ru", text="…", auto_approve=True),
-        lambda stage: None,
-    )
-
-    assert said == NO_SINGLE_IDEA
+    return Run(root=root, run_id="прогон", lang="ru", text="…", auto_approve=True)
 
 
 class QuietChat:
@@ -299,3 +293,29 @@ async def test_a_finished_run_reports_how_long_the_person_waited(
 
     assert "run=прогон finished cards=2" in caplog.text
     assert "run=прогон seconds=42" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_stop_after_intake_shows_what_the_model_heard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """До кнопок (P3-04) человек выбирает сам, поэтому обязан видеть, между чем."""
+    run = a_stopped_run(tmp_path, monkeypatch, REAL_CANDIDATES)
+
+    said = await outcome(run, lambda stage: None)
+
+    assert "1. Бот для онбординга новичков" in said
+    assert "2. Утренняя сводка по просроченным дедлайнам" in said
+    assert said.endswith(PICK_ONE)
+
+
+@pytest.mark.asyncio
+async def test_a_candidates_file_without_a_list_asks_for_one_idea_instead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кандидаты бывают и от пустоты: на двухсекундном голосовом идея не нашлась вовсе."""
+    run = a_stopped_run(tmp_path, monkeypatch, "# Идея не найдена\n")
+
+    said = await outcome(run, lambda stage: None)
+
+    assert said == NO_SINGLE_IDEA

@@ -1,5 +1,5 @@
 from app.models import Deferred
-from app.render import issues_markdown
+from app.render import candidate_titles, issues_markdown
 from tests.helpers import FIXTURES, real_issues
 
 
@@ -60,3 +60,32 @@ def test_the_file_ends_with_a_single_newline() -> None:
 
     assert rendered.endswith("\n")
     assert not rendered.endswith("\n\n")
+
+
+# Слово в слово из прогона d090c91a0a1b4bc4: две несвязанные просьбы одной записью.
+REAL_CANDIDATES = """# В записи найдено 2 идеи
+
+1. **Бот для онбординга новичков** — пошаговый бот с чек-листом (что поставить, где взять \
+доступы, к кому обращаться) для новых сотрудников. Сказал: unknown. Статус: решение.
+2. **Утренняя сводка по просроченным дедлайнам** — ежедневное сообщение со списком карточек \
+Trello, у которых дедлайн сегодня или уже прошёл. Сказал: unknown. Статус: решение.
+
+Выберите номер — или «все», тогда каждая пойдёт отдельным прогоном.
+"""
+
+
+def test_the_candidate_list_keeps_the_numbers_and_drops_the_bookkeeping() -> None:
+    """Человек в чате выбирает по названию: кто сказал и какой статус — не его забота."""
+    assert candidate_titles(REAL_CANDIDATES) == [
+        "1. Бот для онбординга новичков",
+        "2. Утренняя сводка по просроченным дедлайнам",
+    ]
+
+
+def test_a_line_without_a_bold_name_is_shown_whole() -> None:
+    """Формат — выход модели: если жирного нет, лучше показать строку, чем потерять идею."""
+    assert candidate_titles("1. Просто идея без выделения") == ["1. Просто идея без выделения"]
+
+
+def test_prose_without_a_numbered_list_yields_nothing() -> None:
+    assert candidate_titles("# Идея не найдена\n\nВ записи только обсуждение.") == []
