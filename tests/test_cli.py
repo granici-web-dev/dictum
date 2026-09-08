@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,8 @@ from app.cli import (
 )
 from app import stages
 from app.config import settings
-from app.pipeline import BRIEF, CANDIDATES, PRD, RESEARCH
+from app.ingest import build_transcript, run_id_of
+from app.pipeline import BRIEF, CANDIDATES, PRD, RESEARCH, TRANSCRIPT
 from tests.helpers import (
     BROKEN_ISSUES,
     InstallResponses,
@@ -20,6 +22,16 @@ from tests.helpers import (
     request_body,
     server_error,
 )
+
+EARLIER_RUN = "прогон-восемь"
+
+
+def transcript_of_an_earlier_run(root: Path) -> Path:
+    path = root / TRANSCRIPT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_transcript("Идея с прошлого прогона.", "ru", EARLIER_RUN), "utf-8")
+    return path
+
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n---\nsource: text\nlang: ru\nconfidence: high\n---\n\n'
@@ -73,8 +85,9 @@ def test_run_text_writes_the_transcript_frontmatter(
 
     main([TEXT, "--lang", "ru"])
 
-    transcript = (tmp_path / "inputs/transcript.md").read_text(encoding="utf-8")
-    assert transcript.startswith("---\nsource: text\nduration: null\nlang: ru\n---\n")
+    transcript = (tmp_path / TRANSCRIPT).read_text(encoding="utf-8")
+    assert "\nsource: text\nduration: null\nlang: ru\n---\n" in transcript
+    assert run_id_of(transcript)
     assert transcript.endswith(TEXT + "\n")
 
 
@@ -206,6 +219,8 @@ def test_run_from_prd_uses_the_artifacts_already_on_disk(
     (tmp_path / "outputs").mkdir()
     (tmp_path / BRIEF).write_text("# Бриф с прошлого прогона\n", encoding="utf-8")
     (tmp_path / RESEARCH).write_text("Ресёрч с прошлого прогона.\n", encoding="utf-8")
+    transcript = transcript_of_an_earlier_run(tmp_path)
+    was = transcript.read_text(encoding="utf-8")
     requests = llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
 
     assert main(["--from", "prd"]) == EXIT_OK
@@ -213,7 +228,7 @@ def test_run_from_prd_uses_the_artifacts_already_on_disk(
     assert len(requests) == 2
     assert "# Бриф с прошлого прогона" in request_body(requests[0])["messages"][0]["content"]
     assert "Скоп MVP" in (tmp_path / PRD).read_text(encoding="utf-8")
-    assert not (tmp_path / "inputs/transcript.md").exists()
+    assert transcript.read_text(encoding="utf-8") == was
 
 
 def test_run_from_decompose_feeds_it_the_prd_from_disk(
@@ -222,6 +237,7 @@ def test_run_from_decompose_feeds_it_the_prd_from_disk(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").mkdir()
     (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(ISSUES_BLOCKS)])
 
     assert main(["--from", "decompose"]) == EXIT_OK
@@ -258,6 +274,7 @@ def test_run_text_keeps_the_second_attempt_when_decompose_stays_invalid(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").mkdir()
     (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
     second = BROKEN_ISSUES.replace('"outputs/prd.md"', '"вторая попытка"', 1)
     requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer(second))])
 
@@ -270,12 +287,57 @@ def test_run_text_keeps_the_second_attempt_when_decompose_stays_invalid(
     assert "вторая попытка" in raw
 
 
+def test_a_run_carries_one_id_from_the_transcript_into_the_issues(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+
+    assert main([TEXT, "--lang", "ru"]) == EXIT_OK
+
+    started = run_id_of((tmp_path / TRANSCRIPT).read_text(encoding="utf-8"))
+    issues = json.loads((tmp_path / "outputs/issues.json").read_text(encoding="utf-8"))
+    assert started
+    assert issues["run_id"] == started
+
+
+def test_a_resumed_run_keeps_the_id_it_started_with(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
+    llm([ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "decompose"]) == EXIT_OK
+
+    issues = json.loads((tmp_path / "outputs/issues.json").read_text(encoding="utf-8"))
+    assert issues["run_id"] == EARLIER_RUN
+
+
+def test_a_run_older_than_the_rule_is_refused_instead_of_given_a_second_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+    (tmp_path / TRANSCRIPT).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / TRANSCRIPT).write_text("---\nsource: text\nlang: ru\n---\n\nСтарый.\n", "utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "decompose"])
+
+    assert exit_info.value.code == EXIT_USAGE
+
+
 def test_a_missing_artifact_names_the_stage_that_makes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").mkdir()
     (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
 
     with pytest.raises(SystemExit) as exit_info:
         main(["--from", "prd"])
@@ -291,6 +353,7 @@ def test_the_skipped_research_does_not_overwrite_one_already_on_disk(
     (tmp_path / "outputs").mkdir()
     (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
     (tmp_path / RESEARCH).write_text("Настоящий ресёрч.\n", encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
     llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
 
     assert main(["--from", "research"]) == EXIT_OK
@@ -304,6 +367,7 @@ def test_research_writes_its_line_when_nothing_is_on_disk(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").mkdir()
     (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
 
     assert main(["--from", "research"]) == EXIT_OK

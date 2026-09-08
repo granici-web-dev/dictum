@@ -57,10 +57,14 @@ def real_issues() -> IssuesFile:
     return IssuesFile.model_validate_json(REAL_ISSUES)
 
 
-def issues_file(directory: Path, text: str = REAL_ISSUES, run_id: str | None = None) -> Path:
-    """Кладёт issues.json в каталог прогона, при надобности уже с проставленным run_id."""
+def issues_file(
+    directory: Path, text: str = REAL_ISSUES, run_id: str | None = "прогон-ноль"
+) -> Path:
+    """Кладёт issues.json в каталог прогона. run_id=None — файл, каких decompose больше не пишет."""
     data = json.loads(text)
-    if run_id is not None:
+    if run_id is None:
+        data.pop("run_id", None)
+    else:
         data["run_id"] = run_id
     path = directory / "issues.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

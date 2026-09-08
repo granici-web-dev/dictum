@@ -3,6 +3,7 @@
 См. SPEC.md §7.
 """
 
+import json
 import logging
 import re
 import time
@@ -164,12 +165,19 @@ def answer_text(stage: str, response: Message) -> str:
     return raw
 
 
+def with_run_id(issues_json: str, run_id: str) -> str:
+    data = json.loads(issues_json)
+    data["run_id"] = run_id
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
 def run_stage(
     stage: str,
     inputs: dict[str, str],
     user_edit: str | None = None,
     history: list[MessageParam] | None = None,
     params: dict[str, str] | None = None,
+    run_id: str | None = None,
 ) -> StageResult:
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
     messages: list[MessageParam] = [
@@ -214,6 +222,10 @@ def run_stage(
         listed = "\n".join(f"- {problem}" for problem in problems)
         raise StageError(f"{stage}: ответ не прошёл проверку и после повтора:\n{listed}", raw)
     if stage == "decompose":
+        # run_id принадлежит прогону и приходит от ingest (SPEC §3.1): в issues.json его вписывают
+        # здесь, чтобы publish его только читал. Кто гонит пайплайн, тот его и передаёт.
+        if run_id:
+            files[ISSUES_JSON] = with_run_id(files[ISSUES_JSON], run_id)
         files[ISSUES_MD] = issues_markdown(IssuesFile.model_validate_json(files[ISSUES_JSON]))
     return StageResult(
         files=files,

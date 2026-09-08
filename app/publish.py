@@ -9,9 +9,7 @@ dictum:<KEY-N> run:<run_id> local:<I-00N|S<N>>. Рядом с issues.json пиш
 
 import json
 import logging
-import os
 import re
-import secrets
 import sys
 from contextlib import closing
 from pathlib import Path
@@ -62,6 +60,14 @@ STATUS_WORDS: dict[Status, str] = {
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 64
+
+
+class MissingRunId(ValueError):
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"в {path} нет run_id. Его проставляет decompose из transcript.md (SPEC §3.1); "
+            "publish своего не выдаёт, иначе у прогона было бы два разных номера."
+        )
 
 
 class InvalidIssues(ValueError):
@@ -115,10 +121,6 @@ def project_key() -> str:
             "Нужны заглавные латинские буквы и цифры, от двух до десяти знаков, например DCT."
         )
     return settings.project_key
-
-
-def new_run_id() -> str:
-    return secrets.token_hex(4)
 
 
 def card_name(key: str, title: str) -> str:
@@ -284,19 +286,6 @@ def write_log(
     path.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def stamp_run_id(path: Path, text: str, run_id: str) -> None:
-    """Проставляет run_id в issues.json, чтобы повторная публикация узнала свои карточки.
-
-    Пишет через соседний файл: issues.json стоил вызовов модели, и обрыв записи не должен
-    оставить от него половину.
-    """
-    data = json.loads(text)
-    data["run_id"] = run_id
-    beside = path.with_suffix(".json.new")
-    beside.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(beside, path)
-
-
 def key_number(key: str) -> int:
     return int(key.rsplit("-", 1)[1])
 
@@ -356,16 +345,13 @@ def publish(issues_path: Path) -> list[CardOutcome]:
         raise InvalidIssues(problems)
     issues = IssuesFile.model_validate_json(text)
     prefix = project_key()
-    run_id = issues.run_id or new_run_id()
+    if not issues.run_id:
+        raise MissingRunId(issues_path)
+    run_id = issues.run_id
     log_path = issues_path.parent / "publish.json"
 
     with closing(open_trello()) as board:
         on_board = marked_cards(board.cards())
-        # Штамп ставится после первого удачного запроса: отказ по ключам или по флагу не должен
-        # оставлять в файле run_id прогона, которого не было.
-        if run_id != issues.run_id:
-            stamp_run_id(issues_path, text, run_id)
-            logger.info("Прогон получил run_id %s", run_id)
         next_card_number = next_number(on_board, prefix)
         cards_of_this_run = {found.local_id: found for found in on_board if found.run_id == run_id}
         published = {
@@ -427,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         for problem in invalid.problems:
             print(f"  {problem}", file=sys.stderr)
         return EXIT_FAILED
-    except (ConfigError, TrelloError, httpx.HTTPError) as error:
+    except (MissingRunId, ConfigError, TrelloError, httpx.HTTPError) as error:
         logger.error("%s", error)
         return EXIT_FAILED
     report(outcomes)

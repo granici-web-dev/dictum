@@ -14,6 +14,7 @@ import anthropic
 import frontmatter
 
 from app.config import ConfigError, settings
+from app.ingest import build_transcript, new_run_id, run_id_of
 from app.pipeline import CANDIDATES, NAMES, TRANSCRIPT, produced_by, stage_named, stages_from
 from app.stages import StageError, StageResult, load_template, run_stage
 
@@ -39,10 +40,6 @@ def write_artifact(path: str, content: str) -> None:
     logger.info("Записан %s", path)
 
 
-def build_transcript(text: str, lang: str) -> str:
-    return f"---\nsource: text\nduration: null\nlang: {lang}\n---\n\n{text.strip()}\n"
-
-
 def read_input(text: str) -> tuple[str, str | None]:
     post = frontmatter.loads(text)
     lang = post.metadata.get("lang")
@@ -53,9 +50,10 @@ def run_and_write(
     stage: str,
     inputs: dict[str, str],
     params: dict[str, str],
+    run_id: str,
 ) -> StageResult:
     try:
-        result = run_stage(stage, inputs, params=params)
+        result = run_stage(stage, inputs, params=params, run_id=run_id)
     except StageError as error:
         write_artifact(f"outputs/{stage}.raw.md", error.raw)
         raise
@@ -68,9 +66,9 @@ def read_artifact(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def run_pipeline(start: str, text: str, lang: str) -> int:
+def run_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
     if start == NAMES[0]:
-        write_artifact(TRANSCRIPT, build_transcript(text, lang))
+        write_artifact(TRANSCRIPT, build_transcript(text, lang, run_id))
 
     for stage in stages_from(start):
         if stage.runs == "code":
@@ -87,7 +85,7 @@ def run_pipeline(start: str, text: str, lang: str) -> int:
         if stage.needs_lang:
             params["lang"] = lang
 
-        result = run_and_write(stage.name, inputs, params)
+        result = run_and_write(stage.name, inputs, params, run_id)
         # Кандидатов может вернуть только intake, и это решение человека, а не свойство стадии.
         if CANDIDATES in result.files:
             logger.info(
@@ -97,9 +95,9 @@ def run_pipeline(start: str, text: str, lang: str) -> int:
     return EXIT_OK
 
 
-def start_pipeline(start: str, text: str, lang: str) -> int:
+def start_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
     try:
-        return run_pipeline(start, text, lang)
+        return run_pipeline(start, text, lang, run_id)
     except (StageError, ConfigError, anthropic.APIError) as error:
         logger.error("%s", error)
         return EXIT_STAGE_FAILED
@@ -126,14 +124,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.start:
         if args.text or args.file:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
-        for needed in stage_named(args.start).inputs:
+        for needed in (TRANSCRIPT, *stage_named(args.start).inputs):
             if not Path(needed).exists():
                 # Пропущенная стадия свой артефакт не пишет, поэтому вместо «нет файла» полезнее
                 # сказать, какая стадия его делает: обычно ответ — начать прогон на шаг раньше.
                 maker = produced_by(needed)
                 hint = f"; его делает {maker}, начните с --from {maker}" if maker else ""
                 parser.error(f"для --from {args.start} нужен {needed}, а его нет{hint}")
-        return start_pipeline(args.start, "", args.lang or settings.default_lang)
+        # Прогон продолжается, а не начинается, поэтому свой run_id ему брать неоткуда: выдать
+        # второй значило бы, что у одного прогона их два, и publish создал бы карточки заново.
+        started = run_id_of(read_artifact(TRANSCRIPT))
+        if not started:
+            parser.error(f"в {TRANSCRIPT} нет run_id: этот прогон старше P2-00, начните заново")
+        return start_pipeline(args.start, "", args.lang or settings.default_lang, started)
 
     if not (args.text or args.file):
         parser.error('нужен текст: make run-text TEXT="…", --file путь или --from стадия')
@@ -147,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     body, lang_of_input = read_input(text)
     lang: str = args.lang or lang_of_input or settings.default_lang
 
-    return start_pipeline(NAMES[0], body, lang)
+    return start_pipeline(NAMES[0], body, lang, new_run_id())
 
 
 if __name__ == "__main__":

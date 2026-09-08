@@ -11,6 +11,7 @@ from app.publish import (
     CardOutcome,
     PublishedCard,
     InvalidIssues,
+    MissingRunId,
     PlannedCard,
     marked_cards,
     card_description,
@@ -195,15 +196,23 @@ def test_publish_attaches_every_dependency_under_its_global_key(
     ]
 
 
-def test_publish_stamps_the_run_id_once_and_keeps_it(board: FakeBoard, tmp_path: Path) -> None:
-    path = issues_file(tmp_path)
-    assert "run_id" not in json.loads(path.read_text(encoding="utf-8"))
+def test_publish_refuses_a_file_without_a_run_id(board: FakeBoard, tmp_path: Path) -> None:
+    path = issues_file(tmp_path, run_id=None)
+
+    with pytest.raises(MissingRunId, match="нет run_id"):
+        publish(path)
+
+    assert board.posted("/1/cards") == []
+
+
+def test_publish_never_writes_to_the_issues_file(board: FakeBoard, tmp_path: Path) -> None:
+    path = issues_file(tmp_path, run_id="прогон-семнадцать")
+    before = path.read_text(encoding="utf-8")
 
     publish(path)
-    stamped = run_id_of(tmp_path)
     publish(path)
 
-    assert run_id_of(tmp_path) == stamped
+    assert path.read_text(encoding="utf-8") == before
     assert len(board.posted("/1/cards")) == len(real_issues().issues) + len(real_issues().deferred)
 
 
@@ -234,8 +243,8 @@ def test_two_runs_of_the_same_local_ids_get_two_cards(board: FakeBoard, tmp_path
     earlier.mkdir()
     later.mkdir()
 
-    first_run = publish(issues_file(earlier))
-    second_run = publish(issues_file(later))
+    first_run = publish(issues_file(earlier, run_id="прогон-первый"))
+    second_run = publish(issues_file(later, run_id="прогон-второй"))
 
     assert run_id_of(earlier) != run_id_of(later)
     assert by_local(first_run)[first.id].key != by_local(second_run)[first.id].key
