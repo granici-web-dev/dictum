@@ -279,8 +279,23 @@ def choice_text(run: Run) -> str:
 
 async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
     """Чем кончился прогон, одной строкой человеку."""
+    # Ответ человеку собирается внутри того же try: и концовка, и выбор читают файл с диска
+    # уже после обхода, а сбой такого чтения оставлял человека со списком галочек без
+    # концовки — прогон выглядел незаконченным, хотя карточки стояли на доске.
     try:
         waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
+        if waiting and waiting.kind == "choice":
+            logger.info("stop=choice run=%s", run.run_id)
+            return choice_text(run)
+        if waiting:
+            logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
+            return (
+                f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
+                "подтвердить их в чате пока нечем."
+            )
+        cards = cards_published(run.root)
+        logger.info("run=%s finished cards=%d", run.run_id, cards)
+        return finished_text(run.root)
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
@@ -289,19 +304,6 @@ async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
         return f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
-
-    if waiting and waiting.kind == "choice":
-        logger.info("stop=choice run=%s", run.run_id)
-        return choice_text(run)
-    if waiting:
-        logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
-        return (
-            f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
-            "подтвердить их в чате пока нечем."
-        )
-    cards = cards_published(run.root)
-    logger.info("run=%s finished cards=%d", run.run_id, cards)
-    return finished_text(run.root)
 
 
 def main() -> None:

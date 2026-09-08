@@ -315,6 +315,19 @@ async def test_the_stop_after_intake_shows_what_the_model_heard(
 
 
 @pytest.mark.asyncio
+async def test_a_missing_candidates_file_still_ends_the_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Чтение артефакта идёт после обхода: без перехвата человек остался бы без концовки."""
+    monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
+    run = Run(root=tmp_path, run_id="прогон", lang="ru", text="…", auto_approve=True)
+
+    said = await outcome(run, lambda stage: None)
+
+    assert "сорвался" in said
+
+
+@pytest.mark.asyncio
 async def test_a_run_that_found_no_task_says_so_and_still_shows_what_was_discussed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
