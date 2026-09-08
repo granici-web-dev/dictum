@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     allow_live_api: bool = False
     openai_api_key: str = ""
     telegram_bot_token: str = ""
+    telegram_allowed_chat_ids: str = ""
     trello_key: str = ""
     trello_token: str = ""
     trello_board_id: str = ""
