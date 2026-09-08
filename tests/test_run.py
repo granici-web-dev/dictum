@@ -8,12 +8,13 @@ from app.pipeline import (
     CANDIDATES,
     IDEA,
     ISSUES_JSON,
+    ISSUES_MD,
     PRD,
     RESEARCH,
     TRANSCRIPT,
     stage_named,
 )
-from app.run import Run, missing_before, walk
+from app.run import Pause, Run, missing_before, walk
 from tests.helpers import FakeBoard, InstallResponses, ok, real_issues
 from tests.test_cli import (
     BRIEF_BLOCK,
@@ -37,8 +38,17 @@ def nothing_around(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
 
 
-def a_run(root: Path, text: str = TEXT) -> Run:
-    return Run(root=root, run_id=RUN_ID, lang="ru", text=text)
+def a_run(root: Path, text: str = TEXT, auto_approve: bool = False) -> Run:
+    """Прогон с воротами, как в продакшене: авто-подтверждение тест просит сам.
+
+    Дефолт `Run` повторён нарочно: с обратным тест молча уезжал бы в демо-режим и проходил
+    ворота, которые собирался проверить.
+    """
+    return Run(root=root, run_id=RUN_ID, lang="ru", text=text, auto_approve=auto_approve)
+
+
+def a_demo_run(root: Path, text: str = TEXT) -> Run:
+    return a_run(root, text, auto_approve=True)
 
 
 def test_a_full_walk_writes_every_artifact_under_its_own_root(
@@ -47,7 +57,7 @@ def test_a_full_walk_writes_every_artifact_under_its_own_root(
     root = tmp_path / "runs" / RUN_ID
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert walk(a_run(root), "ingest", "decompose") is None
+    assert walk(a_demo_run(root), "ingest", "decompose") is None
 
     for path in (TRANSCRIPT, IDEA, BRIEF, RESEARCH, PRD, ISSUES_JSON):
         assert (root / path).is_file(), path
@@ -60,7 +70,7 @@ def test_the_walk_stamps_the_run_id_it_was_given_into_the_issues(
 ) -> None:
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    walk(a_run(tmp_path), "ingest", "decompose")
+    walk(a_demo_run(tmp_path), "ingest", "decompose")
 
     issues = json.loads((tmp_path / ISSUES_JSON).read_text(encoding="utf-8"))
     assert issues["run_id"] == RUN_ID
@@ -73,7 +83,7 @@ def test_every_stage_reports_itself_once_and_in_order(
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     seen: list[str] = []
 
-    walk(a_run(tmp_path), "ingest", "decompose", lambda stage: seen.append(stage.name))
+    walk(a_demo_run(tmp_path), "ingest", "decompose", lambda stage: seen.append(stage.name))
 
     assert seen == ["ingest", "intake", "brief", "research", "prd", "decompose"]
 
@@ -84,7 +94,7 @@ def test_a_walk_that_reaches_publish_puts_the_cards_on_the_board(
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     issues = real_issues()
 
-    assert walk(a_run(tmp_path), "ingest", "publish") is None
+    assert walk(a_demo_run(tmp_path), "ingest", "publish") is None
 
     made = board.posted("/1/cards")
     assert len(made) == len(issues.issues) + len(issues.deferred)
@@ -107,10 +117,74 @@ def test_candidates_stop_the_walk_and_name_the_file_that_needs_a_person(
 ) -> None:
     requests = llm([ok(CANDIDATES_BLOCK), ok(BRIEF_BLOCK)])
 
-    assert walk(a_run(tmp_path), "ingest", "decompose") == CANDIDATES
+    assert walk(a_run(tmp_path), "ingest", "decompose") == Pause(
+        stage="intake", artifact=CANDIDATES, kind="choice"
+    )
 
     assert len(requests) == 1
     assert not (tmp_path / BRIEF).exists()
+
+
+def test_a_gate_after_brief_stops_a_run_that_was_not_auto_approved(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK)])
+
+    assert walk(a_run(tmp_path), "ingest", "decompose") == Pause(
+        stage="brief", artifact=BRIEF, kind="gate"
+    )
+
+    assert len(requests) == 2
+    assert (tmp_path / BRIEF).is_file()
+    assert not (tmp_path / PRD).exists()
+
+
+def test_an_auto_approved_run_walks_past_every_gate(
+    llm: InstallResponses, board: FakeBoard, tmp_path: Path
+) -> None:
+    """До publish, а не до decompose: иначе последние ворота гасит конец обхода, а не флаг."""
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+
+    assert walk(a_demo_run(tmp_path), "ingest", "publish") is None
+
+    assert (tmp_path / "outputs/publish.json").is_file()
+
+
+def test_a_gate_after_decompose_holds_the_backlog_back_from_the_board(
+    llm: InstallResponses, board: FakeBoard, tmp_path: Path
+) -> None:
+    llm([ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+
+    assert walk(a_run(tmp_path), "research", "publish") == Pause(
+        stage="decompose", artifact=ISSUES_MD, kind="gate"
+    )
+
+    assert (tmp_path / ISSUES_MD).is_file()
+    assert board.posted("/1/cards") == []
+
+
+def test_candidates_stop_even_an_auto_approved_run(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Выбор — не ворота: подтверждать нечего, идею из нескольких выбирает человек."""
+    llm([ok(CANDIDATES_BLOCK), ok(BRIEF_BLOCK)])
+
+    waiting = walk(a_demo_run(tmp_path), "ingest", "decompose")
+
+    assert waiting is not None and waiting.kind == "choice"
+
+
+def test_a_gate_on_the_last_stage_of_the_walk_lets_the_run_finish(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Ворота останавливают перед следующей стадией; когда её нет, обход и так кончился."""
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
+
+    assert walk(a_run(tmp_path), "ingest", "brief") is None
+
+    assert (tmp_path / BRIEF).is_file()
 
 
 def test_research_keeps_the_file_it_finds_and_writes_one_when_it_does_not(
@@ -121,7 +195,7 @@ def test_research_keeps_the_file_it_finds_and_writes_one_when_it_does_not(
     llm([ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
 
-    walk(a_run(tmp_path), "research", "decompose")
+    walk(a_demo_run(tmp_path), "research", "decompose")
 
     assert (tmp_path / RESEARCH).read_text(encoding="utf-8") == "Настоящий ресёрч.\n"
 

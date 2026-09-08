@@ -8,6 +8,7 @@
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -32,6 +33,21 @@ class Run(BaseModel):
     run_id: str
     lang: str
     text: str = ""
+    # Ворота — норма, а демо — исключение (CLAUDE.md §1), поэтому снимает их тот, кто заводит
+    # прогон, и делает это явно.
+    auto_approve: bool = False
+
+
+class Pause(BaseModel):
+    """Остановка обхода: чего ждёт прогон и от кого.
+
+    `choice` — человек выбирает одну идею из нескольких, подтверждать там нечего.
+    `gate` — человек подтверждает готовый артефакт; `auto_approve` снимает только эти остановки.
+    """
+
+    stage: str
+    artifact: str
+    kind: Literal["choice", "gate"]
 
 
 def ingest_body(run: Run) -> dict[str, str]:
@@ -105,12 +121,8 @@ def walk(
     start: str,
     stop: str,
     on_done: Callable[[Stage], None] = lambda stage: None,
-) -> str | None:
-    """Идёт по списку от start до stop включительно. Отдаёт артефакт, который ждёт человека.
-
-    Ждать человека может только intake со своим candidates.md; на всём остальном обход доходит
-    до конца или падает.
-    """
+) -> Pause | None:
+    """Идёт по списку от start до stop включительно. Отдаёт остановку, если прогон ждёт человека."""
     for stage in stages_between(start, stop):
         if stage.runs == "code":
             files = BODIES[stage.name](run)
@@ -119,7 +131,10 @@ def walk(
         for path, content in files.items():
             write_artifact(run.root, path, content)
         on_done(stage)
-        # candidates.md объявляет в выходах только intake, поэтому спрашивать про стадию незачем.
         if CANDIDATES in files:
-            return CANDIDATES
+            return Pause(stage=stage.name, artifact=CANDIDATES, kind="choice")
+        # Ворота останавливают прогон перед следующей стадией, а после stop останавливать нечего:
+        # обход и так закончился, и «ждёт человека» вместо «дошёл до конца» соврало бы.
+        if stage.gate_after and not run.auto_approve and stage.name != stop:
+            return Pause(stage=stage.name, artifact=stage.gate_after, kind="gate")
     return None

@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -143,6 +144,24 @@ def test_run_text_stops_when_intake_returns_candidates(
     assert len(requests) == 1
     assert (tmp_path / CANDIDATES).exists()
     assert not (tmp_path / BRIEF).exists()
+
+
+def test_gates_stop_the_local_run_after_brief_and_name_the_stage_to_resume_from(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK)])
+
+    with caplog.at_level(logging.INFO, logger="app.cli"):
+        assert main([TEXT, "--lang", "ru", "--gates"]) == EXIT_NEEDS_A_DECISION
+
+    assert len(requests) == 2
+    assert (tmp_path / BRIEF).is_file()
+    assert not (tmp_path / PRD).exists()
+    assert "--from research" in caplog.text
 
 
 def test_run_text_saves_the_raw_answer_of_a_failed_stage(

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.bot import LABEL, allowed_chats, cards_published, finished_text, progress_text
+from app.bot import LABEL, allowed_chats, cards_published, demo_run, finished_text, progress_text
 from app.config import ConfigError, settings
 from app.pipeline import NAMES
 
@@ -93,3 +93,8 @@ def test_the_card_count_comes_from_the_journal_of_that_run(tmp_path: Path) -> No
 
 def test_every_stage_of_the_walk_has_something_to_show_a_person() -> None:
     assert set(LABEL) == set(NAMES)
+
+
+def test_the_demo_run_is_auto_approved_by_the_flag_it_sets_itself() -> None:
+    """Ворота бот проходит режимом прогона, а не тем, что кнопок для них ещё нет."""
+    assert demo_run("прогон", "Идея").auto_approve

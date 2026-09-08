@@ -16,6 +16,7 @@ BRIEF = "outputs/brief.md"
 RESEARCH = "outputs/research.md"
 PRD = "outputs/prd.md"
 ISSUES_JSON = "outputs/issues.json"
+ISSUES_MD = "outputs/issues.md"
 
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
@@ -33,6 +34,9 @@ class Stage(BaseModel):
     # Язык — свойство прогона, а не стадии, поэтому подмешивается на ходу. Сегодня его получает
     # только brief: остальным промптам его не показывали, и менять их вход — отдельное решение.
     needs_lang: bool = False
+    # Артефакт, который человек читает на воротах после стадии (SPEC §3.2); None — ворот нет.
+    # Из outputs его не вывести: у decompose на воротах читают issues.md, а он там не объявлен.
+    gate_after: str | None = None
 
 
 STAGES: tuple[Stage, ...] = (
@@ -54,6 +58,7 @@ STAGES: tuple[Stage, ...] = (
         outputs=(frozenset({BRIEF}),),
         params={"mode": "batch", "interactive": "false"},
         needs_lang=True,
+        gate_after=BRIEF,
     ),
     # Пока ресёрча нет, стадия исполняется кодом и кладёт фиксированную строку: /prd просит файл на
     # вход. Формулировку пользовательского skip («по решению пользователя») здесь брать нельзя,
@@ -75,6 +80,7 @@ STAGES: tuple[Stage, ...] = (
         runs="llm",
         inputs=(PRD,),
         outputs=(frozenset({ISSUES_JSON}),),
+        gate_after=ISSUES_MD,
     ),
     # Карточки на доске — не артефакт прогона, и publish.json стадия пишет сама, по карточке за
     # раз, чтобы оборванная публикация оставила журнал: обходчику отдавать нечего.

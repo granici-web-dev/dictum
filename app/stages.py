@@ -17,13 +17,11 @@ from pydantic import BaseModel
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.models import IssuesFile
-from app.pipeline import ISSUES_JSON, stage_named
+from app.pipeline import ISSUES_JSON, ISSUES_MD, stage_named
 from app.render import issues_markdown
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
-
-ISSUES_MD = "outputs/issues.md"
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / ".claude" / "commands"

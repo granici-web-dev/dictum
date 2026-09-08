@@ -15,7 +15,7 @@ import frontmatter
 
 from app.config import ConfigError, settings
 from app.ingest import new_run_id, run_id_of
-from app.pipeline import NAMES, TRANSCRIPT, produced_by
+from app.pipeline import NAMES, TRANSCRIPT, produced_by, stages_between
 from app.run import Run, missing_before, read_artifact, walk
 from app.stages import StageError
 
@@ -46,15 +46,30 @@ def read_input(text: str) -> tuple[str, str | None]:
 LAST_STAGE_OF_A_LOCAL_RUN = "decompose"
 
 
-def start_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
-    run = Run(root=Path("."), run_id=run_id, lang=lang, text=text)
+def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: bool) -> int:
+    run = Run(root=Path("."), run_id=run_id, lang=lang, text=text, auto_approve=auto_approve)
     try:
         waiting = walk(run, start, LAST_STAGE_OF_A_LOCAL_RUN)
     except (StageError, ConfigError, anthropic.APIError) as error:
         logger.error("%s", error)
         return EXIT_STAGE_FAILED
     if waiting:
-        logger.info("Идей несколько. Выберите одну в %s и запустите прогон с её текстом.", waiting)
+        if waiting.kind == "choice":
+            logger.info(
+                "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.",
+                waiting.artifact,
+            )
+        else:
+            # Следующая стадия берётся из этого же прогона, а не из полного списка: у ворот на
+            # последней стадии обхода её нет, и подсказка предложила бы publish, которого --from
+            # не принимает.
+            following = stages_between(waiting.stage, LAST_STAGE_OF_A_LOCAL_RUN)[1]
+            logger.info(
+                "Ворота после %s: прочитайте %s и продолжите прогон с --from %s.",
+                waiting.stage,
+                waiting.artifact,
+                following.name,
+            )
         return EXIT_NEEDS_A_DECISION
     return EXIT_OK
 
@@ -74,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--lang", help="Язык артефактов. По умолчанию из frontmatter входа, иначе DEFAULT_LANG."
+    )
+    parser.add_argument(
+        "--gates",
+        action="store_true",
+        help="Останавливаться на воротах: без флага локальный прогон авто-подтверждён.",
     )
     args = parser.parse_args(argv)
 
@@ -95,7 +115,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(
                 f"в {TRANSCRIPT} нет run_id: транскрипт старше этого правила, начните прогон заново"
             )
-        return start_pipeline(args.start, "", args.lang or settings.default_lang, started)
+        return start_pipeline(
+            args.start, "", args.lang or settings.default_lang, started, not args.gates
+        )
 
     if not (args.text or args.file):
         parser.error('нужен текст: make run-text TEXT="…", --file путь или --from стадия')
@@ -109,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     body, lang_of_input = read_input(text)
     lang: str = args.lang or lang_of_input or settings.default_lang
 
-    return start_pipeline(NAMES[0], body, lang, new_run_id())
+    return start_pipeline(NAMES[0], body, lang, new_run_id(), not args.gates)
 
 
 if __name__ == "__main__":

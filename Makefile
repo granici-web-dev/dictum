@@ -10,4 +10,4 @@ worker:
 test:
 	uv run ruff check . && uv run mypy app tests && uv run pytest -q
 run-text:
-	uv run python -m app.cli $(if $(FILE),--file $(FILE),"$(TEXT)")
+	uv run python -m app.cli $(if $(FILE),--file $(FILE),"$(TEXT)") $(ARGS)

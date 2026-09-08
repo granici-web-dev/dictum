@@ -89,6 +89,17 @@ def finished_text(root: Path) -> str:
     return f"Готово: {cards_published(root)} карточек.\n{board_url()}"
 
 
+def demo_run(run_id: str, text: str) -> Run:
+    """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет."""
+    return Run(
+        root=RUNS / run_id,
+        run_id=run_id,
+        lang=settings.default_lang,
+        text=text,
+        auto_approve=True,
+    )
+
+
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(GREETING)
@@ -107,12 +118,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async with running:
         run_id = new_run_id()
-        run = Run(
-            root=RUNS / run_id,
-            run_id=run_id,
-            lang=settings.default_lang,
-            text=message.text,
-        )
+        run = demo_run(run_id, message.text)
         done: list[str] = []
         note = await message.reply_text(progress_text(run_id, done))
         loop = asyncio.get_running_loop()
@@ -132,8 +138,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        if waiting:
+        if waiting and waiting.kind == "choice":
             await note.edit_text("В сообщении несколько идей. Пришлите одну.")
+            return
+        if waiting:
+            await note.edit_text(
+                f"Прогон {run_id} встал на воротах после стадии {waiting.stage}: "
+                "подтвердить их в чате пока нечем."
+            )
             return
         await note.edit_text(finished_text(run.root))
 
