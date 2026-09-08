@@ -15,7 +15,7 @@ from app.pipeline import (
     stage_named,
 )
 from app import run as walking
-from app.run import Pause, Run, ingest_body, missing_before, walk
+from app.run import Pause, Redo, Run, ingest_body, missing_before, read_artifact, walk
 from app.transcribe import Transcription
 from tests.helpers import FakeBoard, InstallResponses, ok, real_issues, request_body
 from tests.test_cli import (
@@ -163,6 +163,37 @@ def test_candidates_stop_the_walk_and_name_the_file_that_needs_a_person(
 
     assert len(requests) == 1
     assert not (tmp_path / BRIEF).exists()
+
+
+def test_a_redo_reaches_the_stage_it_was_meant_for_and_no_other(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Правка была про артефакт стартовой стадии: brief её получить не должен."""
+    requests = llm([ok(CANDIDATES_BLOCK), ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
+    run = a_run(tmp_path)
+    walk(run, "ingest", "decompose")
+
+    walk(run, "intake", "brief", redo=Redo(user_edit="Выбрана идея 2: Отчёты", artifact=CANDIDATES))
+
+    chosen = request_body(requests[1])["messages"]
+    assert "<user_edit>\nВыбрана идея 2: Отчёты\n</user_edit>" in chosen[-1]["content"]
+    assert "user_edit" not in request_body(requests[2])["messages"][-1]["content"]
+
+
+def test_a_redo_carries_the_previous_answer_so_the_stage_does_not_start_over(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Без своего прошлого ответа стадия соберёт артефакт заново (SPEC §3.2)."""
+    requests = llm([ok(CANDIDATES_BLOCK), ok(IDEA_BLOCK)])
+    run = a_run(tmp_path)
+    walk(run, "ingest", "decompose")
+
+    walk(run, "intake", "intake", redo=Redo(user_edit="Первую", artifact=CANDIDATES))
+
+    history = request_body(requests[1])["messages"][0]
+    assert history["role"] == "assistant"
+    assert history["content"].startswith('<file path="outputs/candidates.md">')
+    assert read_artifact(tmp_path, CANDIDATES) in history["content"]
 
 
 def test_a_gate_after_brief_stops_a_run_that_was_not_auto_approved(

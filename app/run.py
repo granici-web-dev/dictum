@@ -23,7 +23,7 @@ from app.pipeline import (
     stages_between,
 )
 from app.publish import publish
-from app.stages import StageError, StageResult, load_template, run_stage
+from app.stages import StageError, StageResult, load_template, previous_answer, run_stage
 from app.transcribe import transcribe
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,16 @@ class Pause(BaseModel):
     stage: str
     artifact: str
     kind: Literal["choice", "gate"]
+
+
+class Redo(BaseModel):
+    """Повтор стадии с правкой человека: чем править и что стадия отдала в прошлый раз.
+
+    Зеркало `Pause`: остановка выходит из обхода, `Redo` заходит обратно в него.
+    """
+
+    user_edit: str
+    artifact: str
 
 
 def ingest_body(run: Run) -> dict[str, str]:
@@ -116,15 +126,25 @@ def missing_before(root: Path, start: str, stop: str) -> list[str]:
     return missing
 
 
-def run_llm_stage(run: Run, stage: Stage) -> StageResult:
+def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResult:
     inputs = {path: read_artifact(run.root, path) for path in stage.inputs}
     if stage.template:
         inputs[f"templates/{stage.template}"] = load_template(stage.template)
     params = dict(stage.params)
     if stage.needs_lang:
         params["lang"] = run.lang
+    history = (
+        previous_answer(redo.artifact, read_artifact(run.root, redo.artifact)) if redo else None
+    )
     try:
-        return run_stage(stage.name, inputs, run.run_id, params=params)
+        return run_stage(
+            stage.name,
+            inputs,
+            run.run_id,
+            user_edit=redo.user_edit if redo else None,
+            history=history,
+            params=params,
+        )
     except StageError as error:
         write_artifact(run.root, f"outputs/{stage.name}.raw.md", error.raw)
         raise
@@ -135,13 +155,19 @@ def walk(
     start: str,
     stop: str,
     on_done: Callable[[Stage], None] = lambda stage: None,
+    redo: Redo | None = None,
 ) -> Pause | None:
-    """Идёт по списку от start до stop включительно. Отдаёт остановку, если прогон ждёт человека."""
+    """Идёт по списку от start до stop включительно. Отдаёт остановку, если прогон ждёт человека.
+
+    `redo` — правка человека для стартовой стадии: обход возвращается в ту же стадию, с которой
+    встал, и дальше идёт обычным порядком. Следующим стадиям правка не достаётся: она была про
+    артефакт стартовой.
+    """
     for stage in stages_between(start, stop):
         if stage.runs == "code":
             files = BODIES[stage.name](run)
         else:
-            files = run_llm_stage(run, stage).files
+            files = run_llm_stage(run, stage, redo if stage.name == start else None).files
         for path, content in files.items():
             write_artifact(run.root, path, content)
         on_done(stage)

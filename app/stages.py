@@ -52,6 +52,15 @@ def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
     return []
 
 
+def previous_answer(path: str, content: str) -> list[MessageParam]:
+    """Прошлый ответ стадии для истории повтора, собранный из артефакта.
+
+    Сырой текст ответа прогон не переживает (SPEC §7.3), а файл переживает, и стадии нужен
+    именно он: без своего прошлого ответа она соберёт артефакт заново.
+    """
+    return [{"role": "assistant", "content": f'<file path="{path}">\n{content}</file>'}]
+
+
 def repair_request(problems: list[str]) -> str:
     listed = "\n".join(f"- {problem}" for problem in problems)
     return (
