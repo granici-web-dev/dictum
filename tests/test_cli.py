@@ -103,9 +103,10 @@ def test_run_text_tells_brief_that_nobody_will_answer(
     main([TEXT, "--lang", "ru"])
 
     brief_message = request_body(requests[1])["messages"][0]["content"]
-    assert "mode: batch" in brief_message
-    assert "interactive: false" in brief_message
-    assert "lang: ru" in brief_message
+    # Только блок <params>: «lang: ru» стоит ещё и во frontmatter самого idea.md, который едет
+    # тем же сообщением, и проверка по всему тексту проходила бы с пустыми параметрами.
+    params = brief_message.split("<params>\n", 1)[1].split("\n</params>", 1)[0]
+    assert params.splitlines() == ["mode: batch", "interactive: false", "lang: ru"]
 
 
 def test_run_text_feeds_prd_the_brief_research_and_template(
