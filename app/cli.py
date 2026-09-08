@@ -14,21 +14,10 @@ import anthropic
 import frontmatter
 
 from app.config import ConfigError, settings
+from app.pipeline import CANDIDATES, NAMES, TRANSCRIPT, produced_by, stage_named, stages_from
 from app.stages import StageError, StageResult, load_template, run_stage
 
 logger = logging.getLogger(__name__)
-
-TRANSCRIPT = "inputs/transcript.md"
-IDEA = "inputs/idea.md"
-CANDIDATES = "outputs/candidates.md"
-BRIEF = "outputs/brief.md"
-RESEARCH = "outputs/research.md"
-PRD = "outputs/prd.md"
-PRD_TEMPLATE = "templates/prd_oneshot.md"
-RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
-
-STAGE_ORDER = ("intake", "brief", "prd", "decompose")
-REQUIRED_INPUT = {"brief": IDEA, "prd": BRIEF, "decompose": PRD}
 
 EXIT_OK = 0
 EXIT_STAGE_FAILED = 1
@@ -50,20 +39,20 @@ def write_artifact(path: str, content: str) -> None:
     logger.info("Записан %s", path)
 
 
+def build_transcript(text: str, lang: str) -> str:
+    return f"---\nsource: text\nduration: null\nlang: {lang}\n---\n\n{text.strip()}\n"
+
+
 def read_input(text: str) -> tuple[str, str | None]:
     post = frontmatter.loads(text)
     lang = post.metadata.get("lang")
     return post.content, lang if isinstance(lang, str) else None
 
 
-def build_transcript(text: str, lang: str) -> str:
-    return f"---\nsource: text\nduration: null\nlang: {lang}\n---\n\n{text.strip()}\n"
-
-
 def run_and_write(
     stage: str,
     inputs: dict[str, str],
-    params: dict[str, str] | None = None,
+    params: dict[str, str],
 ) -> StageResult:
     try:
         result = run_stage(stage, inputs, params=params)
@@ -80,38 +69,31 @@ def read_artifact(path: str) -> str:
 
 
 def run_pipeline(start: str, text: str, lang: str) -> int:
-    from_here = STAGE_ORDER.index(start)
+    if start == NAMES[0]:
+        write_artifact(TRANSCRIPT, build_transcript(text, lang))
 
-    if from_here == 0:
-        transcript = build_transcript(text, lang)
-        write_artifact(TRANSCRIPT, transcript)
-        intake = run_and_write("intake", {TRANSCRIPT: transcript})
-        if CANDIDATES in intake.files:
+    for stage in stages_from(start):
+        if stage.runs == "code":
+            written = next(iter(stage.outputs[0]))
+            # Настоящий ресёрч, положенный руками или прошлым прогоном, затирать нечем.
+            if not Path(written).exists():
+                write_artifact(written, stage.content or "")
+            continue
+
+        inputs = {path: read_artifact(path) for path in stage.inputs}
+        if stage.template:
+            inputs[f"templates/{stage.template}"] = load_template(stage.template)
+        params = dict(stage.params)
+        if stage.needs_lang:
+            params["lang"] = lang
+
+        result = run_and_write(stage.name, inputs, params)
+        # Кандидатов может вернуть только intake, и это решение человека, а не свойство стадии.
+        if CANDIDATES in result.files:
             logger.info(
                 "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.", CANDIDATES
             )
             return EXIT_NEEDS_A_DECISION
-
-    if from_here <= 1:
-        run_and_write(
-            "brief",
-            {IDEA: read_artifact(IDEA)},
-            params={"mode": "batch", "interactive": "false", "lang": lang},
-        )
-
-    if from_here <= 2:
-        if not Path(RESEARCH).exists():
-            write_artifact(RESEARCH, RESEARCH_SKIPPED)
-        run_and_write(
-            "prd",
-            {
-                BRIEF: read_artifact(BRIEF),
-                RESEARCH: read_artifact(RESEARCH),
-                PRD_TEMPLATE: load_template("prd_oneshot.md"),
-            },
-        )
-
-    run_and_write("decompose", {PRD: read_artifact(PRD)})
     return EXIT_OK
 
 
@@ -133,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--from",
         dest="start",
-        choices=STAGE_ORDER[1:],
+        choices=NAMES[1:],
         help="Начать с этой стадии, взяв входные артефакты из outputs/.",
     )
     parser.add_argument(
@@ -144,9 +126,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.start:
         if args.text or args.file:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
-        needed = REQUIRED_INPUT[args.start]
-        if not Path(needed).exists():
-            parser.error(f"для --from {args.start} нужен {needed}, а его нет")
+        for needed in stage_named(args.start).inputs:
+            if not Path(needed).exists():
+                # Пропущенная стадия свой артефакт не пишет, поэтому вместо «нет файла» полезнее
+                # сказать, какая стадия его делает: обычно ответ — начать прогон на шаг раньше.
+                maker = produced_by(needed)
+                hint = f"; его делает {maker}, начните с --from {maker}" if maker else ""
+                parser.error(f"для --from {args.start} нужен {needed}, а его нет{hint}")
         return start_pipeline(args.start, "", args.lang or settings.default_lang)
 
     if not (args.text or args.file):
@@ -161,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     body, lang_of_input = read_input(text)
     lang: str = args.lang or lang_of_input or settings.default_lang
 
-    return start_pipeline("intake", body, lang)
+    return start_pipeline(NAMES[0], body, lang)
 
 
 if __name__ == "__main__":

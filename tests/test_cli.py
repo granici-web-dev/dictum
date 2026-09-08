@@ -3,19 +3,15 @@ from pathlib import Path
 import pytest
 
 from app.cli import (
-    BRIEF,
-    CANDIDATES,
     EXIT_NEEDS_A_DECISION,
     EXIT_OK,
     EXIT_STAGE_FAILED,
     EXIT_USAGE,
-    IDEA,
-    PRD,
     main,
 )
-from app.stages import STAGE_OUTPUTS
 from app import stages
 from app.config import settings
+from app.pipeline import BRIEF, CANDIDATES, PRD, RESEARCH
 from tests.helpers import (
     BROKEN_ISSUES,
     InstallResponses,
@@ -132,8 +128,8 @@ def test_run_text_stops_when_intake_returns_candidates(
     assert main([TEXT, "--lang", "ru"]) == EXIT_NEEDS_A_DECISION
 
     assert len(requests) == 1
-    assert (tmp_path / "outputs/candidates.md").exists()
-    assert not (tmp_path / "outputs/brief.md").exists()
+    assert (tmp_path / CANDIDATES).exists()
+    assert not (tmp_path / BRIEF).exists()
 
 
 def test_run_text_saves_the_raw_answer_of_a_failed_stage(
@@ -203,18 +199,13 @@ def test_run_text_falls_back_to_the_configured_language(
     assert f"lang: {settings.default_lang}" in transcript
 
 
-def test_the_paths_the_cli_expects_are_the_ones_the_stages_may_return() -> None:
-    assert {IDEA, CANDIDATES} == set().union(*STAGE_OUTPUTS["intake"])
-    assert {BRIEF} == set().union(*STAGE_OUTPUTS["brief"])
-    assert {PRD} == set().union(*STAGE_OUTPUTS["prd"])
-
-
 def test_run_from_prd_uses_the_artifacts_already_on_disk(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "outputs").mkdir()
     (tmp_path / BRIEF).write_text("# Бриф с прошлого прогона\n", encoding="utf-8")
+    (tmp_path / RESEARCH).write_text("Ресёрч с прошлого прогона.\n", encoding="utf-8")
     requests = llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
 
     assert main(["--from", "prd"]) == EXIT_OK
@@ -277,3 +268,45 @@ def test_run_text_keeps_the_second_attempt_when_decompose_stays_invalid(
     assert not (tmp_path / "outputs/issues.md").exists()
     raw = (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8")
     assert "вторая попытка" in raw
+
+
+def test_a_missing_artifact_names_the_stage_that_makes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "prd"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert "начните с --from research" in capsys.readouterr().err
+
+
+def test_the_skipped_research_does_not_overwrite_one_already_on_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+    (tmp_path / RESEARCH).write_text("Настоящий ресёрч.\n", encoding="utf-8")
+    llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "research"]) == EXIT_OK
+
+    assert (tmp_path / RESEARCH).read_text(encoding="utf-8") == "Настоящий ресёрч.\n"
+
+
+def test_research_writes_its_line_when_nothing_is_on_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+    requests = llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "research"]) == EXIT_OK
+
+    assert "Ресёрч не запускался" in (tmp_path / RESEARCH).read_text(encoding="utf-8")
+    assert len(requests) == 2

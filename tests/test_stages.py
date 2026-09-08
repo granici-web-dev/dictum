@@ -7,9 +7,9 @@ from anthropic import DefaultHttpxClient
 
 from app import stages
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
+from app.pipeline import STAGES
 from app.render import issues_markdown
 from app.stages import (
-    STAGES,
     StageError,
     load_prompt,
     run_stage,
@@ -37,8 +37,9 @@ INPUTS = {"inputs/transcript.md": "---\nsource: text\nlang: ru\n---\nХочу б
 
 
 def test_all_stage_prompts_exist() -> None:
-    for s in STAGES:
-        assert "description:" in load_prompt(s)
+    for stage in STAGES:
+        if stage.runs == "llm":
+            assert "description:" in load_prompt(stage.name)
 
 
 def test_anthropic_client_reports_a_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:

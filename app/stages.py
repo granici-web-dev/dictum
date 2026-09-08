@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.models import IssuesFile
+from app.pipeline import ISSUES_JSON, ISSUES_MD, stage_named
 from app.render import issues_markdown
 from app.validate import check_issues
 
@@ -24,23 +25,11 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / ".claude" / "commands"
 API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
-STAGES = ("intake", "brief", "research", "prd", "decompose")
 
 # Без явного таймаута SDK считает выход по 28 токенов в секунду и запрещает нестримовый запрос
 # уже на 21 334 токенах. Замеренная скорость стадий — около 110 в секунду, то есть потолок
 # в 24 000 укладывается примерно в четыре минуты; десять — запас на медленный ответ.
 REQUEST_TIMEOUT_SECONDS = 600.0
-
-ISSUES_JSON = "outputs/issues.json"
-ISSUES_MD = "outputs/issues.md"
-
-STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
-    "intake": (frozenset({"inputs/idea.md"}), frozenset({"outputs/candidates.md"})),
-    "brief": (frozenset({"outputs/brief.md"}),),
-    "research": (frozenset({"outputs/research.md"}),),
-    "prd": (frozenset({"outputs/prd.md"}),),
-    "decompose": (frozenset({ISSUES_JSON}),),
-}
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
 
@@ -52,7 +41,7 @@ def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
         return [NO_FILE_BLOCKS]
     # Чужой набор файлов ремонту не подлежит, и run_stage обязан упасть на нём раньше,
     # чем на претензиях: иначе порядок двух проверок в конце run_stage перестанет быть верным.
-    if frozenset(files) not in STAGE_OUTPUTS[stage]:
+    if frozenset(files) not in stage_named(stage).outputs:
         return []
     if stage == "decompose":
         return check_issues(files[ISSUES_JSON])
@@ -83,9 +72,7 @@ class StageError(Exception):
 
 
 def load_prompt(stage: str) -> str:
-    if stage not in STAGES:
-        raise ValueError(f"unknown stage: {stage}")
-    return (COMMANDS_DIR / f"{stage}.md").read_text(encoding="utf-8")
+    return (COMMANDS_DIR / f"{stage_named(stage).name}.md").read_text(encoding="utf-8")
 
 
 def load_template(name: str) -> str:
@@ -217,8 +204,10 @@ def run_stage(
         files = parse_file_blocks(raw)
         problems = repairable_problems(stage, files)
 
-    if frozenset(files) not in STAGE_OUTPUTS[stage]:
-        expected = " or ".join(", ".join(sorted(paths)) for paths in STAGE_OUTPUTS[stage])
+    if frozenset(files) not in stage_named(stage).outputs:
+        expected = " or ".join(
+            ", ".join(sorted(paths)) for paths in stage_named(stage).outputs
+        )
         got = ", ".join(sorted(files)) or "no <file> blocks"
         raise StageError(f"{stage}: expected {expected}, got {got}", raw)
     if problems:
