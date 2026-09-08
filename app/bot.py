@@ -19,7 +19,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
-from app.ingest import Source, new_run_id
+from app.ingest import new_run_id
 from app.pipeline import CANDIDATES, Stage, stages_between
 from app.render import candidate_titles
 from app.run import Run, read_artifact, walk
@@ -108,11 +108,11 @@ def allowed_chats() -> frozenset[int]:
     return frozenset(int(part) for part in listed)
 
 
-def progress_text(run_id: str, done: list[str], source: Source) -> str:
+def progress_text(run: Run, done: list[str]) -> str:
     labels = dict(LABEL)
-    if source == "voice":
+    if run.audio:
         labels[FIRST_STAGE] = VOICE_INGEST_LABEL
-    lines = [f"Прогон {run_id}", ""]
+    lines = [f"Прогон {run.run_id}", ""]
     marked_current = False
     for stage in stages_between(FIRST_STAGE, LAST_STAGE):
         if stage.name in done:
@@ -125,20 +125,15 @@ def progress_text(run_id: str, done: list[str], source: Source) -> str:
     return "\n".join(lines)
 
 
-def board_url() -> str:
-    return f"https://trello.com/b/{settings.trello_board_id}"
-
-
 def cards_published(root: Path) -> int:
     return len(json.loads((root / JOURNAL).read_text(encoding="utf-8")))
 
 
 def finished_text(root: Path) -> str:
-    return f"Готово: {cards_published(root)} карточек.\n{board_url()}"
-
-
-def source_of(run: Run) -> Source:
-    return "voice" if run.audio else "text"
+    return (
+        f"Готово: {cards_published(root)} карточек.\n"
+        f"https://trello.com/b/{settings.trello_board_id}"
+    )
 
 
 def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
@@ -204,7 +199,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async with running:
         run = demo_run(new_run_id(), text=message.text)
-        note = await message.reply_text(progress_text(run.run_id, [], source_of(run)))
+        note = await message.reply_text(progress_text(run, []))
         await follow(note, run, message.date)
 
 
@@ -227,7 +222,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         run = demo_run(run_id, audio=audio)
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
-        note = await message.reply_text(progress_text(run.run_id, [], source_of(run)))
+        note = await message.reply_text(progress_text(run, []))
         try:
             await save_voice(message.voice, audio)
         except TelegramError:
@@ -255,7 +250,7 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
         done.append(stage.name)
         progress.append(
             asyncio.run_coroutine_threadsafe(
-                note.edit_text(progress_text(run.run_id, done, source_of(run))), loop
+                note.edit_text(progress_text(run, done)), loop
             )
         )
 

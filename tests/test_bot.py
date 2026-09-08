@@ -34,6 +34,10 @@ from app.run import Pause, Run
 from tests.test_render import REAL_CANDIDATES
 
 
+def a_run(run_id: str = "прогон", audio: Path | None = None) -> Run:
+    return Run(root=Path("."), run_id=run_id, lang="ru", audio=audio, auto_approve=True)
+
+
 def a_voice(duration: int) -> Voice:
     return Voice(file_id="f", file_unique_id="u", duration=duration)
 
@@ -76,27 +80,27 @@ def test_something_that_is_not_an_id_is_named_in_the_refusal(
 
 
 def test_the_progress_shows_every_stage_of_the_walk_in_its_order() -> None:
-    text = progress_text("прогон", [], "text")
+    text = progress_text(a_run(), [])
 
     printed = [line[2:] for line in text.splitlines()[2:]]
     assert printed == [LABEL[name] for name in NAMES]
 
 
 def test_the_progress_marks_what_is_done_and_what_runs_now() -> None:
-    text = progress_text("прогон", ["ingest", "intake"], "text")
+    text = progress_text(a_run(), ["ingest", "intake"])
 
     marks = [line[0] for line in text.splitlines()[2:]]
     assert marks == ["✓", "✓", "▸", "·", "·", "·", "·"]
 
 
 def test_a_finished_walk_marks_everything_and_points_at_nothing() -> None:
-    text = progress_text("прогон", list(NAMES), "text")
+    text = progress_text(a_run(), list(NAMES))
 
     assert [line[0] for line in text.splitlines()[2:]] == ["✓"] * len(NAMES)
 
 
 def test_the_progress_carries_the_run_id_so_the_log_can_be_found() -> None:
-    assert progress_text("a1b2c3d4", [], "text").startswith("Прогон a1b2c3d4")
+    assert progress_text(a_run("a1b2c3d4"), []).startswith("Прогон a1b2c3d4")
 
 
 def test_the_last_message_counts_the_cards_and_links_the_board(
@@ -136,7 +140,7 @@ def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
 
 
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
-    printed = progress_text("прогон", [], "voice").splitlines()[2:]
+    printed = progress_text(a_run(audio=Path("voice.oga")), []).splitlines()[2:]
 
     assert printed[0] == f"▸ {VOICE_INGEST_LABEL}"
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
