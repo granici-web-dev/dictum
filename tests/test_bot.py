@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -208,6 +209,7 @@ async def test_the_link_is_the_last_thing_the_message_shows(
     await follow(
         cast(Message, note),
         Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+        datetime.now(timezone.utc),
     )
 
     assert note.edits[-1] == finished_text(tmp_path)
@@ -275,3 +277,25 @@ def test_the_bot_answers_while_a_run_is_walking(monkeypatch: pytest.MonkeyPatch)
     main()
 
     assert started[0].concurrent_updates > 1
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_reports_how_long_the_person_waited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Репетиция (P2-06) спрашивает «сколько ждёт человек», и ответ идёт от отправки сообщения."""
+    journal = tmp_path / "outputs/publish.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"I-001": {}, "I-002": {}}', encoding="utf-8")
+    monkeypatch.setattr(settings, "trello_board_id", "board1")
+    monkeypatch.setattr(bot, "walk", walk_reporting_every_stage)
+
+    with caplog.at_level("INFO", logger="app.bot"):
+        await follow(
+            cast(Message, SlowNote()),
+            Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+            datetime.now(timezone.utc) - timedelta(seconds=42),
+        )
+
+    assert "run=прогон finished cards=2" in caplog.text
+    assert "run=прогон seconds=42" in caplog.text

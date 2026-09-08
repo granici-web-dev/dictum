@@ -11,7 +11,7 @@ import logging
 from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import Message, Update, Voice
@@ -200,7 +200,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         run = demo_run(new_run_id(), text=message.text)
         note = await message.reply_text(progress_text(run.run_id, [], source_of(run)))
-        await follow(note, run)
+        await follow(note, run, message.date)
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,7 +229,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception("Прогон %s не забрал голосовое", run_id)
             await note.edit_text(VOICE_NOT_TAKEN)
             return
-        await follow(note, run)
+        await follow(note, run, message.date)
 
 
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -239,7 +239,7 @@ async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await refuse(message, "unsupported", UNSUPPORTED)
 
 
-async def follow(note: Message, run: Run) -> None:
+async def follow(note: Message, run: Run, asked_at: datetime) -> None:
     """Гонит прогон в потоке и правит одно сообщение до самого конца."""
     done: list[str] = []
     loop = asyncio.get_running_loop()
@@ -263,6 +263,10 @@ async def follow(note: Message, run: Run) -> None:
         with suppress(TelegramError):
             await asyncio.wrap_future(edit)
     await note.edit_text(ending)
+    # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
+    # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
+    waited = datetime.now(timezone.utc) - asked_at
+    logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
 
 
 async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
@@ -287,6 +291,8 @@ async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
             f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
             "подтвердить их в чате пока нечем."
         )
+    cards = cards_published(run.root)
+    logger.info("run=%s finished cards=%d", run.run_id, cards)
     return finished_text(run.root)
 
 
@@ -331,6 +337,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(format="%(levelname)s %(message)s")
+    # Время в каждой строке: без него по логу не сказать, сколько заняла публикация и сколько
+    # прогон простоял между стадиями, а репетиция спрашивает именно это.
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("app").setLevel(logging.INFO)
     main()
