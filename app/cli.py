@@ -15,7 +15,7 @@ import frontmatter
 
 from app.config import ConfigError, settings
 from app.ingest import build_transcript, new_run_id, run_id_of
-from app.pipeline import CANDIDATES, NAMES, TRANSCRIPT, produced_by, stage_named, stages_from
+from app.pipeline import CANDIDATES, NAMES, TRANSCRIPT, produced_by, stages_from
 from app.stages import StageError, StageResult, load_template, run_stage
 
 logger = logging.getLogger(__name__)
@@ -64,6 +64,24 @@ def run_and_write(
 
 def read_artifact(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
+
+
+def missing_before(start: str) -> list[str]:
+    """Артефакты, которых обход не создаст сам, а прочитать попробует.
+
+    Проверять только входы стартовой стадии мало: следующие читают то, что пропущенные должны
+    были положить, и прогон падал бы посреди работы, успев записать часть файлов.
+    """
+    written: set[str] = set()
+    missing = []
+    for stage in stages_from(start):
+        missing += [
+            path for path in stage.inputs if path not in written and not Path(path).exists()
+        ]
+        # Пересечение, а не объединение: если у стадии несколько наборов выходов, гарантирован
+        # лишь тот файл, который есть в каждом. intake отдаёт либо idea.md, либо candidates.md.
+        written |= set.intersection(*(set(paths) for paths in stage.outputs))
+    return missing
 
 
 def run_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
@@ -124,13 +142,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.start:
         if args.text or args.file:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
-        for needed in (TRANSCRIPT, *stage_named(args.start).inputs):
-            if not Path(needed).exists():
-                # Пропущенная стадия свой артефакт не пишет, поэтому вместо «нет файла» полезнее
-                # сказать, какая стадия его делает: обычно ответ — начать прогон на шаг раньше.
-                maker = produced_by(needed)
-                hint = f"; его делает {maker}, начните с --from {maker}" if maker else ""
-                parser.error(f"для --from {args.start} нужен {needed}, а его нет{hint}")
+        if not Path(TRANSCRIPT).exists():
+            parser.error(f"для --from {args.start} нужен {TRANSCRIPT}: в нём run_id прогона")
+        for needed in missing_before(args.start):
+            # Пропущенная стадия свой артефакт не пишет, поэтому вместо «нет файла» полезнее
+            # сказать, какая стадия его делает: обычно ответ — начать прогон на шаг раньше.
+            maker = produced_by(needed)
+            hint = f"; его делает {maker}, начните с --from {maker}" if maker else ""
+            parser.error(f"для --from {args.start} нужен {needed}, а его нет{hint}")
         # Прогон продолжается, а не начинается, поэтому свой run_id ему брать неоткуда: выдать
         # второй значило бы, что у одного прогона их два, и publish создал бы карточки заново.
         started = run_id_of(read_artifact(TRANSCRIPT))

@@ -374,3 +374,47 @@ def test_research_writes_its_line_when_nothing_is_on_disk(
 
     assert "Ресёрч не запускался" in (tmp_path / RESEARCH).read_text(encoding="utf-8")
     assert len(requests) == 2
+
+
+def test_a_walk_is_refused_before_it_writes_anything_it_cannot_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    transcript_of_an_earlier_run(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "research"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    # research читать нечего, а вот prd следом за ним упал бы на brief.md, успев записать
+    # research.md: проверять только входы стартовой стадии мало.
+    assert "нужен outputs/brief.md" in capsys.readouterr().err
+    assert not (tmp_path / RESEARCH).exists()
+
+
+def test_a_walk_does_not_demand_what_it_will_write_itself(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
+    transcript_of_an_earlier_run(tmp_path)
+    llm([ok(PRD_FROM_A_REAL_RUN), ok(ISSUES_BLOCKS)])
+
+    # research.md на диске нет, но его кладёт сама стадия research внутри обхода.
+    assert main(["--from", "research"]) == EXIT_OK
+
+
+def test_a_missing_transcript_says_it_is_the_run_id_that_is_wanted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / PRD).write_text(PRD_FROM_A_REAL_RUN, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "decompose"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert "run_id" in capsys.readouterr().err
