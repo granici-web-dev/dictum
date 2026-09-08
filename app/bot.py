@@ -8,6 +8,9 @@
 import asyncio
 import json
 import logging
+from collections.abc import Callable
+from concurrent.futures import Future
+from contextlib import suppress
 from datetime import timedelta
 from pathlib import Path
 
@@ -211,39 +214,49 @@ async def follow(note: Message, run: Run) -> None:
     source: Source = "voice" if run.audio else "text"
     done: list[str] = []
     loop = asyncio.get_running_loop()
+    progress: list[Future[Message | bool]] = []
 
     def report(stage: Stage) -> None:
         # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий.
         done.append(stage.name)
-        asyncio.run_coroutine_threadsafe(
-            note.edit_text(progress_text(run.run_id, done, source)), loop
+        progress.append(
+            asyncio.run_coroutine_threadsafe(
+                note.edit_text(progress_text(run.run_id, done, source)), loop
+            )
         )
 
+    ending = await outcome(run, report)
+    # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
+    # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
+    # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
+    # Сбой правки прогресса финалу не помеха: она косметическая, ссылка — нет.
+    for edit in progress:
+        with suppress(TelegramError):
+            await asyncio.wrap_future(edit)
+    await note.edit_text(ending)
+
+
+async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
+    """Чем кончился прогон, одной строкой человеку."""
     try:
         waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        await note.edit_text(str(error))
-        return
+        return str(error)
     except Exception:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
-        await note.edit_text(
-            f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
-        )
-        return
+        return f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
 
     if waiting and waiting.kind == "choice":
-        await note.edit_text("В сообщении несколько идей. Пришлите одну.")
-        return
+        return "В сообщении несколько идей. Пришлите одну."
     if waiting:
-        await note.edit_text(
+        return (
             f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
             "подтвердить их в чате пока нечем."
         )
-        return
-    await note.edit_text(finished_text(run.root))
+    return finished_text(run.root)
 
 
 def main() -> None:

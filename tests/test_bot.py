@@ -1,9 +1,12 @@
+import asyncio
 import json
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
-from telegram import Voice
+from telegram import Message, Voice
 
 from app import bot
 from app.bot import (
@@ -14,12 +17,14 @@ from app.bot import (
     cards_published,
     demo_run,
     finished_text,
+    follow,
     main,
     progress_text,
     too_long,
 )
 from app.config import ConfigError, settings
-from app.pipeline import NAMES
+from app.pipeline import NAMES, Stage, stages_between
+from app.run import Pause, Run
 
 
 def a_voice(duration: int | timedelta) -> Voice:
@@ -151,3 +156,48 @@ def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(ConfigError, match="ffmpeg"):
         main()
 
+
+class SlowNote:
+    """Сообщение, у которого правка прогресса отвечает медленнее финальной.
+
+    Ровно так прогон 0ac7bdffe0e0ba58 и потерял ссылку: ответ на последнюю правку прогресса
+    пришёл после ответа на правку со ссылкой и затёр её списком галочек. При одинаковых
+    задержках порядок сохраняется сам собой, и тест проходит даже на сломанном коде.
+    """
+
+    def __init__(self) -> None:
+        self.edits: list[str] = []
+
+    async def edit_text(self, text: str) -> Message:
+        await asyncio.sleep(0.05 if text.startswith("Прогон") else 0)
+        self.edits.append(text)
+        return cast(Message, self)
+
+
+def walk_reporting_every_stage(
+    run: Run, start: str, stop: str, on_done: Callable[[Stage], None]
+) -> Pause | None:
+    for stage in stages_between(start, stop):
+        on_done(stage)
+    return None
+
+
+@pytest.mark.asyncio
+async def test_the_link_is_the_last_thing_the_message_shows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Правки прогресса не ждут ответа Telegram и однажды затёрли ссылку списком галочек."""
+    journal = tmp_path / "outputs/publish.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"I-001": {}}', encoding="utf-8")
+    monkeypatch.setattr(settings, "trello_board_id", "board1")
+    monkeypatch.setattr(bot, "walk", walk_reporting_every_stage)
+    note = SlowNote()
+
+    await follow(
+        cast(Message, note),
+        Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+    )
+
+    assert note.edits[-1] == finished_text(tmp_path)
+    assert len(note.edits) == len(NAMES) + 1
