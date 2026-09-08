@@ -68,10 +68,7 @@ def issues_file(directory: Path, text: str = REAL_ISSUES, run_id: str | None = N
 
 
 def decompose_answer(issues_json: str = REAL_ISSUES) -> str:
-    return (
-        f'<file path="outputs/issues.json">\n{issues_json}\n</file>\n'
-        '<file path="outputs/issues.md">\n# Issues\n\n## Фаза 1\n</file>'
-    )
+    return f'<file path="outputs/issues.json">\n{issues_json}\n</file>'
 
 
 def in_board_order(item: dict[str, Any]) -> tuple[float, str]:

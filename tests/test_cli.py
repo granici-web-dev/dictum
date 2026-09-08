@@ -139,12 +139,12 @@ def test_run_text_saves_the_raw_answer_of_a_failed_stage(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    half = '<file path="outputs/issues.json">\n{"issues": []}\n</file>'
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(half)])
+    empty = '<file path="outputs/issues.json">\n{"issues": []}\n</file>'
+    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(empty), ok(empty)])
 
     assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
 
-    assert (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8") == half
+    assert (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8") == empty
     assert not (tmp_path / "outputs/issues.json").exists()
 
 

@@ -23,7 +23,7 @@
 | brief | LLM `/brief` batch, диалог | idea.md + ответы | `brief.md` | всегда |
 | research | LLM `/research` | brief.md | `research.md` | — |
 | prd | LLM `/prd` | brief, research, template | `prd.md` | — |
-| decompose | LLM `/decompose` | prd.md | `issues.json`, `issues.md` | всегда |
+| decompose | LLM `/decompose` | prd.md | `issues.json`, `issues.md` (рисует код) | всегда |
 | publish | код | issues.json | карточки Trello, `publish.json` | — |
 
 ### 3.1 ingest
@@ -85,7 +85,7 @@
 - user = `<params>` (если есть) + `<file>`-блоки входов + `<user_edit>`, если есть. `history` — предыдущие ходы диалога (brief, P2-04), вставляются перед текущим сообщением.
 - `params` — параметры запуска стадии (`mode`, `lang`, `interactive`): `brief` вызывается с `mode: batch` и `interactive: false`, `research` — с `mode` по `kind` брифа. Промпты написаны для Claude Code, где стадия ведёт диалог; в режиме API диалога нет, поэтому `templates/api_mode.md` запрещает вопросы и требует помечать неясное как `[уточнить: ...]`.
 - `StageResult`: `files` (путь → содержимое из `<file>`-тегов ответа), `model`, `input_tokens`, `output_tokens`, `duration_ms`.
-- Набор файлов проверяется: `intake` → ровно один из `inputs/idea.md` / `outputs/candidates.md`; `decompose` → оба `outputs/issues.json` и `outputs/issues.md`; остальные стадии → ровно один свой файл. Любой другой набор — `StageError`. Файлы на диск пишет вызывающий: CLI в `outputs/`, воркер в `runs/<run_id>/` с версиями (§4).
+- Набор файлов проверяется: `intake` → ровно один из `inputs/idea.md` / `outputs/candidates.md`; `decompose` → только `outputs/issues.json`; остальные стадии → ровно один свой файл. `outputs/issues.md` дописывает `app/render.py` из разобранного JSON, уже после проверок: модель писала бэклог дважды, половина выхода стадии уходила на копию, потолок токенов срезал ответ целиком, и две копии могли разойтись молча. Любой другой набор — `StageError`. Файлы на диск пишет вызывающий: CLI в `outputs/`, воркер в `runs/<run_id>/` с версиями (§4).
 - Модель: `ANTHROPIC_MODEL`, для `decompose` — `ANTHROPIC_MODEL_DECOMPOSE`. Обе по умолчанию `claude-sonnet-5`; смена дефолта — правка этой строки и `.env.example`. Из ответа берутся text-блоки.
 - Каждый вызов логируется: stage, model, токены, длительность; run_id добавляет воркер (фаза 2).
 - Ретраи: `max_retries=2` SDK Anthropic (сетевые ошибки, 408/409/429/5xx, экспоненциальный backoff). Ответ без единого `<file>`-тега или не прошедший проверку стадии (`decompose` → `check_issues`) → один ремонтный повтор: в диалог добавляется ответ модели и список претензий. Предыдущий ответ обязательно идёт в истории: без него стадия генерирует всё заново и идентификаторы перестают быть стабильными, чего требует `/decompose`. Если и второй ответ не проходит — `StageError` со списком проблем; локальный прогон сохраняет вторую попытку в `outputs/<stage>.raw.md` и возвращает `1`, файлы стадии на диск не пишутся. Не чинятся и дают `StageError` с полем `raw` (текст ответа) сразу: `stop_reason != end_turn`, чужой набор файлов, два блока на один путь. Это сорванный контракт, а не претензия к содержимому. Токены и длительность в `StageResult` суммируются по обоим вызовам. Содержимое файла нормализуется: ровно один перевод строки в конце.

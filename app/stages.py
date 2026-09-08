@@ -15,6 +15,8 @@ from anthropic.types import Message, MessageParam
 from pydantic import BaseModel
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
+from app.models import IssuesFile
+from app.render import issues_markdown
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
@@ -25,13 +27,14 @@ API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 STAGES = ("intake", "brief", "research", "prd", "decompose")
 
 ISSUES_JSON = "outputs/issues.json"
+ISSUES_MD = "outputs/issues.md"
 
 STAGE_OUTPUTS: dict[str, tuple[frozenset[str], ...]] = {
     "intake": (frozenset({"inputs/idea.md"}), frozenset({"outputs/candidates.md"})),
     "brief": (frozenset({"outputs/brief.md"}),),
     "research": (frozenset({"outputs/research.md"}),),
     "prd": (frozenset({"outputs/prd.md"}),),
-    "decompose": (frozenset({ISSUES_JSON, "outputs/issues.md"}),),
+    "decompose": (frozenset({ISSUES_JSON}),),
 }
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
@@ -212,6 +215,8 @@ def run_stage(
     if problems:
         listed = "\n".join(f"- {problem}" for problem in problems)
         raise StageError(f"{stage}: ответ не прошёл проверку и после повтора:\n{listed}", raw)
+    if stage == "decompose":
+        files[ISSUES_MD] = issues_markdown(IssuesFile.model_validate_json(files[ISSUES_JSON]))
     return StageResult(
         files=files,
         model=response.model,

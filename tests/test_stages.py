@@ -5,6 +5,7 @@ from anthropic import DefaultHttpxClient
 
 from app import stages
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
+from app.render import issues_markdown
 from app.stages import (
     STAGES,
     StageError,
@@ -17,6 +18,7 @@ from tests.helpers import (
     InstallResponses,
     decompose_answer,
     ok,
+    real_issues,
     request_body,
     server_error,
 )
@@ -76,7 +78,7 @@ def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
 
     assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
     assert result.files["outputs/issues.json"] == REAL_ISSUES
-    assert result.files["outputs/issues.md"] == "# Issues\n\n## Фаза 1\n"
+    assert result.files["outputs/issues.md"] == issues_markdown(real_issues())
     assert result.model == "claude-sonnet-5"
     assert (result.input_tokens, result.output_tokens) == (120, 30)
 
@@ -176,10 +178,11 @@ def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: Install
         run_stage("intake", INPUTS)
 
 
-def test_run_stage_raises_when_decompose_returns_only_one_file(llm: InstallResponses) -> None:
-    llm([ok(f'<file path="outputs/issues.json">\n{REAL_ISSUES}\n</file>')])
+def test_run_stage_raises_when_decompose_writes_the_page_itself(llm: InstallResponses) -> None:
+    both = decompose_answer() + '\n<file path="outputs/issues.md">\n# Бэклог\n</file>'
+    llm([ok(both)])
 
-    with pytest.raises(StageError, match="expected outputs/issues.json, outputs/issues.md"):
+    with pytest.raises(StageError, match="expected outputs/issues.json"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
 
@@ -219,6 +222,7 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
     complaint = request_body(requests[1])["messages"][-1]["content"]
     assert "deferred.0.title:" in complaint
     assert "Меняй только то, на что указано" in complaint
+
 
 
 def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:
