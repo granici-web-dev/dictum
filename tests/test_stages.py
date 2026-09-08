@@ -1,3 +1,5 @@
+import logging
+
 import anthropic
 import httpx2
 import pytest
@@ -223,6 +225,16 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
     assert "deferred.0.title:" in complaint
     assert "Меняй только то, на что указано" in complaint
 
+
+def test_a_repair_that_worked_still_says_what_was_wrong(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer())])
+
+    with caplog.at_level(logging.WARNING, logger="app.stages"):
+        run_stage("decompose", {"outputs/prd.md": "# PRD"})
+
+    assert "deferred.0.title: Field required" in caplog.text
 
 
 def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:

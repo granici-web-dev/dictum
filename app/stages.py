@@ -197,6 +197,9 @@ def run_stage(
 
     problems = repairable_problems(stage, files)
     if problems:
+        # Удачный ремонт стирал причину: прогон выглядел как два вызова без объяснения,
+        # а претензии оставались только у провалившихся.
+        logger.warning("stage=%s repair=1 problems=%s", stage, "; ".join(problems))
         repair, repair_ms = ask_model(
             stage,
             model,
