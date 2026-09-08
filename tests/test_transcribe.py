@@ -89,7 +89,16 @@ def test_silence_is_refused_before_a_single_stage_is_paid_for(
         transcribe.transcribe(recording)
 
 
-def test_transcription_without_the_live_flag_never_leaves_the_process(recording: Path) -> None:
+def test_transcription_without_the_live_flag_does_not_even_start_ffmpeg(
+    recording: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Флаг проверяется до подпроцесса: иначе прогон жжёт процессор ради отказа."""
+
+    def never(source: Path) -> Path:
+        raise AssertionError("ffmpeg запущен до проверки ALLOW_LIVE_API")
+
+    monkeypatch.setattr(transcribe, "convert_to_mp3", never)
+
     with pytest.raises(LiveApiNotAllowed, match="ALLOW_LIVE_API"):
         transcribe.transcribe(recording)
 

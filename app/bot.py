@@ -155,13 +155,15 @@ def permitted(message: Message) -> bool:
     return False
 
 
-async def refuse(message: Message, tag: str, text: str) -> None:
+async def refuse(message: Message, tag: str, text: str, **facts: object) -> None:
     """Отвечает отказом и оставляет счётную запись.
 
     Отчёт репетиции (P2-06) отвечает на вопрос «сколько человек упёрлось» числом, а не памятью,
-    поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ.
+    поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ. Через одну дверь
+    ходят все отказы, иначе формат разъедется и считать придётся глазами.
     """
-    logger.info("refusal=%s chat=%s", tag, message.chat_id)
+    written = "".join(f" {name}={value}" for name, value in facts.items())
+    logger.info("refusal=%s chat=%s%s", tag, message.chat_id, written)
     await message.reply_text(text)
 
 
@@ -208,12 +210,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if too_long(message.voice):
         # Длительность в записи, а не только тег: на репетиции важно, насколько именно
         # переговорили лимит, иначе непонятно, двигать его или оставить.
-        logger.info(
-            "refusal=too_long chat=%s seconds=%d",
-            message.chat_id,
-            voice_seconds(message.voice),
-        )
-        await message.reply_text(TOO_LONG)
+        await refuse(message, "too_long", TOO_LONG, seconds=voice_seconds(message.voice))
         return
     if running.locked():
         await refuse(message, "busy", BUSY)

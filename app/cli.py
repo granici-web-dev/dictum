@@ -56,7 +56,8 @@ def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: 
     if waiting:
         if waiting.kind == "choice":
             logger.info(
-                "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.",
+                "Одной идеи не вышло: посмотрите %s и запустите прогон с текстом одной из них "
+                "или с той же идеей подробнее.",
                 waiting.artifact,
             )
         else:

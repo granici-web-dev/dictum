@@ -39,6 +39,10 @@ FFMPEG_MISSING = (
 
 NOTHING_HEARD = "В записи не разобрать речи. Наговорите ещё раз, поближе к микрофону."
 
+# Хвост stderr, а не весь вывод: ffmpeg печатает баннер сборки на десяток строк, а причина
+# отказа всегда в конце.
+STDERR_TAIL = 300
+
 
 class Transcription(BaseModel):
     text: str
@@ -51,9 +55,11 @@ class TranscriptionError(RuntimeError):
 
 
 def ffmpeg_installed() -> bool:
+    # OSError, а не только FileNotFoundError: файл бывает на месте, но без права на запуск, и
+    # тогда старт должен назвать причину, а не упасть трассировкой.
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError):
         return False
     return True
 
@@ -70,10 +76,8 @@ def convert_to_mp3(source: Path) -> Path:
     except FileNotFoundError as error:
         raise TranscriptionError(FFMPEG_MISSING) from error
     except subprocess.CalledProcessError as error:
-        # Хвост, а не весь вывод: ffmpeg печатает баннер сборки на десяток строк, и причина
-        # отказа всегда в конце.
         raise TranscriptionError(
-            f"ffmpeg не смог перекодировать {source.name}: {error.stderr.strip()[-300:]}"
+            f"ffmpeg не смог перекодировать {source.name}: {error.stderr.strip()[-STDERR_TAIL:]}"
         ) from error
     return target
 
@@ -110,10 +114,13 @@ def language_code(detected: str) -> str:
 
 
 def transcribe(audio: Path) -> Transcription:
+    # Клиент строится первым: он проверяет ALLOW_LIVE_API и ключ, и делать это после ffmpeg
+    # значит запустить подпроцесс ради прогона, который всё равно откажется.
+    client = whisper_client()
     mp3 = convert_to_mp3(audio)
     started = time.perf_counter()
     with mp3.open("rb") as recording:
-        answer = whisper_client().audio.transcriptions.create(
+        answer = client.audio.transcriptions.create(
             model=MODEL, file=recording, response_format="verbose_json"
         )
     logger.info(

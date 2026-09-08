@@ -78,6 +78,8 @@ def publish_body(run: Run) -> dict[str, str]:
     return {}
 
 
+# Тело стадии-кода: отдаёт файлы к записи и вправе поправить сам прогон — ingest так проставляет
+# язык, распознанный Whisper. Другого места у языка нет: он свойство прогона, а не артефакта.
 BODIES: dict[str, Callable[[Run], dict[str, str]]] = {
     "ingest": ingest_body,
     "research": research_body,
