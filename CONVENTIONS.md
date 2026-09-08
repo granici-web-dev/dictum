@@ -27,6 +27,7 @@ Engineering posture for this repo. Read together with `CLAUDE.md` (rules), `SPEC
 
 ### Discipline
 - **One commit, one decision.** Refactoring goes in its own commit, never mixed with the feature that prompted it. The message answers why (`CLAUDE.md` rule 6).
+- **A closed task is a pushed task.** `make test` green and `PLAN.md` ticked is not the end: the work reaches `origin/main` in the same sitting. Twenty-one commits once sat unpushed through a whole day of live runs, and everything that day existed on one laptop. If `origin` is behind by more than the task in hand, say so before starting the next one.
 - **TODO only with a PLAN.md id.** `TODO(P1-04): ...`. A TODO without an id is a review blocker.
 - **Generated code is edited.** Alembic autogenerate output is reviewed and corrected by hand before commit (names, indexes, data migrations). Never commit a migration you have not read.
 - **Never invent data, including in fixtures.** `[уточнить: ...]` instead of a plausible placeholder (`CLAUDE.md` rule 5).
