@@ -17,13 +17,15 @@ from app.bot import (
     cards_published,
     demo_run,
     finished_text,
+    NO_SINGLE_IDEA,
     follow,
     main,
+    outcome,
     progress_text,
     too_long,
 )
 from app.config import ConfigError, settings
-from app.pipeline import NAMES, Stage, stages_between
+from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
 
 
@@ -201,3 +203,25 @@ async def test_the_link_is_the_last_thing_the_message_shows(
 
     assert note.edits[-1] == finished_text(tmp_path)
     assert len(note.edits) == len(NAMES) + 1
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_after_intake_does_not_count_ideas_it_did_not_find(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Кандидаты бывают и от пустоты: на двухсекундном голосовом idea не нашлась вовсе."""
+
+    def walk_stopping_on_choice(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None]
+    ) -> Pause | None:
+        return Pause(stage="intake", artifact=CANDIDATES, kind="choice")
+
+    monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
+
+    said = await outcome(
+        Run(root=tmp_path, run_id="прогон", lang="ru", text="…", auto_approve=True),
+        lambda stage: None,
+    )
+
+    assert said == NO_SINGLE_IDEA
+    assert "несколько" not in said
