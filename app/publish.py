@@ -66,7 +66,8 @@ class MissingRunId(ValueError):
     def __init__(self, path: Path) -> None:
         super().__init__(
             f"в {path} нет run_id. Его проставляет decompose из transcript.md (SPEC §3.1); "
-            "publish своего не выдаёт, иначе у прогона было бы два разных номера."
+            "publish своего не выдаёт, иначе у прогона было бы два разных номера. "
+            "Если карточки этого прогона уже на доске, возьмите run: из маркера любой из них."
         )
 
 

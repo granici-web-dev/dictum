@@ -53,7 +53,7 @@ def run_and_write(
     run_id: str,
 ) -> StageResult:
     try:
-        result = run_stage(stage, inputs, params=params, run_id=run_id)
+        result = run_stage(stage, inputs, run_id, params=params)
     except StageError as error:
         write_artifact(f"outputs/{stage}.raw.md", error.raw)
         raise
@@ -90,10 +90,10 @@ def run_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
 
     for stage in stages_from(start):
         if stage.runs == "code":
-            written = next(iter(stage.outputs[0]))
+            (written,) = stage.outputs[0]
             # Настоящий ресёрч, положенный руками или прошлым прогоном, затирать нечем.
             if not Path(written).exists():
-                write_artifact(written, stage.content or "")
+                write_artifact(written, stage.content)
             continue
 
         inputs = {path: read_artifact(path) for path in stage.inputs}
@@ -104,7 +104,8 @@ def run_pipeline(start: str, text: str, lang: str, run_id: str) -> int:
             params["lang"] = lang
 
         result = run_and_write(stage.name, inputs, params, run_id)
-        # Кандидатов может вернуть только intake, и это решение человека, а не свойство стадии.
+        # candidates.md объявляет в выходах только intake, поэтому спрашивать про стадию
+        # отдельно незачем. Кандидаты — решение человека, дальше прогон не идёт.
         if CANDIDATES in result.files:
             logger.info(
                 "Идей несколько. Выберите одну в %s и запустите прогон с её текстом.", CANDIDATES
@@ -154,7 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         # второй значило бы, что у одного прогона их два, и publish создал бы карточки заново.
         started = run_id_of(read_artifact(TRANSCRIPT))
         if not started:
-            parser.error(f"в {TRANSCRIPT} нет run_id: этот прогон старше P2-00, начните заново")
+            parser.error(
+                f"в {TRANSCRIPT} нет run_id: транскрипт старше этого правила, начните прогон заново"
+            )
         return start_pipeline(args.start, "", args.lang or settings.default_lang, started)
 
     if not (args.text or args.file):

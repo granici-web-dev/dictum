@@ -35,7 +35,7 @@ class Deferred(BaseModel):
 class IssuesFile(BaseModel):
     source: str
     lang: str
-    # runs.id прогона (SPEC §3.1): выдан ingest, вписан decompose, publish только читает. По нему
+    # runs.id прогона (SPEC §3.1): выдаётся один раз в начале и дальше не меняется. По нему
     # карточки прогона узнаются на доске, где локальные I-00N разных прогонов неразличимы.
     run_id: str | None = Field(default=None, min_length=1)
     phases: list[Phase]

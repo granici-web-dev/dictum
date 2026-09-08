@@ -17,11 +17,13 @@ from pydantic import BaseModel
 
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.models import IssuesFile
-from app.pipeline import ISSUES_JSON, ISSUES_MD, stage_named
+from app.pipeline import ISSUES_JSON, stage_named
 from app.render import issues_markdown
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
+
+ISSUES_MD = "outputs/issues.md"
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / ".claude" / "commands"
@@ -174,10 +176,10 @@ def with_run_id(issues_json: str, run_id: str) -> str:
 def run_stage(
     stage: str,
     inputs: dict[str, str],
+    run_id: str,
     user_edit: str | None = None,
     history: list[MessageParam] | None = None,
     params: dict[str, str] | None = None,
-    run_id: str | None = None,
 ) -> StageResult:
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
     messages: list[MessageParam] = [
@@ -222,10 +224,8 @@ def run_stage(
         listed = "\n".join(f"- {problem}" for problem in problems)
         raise StageError(f"{stage}: ответ не прошёл проверку и после повтора:\n{listed}", raw)
     if stage == "decompose":
-        # run_id принадлежит прогону и приходит от ingest (SPEC §3.1): в issues.json его вписывают
-        # здесь, чтобы publish его только читал. Кто гонит пайплайн, тот его и передаёт.
-        if run_id:
-            files[ISSUES_JSON] = with_run_id(files[ISSUES_JSON], run_id)
+        # В issues.json run_id вписывают здесь, чтобы publish его только читал.
+        files[ISSUES_JSON] = with_run_id(files[ISSUES_JSON], run_id)
         files[ISSUES_MD] = issues_markdown(IssuesFile.model_validate_json(files[ISSUES_JSON]))
     return StageResult(
         files=files,

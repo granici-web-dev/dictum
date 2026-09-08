@@ -8,8 +8,13 @@ import secrets
 import frontmatter
 
 
+# Восемь байт, а не четыре: доска у прогонов общая, и совпадение идентификаторов склеило бы
+# карточки двух прогонов — второй счёл бы чужие своими и не создал бы собственные.
+RUN_ID_BYTES = 8
+
+
 def new_run_id() -> str:
-    return secrets.token_hex(4)
+    return secrets.token_hex(RUN_ID_BYTES)
 
 
 def build_transcript(text: str, lang: str, run_id: str) -> str:

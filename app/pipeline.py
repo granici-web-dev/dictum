@@ -7,7 +7,7 @@ CLI — от стадии в `--from`, бот — от начала. Раньш�
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 TRANSCRIPT = "inputs/transcript.md"
 IDEA = "inputs/idea.md"
@@ -16,7 +16,6 @@ BRIEF = "outputs/brief.md"
 RESEARCH = "outputs/research.md"
 PRD = "outputs/prd.md"
 ISSUES_JSON = "outputs/issues.json"
-ISSUES_MD = "outputs/issues.md"
 
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
@@ -27,13 +26,25 @@ class Stage(BaseModel):
     inputs: tuple[str, ...] = ()
     # Файл репозитория, а не артефакт прогона: его не читают из outputs/ и не версионируют.
     template: str | None = None
+    # Что отдаёт исполнитель стадии. issues.md сюда не входит: его дорисовывает код
+    # уже после проверок, и модель за него не отвечает.
     outputs: tuple[frozenset[str], ...]
     params: dict[str, str] = Field(default_factory=dict)
     # Язык — свойство прогона, а не стадии, поэтому подмешивается на ходу. Сегодня его получает
     # только brief: остальным промптам его не показывали, и менять их вход — отдельное решение.
     needs_lang: bool = False
-    # Содержимое, которое стадия-код кладёт в свой единственный выход.
-    content: str | None = None
+    # Содержимое, которое стадия-код кладёт в свой единственный выход. У стадий llm пустое:
+    # что писать, решает модель.
+    content: str = ""
+
+    @model_validator(mode="after")
+    def a_code_stage_knows_exactly_what_it_writes(self) -> "Stage":
+        # Обходчик кладёт content стадии-кода в единственный путь её единственного набора выходов
+        # и не проверяет ни того, ни другого: инвариант держится здесь.
+        writes_one_file = [len(paths) for paths in self.outputs] == [1]
+        if self.runs == "code" and not (self.content and writes_one_file):
+            raise ValueError(f"{self.name}: стадия-код пишет один файл и знает его содержимое")
+        return self
 
 
 STAGES: tuple[Stage, ...] = (

@@ -1,3 +1,4 @@
+import json
 import logging
 
 import anthropic
@@ -33,6 +34,8 @@ BRIEF_BLOCK = (
     '<file path="outputs/brief.md">\n# Бриф: напоминания\n\n'
     "## 1. Пользователи\nКоманда из пяти человек.\n</file>"
 )
+RUN = "прогон-для-теста"
+
 INPUTS = {"inputs/transcript.md": "---\nsource: text\nlang: ru\n---\nХочу бота."}
 
 
@@ -70,17 +73,19 @@ def test_no_request_leaves_the_process_without_the_live_flag(
     stages.anthropic_client.cache_clear()
 
     with pytest.raises(LiveApiNotAllowed, match="ALLOW_LIVE_API is not true"):
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
     assert sent == []
 
 
 def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
     llm([ok(decompose_answer())])
 
-    result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
+    result = run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
     assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
-    assert result.files["outputs/issues.json"] == REAL_ISSUES
+    assert json.loads(result.files["outputs/issues.json"]) == json.loads(REAL_ISSUES) | {
+        "run_id": RUN
+    }
     assert result.files["outputs/issues.md"] == issues_markdown(real_issues())
     assert result.model == "claude-sonnet-5"
     assert (result.input_tokens, result.output_tokens) == (120, 30)
@@ -89,7 +94,7 @@ def test_run_stage_parses_file_blocks_and_usage(llm: InstallResponses) -> None:
 def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
     requests = llm([ok(IDEA_BLOCK)])
 
-    run_stage("intake", INPUTS)
+    run_stage("intake", INPUTS, RUN)
 
     body = request_body(requests[0])
     assert body["model"] == settings.anthropic_model
@@ -104,7 +109,7 @@ def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
 def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
     requests = llm([ok(BRIEF_BLOCK)])
 
-    run_stage("brief", {"inputs/idea.md": "# Идея"}, params={"mode": "batch", "lang": "ru"})
+    run_stage("brief", {"inputs/idea.md": "# Идея"}, RUN, params={"mode": "batch", "lang": "ru"})
 
     content = request_body(requests[0])["messages"][0]["content"]
     assert content.startswith("<params>\nmode: batch\nlang: ru\n</params>")
@@ -113,7 +118,7 @@ def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
 def test_run_stage_appends_user_edit(llm: InstallResponses) -> None:
     requests = llm([ok(BRIEF_BLOCK)])
 
-    run_stage("brief", INPUTS, user_edit="Убери упоминание выходных")
+    run_stage("brief", INPUTS, RUN, user_edit="Убери упоминание выходных")
 
     edit = "<user_edit>\nУбери упоминание выходных\n</user_edit>"
     assert request_body(requests[0])["messages"][0]["content"].endswith(edit)
@@ -126,7 +131,7 @@ def test_run_stage_prepends_history(llm: InstallResponses) -> None:
         {"role": "assistant", "content": "Команда из пяти человек."},
     ]
 
-    run_stage("brief", INPUTS, history=history)
+    run_stage("brief", INPUTS, RUN, history=history)
 
     messages = request_body(requests[0])["messages"]
     assert messages[:2] == history
@@ -139,7 +144,7 @@ def test_run_stage_uses_decompose_model(
     monkeypatch.setattr(settings, "anthropic_model_decompose", "claude-opus-5")
     requests = llm([ok(decompose_answer())])
 
-    run_stage("decompose", {"outputs/prd.md": "# PRD"})
+    run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
     assert request_body(requests[0])["model"] == "claude-opus-5"
 
@@ -147,7 +152,7 @@ def test_run_stage_uses_decompose_model(
 def test_run_stage_retries_twice_on_server_error(llm: InstallResponses) -> None:
     requests = llm([server_error(), server_error(), ok(IDEA_BLOCK)])
 
-    result = run_stage("intake", INPUTS)
+    result = run_stage("intake", INPUTS, RUN)
 
     assert "inputs/idea.md" in result.files
     assert len(requests) == 3
@@ -159,7 +164,7 @@ def test_run_stage_raises_after_third_server_error(
     requests = llm([server_error(), server_error(), server_error()])
 
     with pytest.raises(anthropic.InternalServerError):
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
     assert len(requests) == 3
     assert "stage=intake" in caplog.text
     assert "error=InternalServerError" in caplog.text
@@ -170,7 +175,7 @@ def test_run_stage_raises_when_output_truncated(llm: InstallResponses) -> None:
     llm([ok(truncated, stop_reason="max_tokens")])
 
     with pytest.raises(StageError, match="Raise ANTHROPIC_MAX_TOKENS") as exc_info:
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
     assert exc_info.value.raw == truncated
 
 
@@ -178,7 +183,7 @@ def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: Install
     llm([ok('<file path="outputs/notes.md">\n# Заметки\n</file>')])
 
     with pytest.raises(StageError, match="expected inputs/idea.md or outputs/candidates.md"):
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
 
 
 def test_run_stage_raises_when_decompose_writes_the_page_itself(llm: InstallResponses) -> None:
@@ -186,7 +191,7 @@ def test_run_stage_raises_when_decompose_writes_the_page_itself(llm: InstallResp
     llm([ok(both)])
 
     with pytest.raises(StageError, match="expected outputs/issues.json"):
-        run_stage("decompose", {"outputs/prd.md": "# PRD"})
+        run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
 
 def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) -> None:
@@ -197,13 +202,13 @@ def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) ->
     llm([ok(twice)])
 
     with pytest.raises(StageError, match="two <file> blocks share the path inputs/idea.md"):
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
 
 
 def test_run_stage_asks_again_when_the_answer_has_no_file_blocks(llm: InstallResponses) -> None:
     requests = llm([ok("Вот идея, но я забыл теги."), ok(IDEA_BLOCK)])
 
-    result = run_stage("intake", INPUTS)
+    result = run_stage("intake", INPUTS, RUN)
 
     assert "inputs/idea.md" in result.files
     assert len(requests) == 2
@@ -218,7 +223,7 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
 ) -> None:
     requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer())])
 
-    result = run_stage("decompose", {"outputs/prd.md": "# PRD"})
+    result = run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
     assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
     assert len(requests) == 2
@@ -233,7 +238,7 @@ def test_a_repair_that_worked_still_says_what_was_wrong(
     llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer())])
 
     with caplog.at_level(logging.WARNING, logger="app.stages"):
-        run_stage("decompose", {"outputs/prd.md": "# PRD"})
+        run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
     assert "deferred.0.title: Field required" in caplog.text
 
@@ -242,7 +247,7 @@ def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallRespon
     requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer(BROKEN_ISSUES))])
 
     with pytest.raises(StageError, match=r"deferred\.0\.title:"):
-        run_stage("decompose", {"outputs/prd.md": "# PRD"})
+        run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
 
     assert len(requests) == 2
 
@@ -251,7 +256,7 @@ def test_run_stage_gives_up_after_one_repair_attempt(llm: InstallResponses) -> N
     requests = llm([ok("Без тегов."), ok("Снова без тегов.")])
 
     with pytest.raises(StageError, match="got no <file> blocks") as exc_info:
-        run_stage("intake", INPUTS)
+        run_stage("intake", INPUTS, RUN)
 
     assert len(requests) == 2
     assert exc_info.value.raw == "Снова без тегов."
