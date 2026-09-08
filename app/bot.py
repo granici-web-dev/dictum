@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from app.candidates import parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import CANDIDATES, ISSUES_JSON, Stage, stages_between
+from app.pipeline import ISSUES_JSON, Stage, stages_between
 from app.publish import journal_of
 from app.run import Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
@@ -265,12 +265,12 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
 
 
-def choice_text(run: Run) -> str:
+def choice_text(run: Run, artifact: str) -> str:
     """Что показать, когда одной идеи не вышло: список из candidates.md.
 
     Кнопки — P3-04; до них человек присылает выбранную идею обычным сообщением.
     """
-    found = parse_candidates(read_artifact(run.root, CANDIDATES))
+    found = parse_candidates(read_artifact(run.root, artifact))
     listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
     if found.outcome == "none":
         return "\n".join([NOTHING_HEARD, "", *listed, "", ASK_AGAIN])
@@ -286,7 +286,7 @@ async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
         waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
         if waiting and waiting.kind == "choice":
             logger.info("stop=choice run=%s", run.run_id)
-            return choice_text(run)
+            return choice_text(run, waiting.artifact)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return (
