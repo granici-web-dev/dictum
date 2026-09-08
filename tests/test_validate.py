@@ -21,11 +21,21 @@ def test_the_real_answer_has_no_problems() -> None:
     assert check_issues(REAL_ISSUES) == []
 
 
-def test_a_title_over_the_limit_is_reported() -> None:
+def test_the_answer_that_forgot_the_deferred_titles_is_reported() -> None:
     problems = check_issues(BROKEN_ISSUES)
 
+    assert len(problems) == 4
+    assert all(problem.endswith("title: Field required") for problem in problems)
+
+
+def test_a_schema_problem_is_reported_under_the_id_of_its_issue() -> None:
+    data = real_issues()
+    data["issues"][0]["title"] = "П" * 81
+
+    problems = problems_of(data)
+
     assert len(problems) == 1
-    assert problems[0].startswith("I-007.title:")
+    assert problems[0].startswith("I-001.title:")
 
 
 def test_text_that_is_not_json_is_reported() -> None:

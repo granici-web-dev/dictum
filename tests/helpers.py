@@ -47,7 +47,7 @@ def request_body(request: httpx2.Request) -> dict[str, Any]:
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 REAL_ISSUES = (FIXTURES / "issues_real.json").read_text(encoding="utf-8")
-BROKEN_ISSUES = (FIXTURES / "issues_title_too_long.json").read_text(encoding="utf-8")
+BROKEN_ISSUES = (FIXTURES / "issues_deferred_without_title.json").read_text(encoding="utf-8")
 
 
 DEPENDENCY_BELOW = (FIXTURES / "issues_dependency_below.json").read_text(encoding="utf-8")

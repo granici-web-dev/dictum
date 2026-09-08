@@ -217,14 +217,14 @@ def test_run_stage_asks_decompose_again_when_the_issues_do_not_validate(
     assert set(result.files) == {"outputs/issues.json", "outputs/issues.md"}
     assert len(requests) == 2
     complaint = request_body(requests[1])["messages"][-1]["content"]
-    assert "I-007.title:" in complaint
+    assert "deferred.0.title:" in complaint
     assert "Меняй только то, на что указано" in complaint
 
 
 def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallResponses) -> None:
     requests = llm([ok(decompose_answer(BROKEN_ISSUES)), ok(decompose_answer(BROKEN_ISSUES))])
 
-    with pytest.raises(StageError, match=r"I-007\.title:"):
+    with pytest.raises(StageError, match=r"deferred\.0\.title:"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"})
 
     assert len(requests) == 2
