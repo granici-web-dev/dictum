@@ -20,7 +20,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import CANDIDATES, Stage, stages_between
+from app.pipeline import CANDIDATES, ISSUES_JSON, Stage, stages_between
+from app.publish import journal_of
 from app.render import candidate_titles
 from app.run import Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
@@ -33,7 +34,6 @@ logger = logging.getLogger("app.bot")
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 LAST_STAGE = "publish"
-JOURNAL = "outputs/publish.json"
 VOICE_FILE = "inputs/voice.oga"
 
 # Ограничение стенда, а не Whisper: минута записи стоит копейки, а вот стадии за ней думают тем
@@ -126,7 +126,7 @@ def progress_text(run: Run, done: list[str]) -> str:
 
 
 def cards_published(root: Path) -> int:
-    return len(json.loads((root / JOURNAL).read_text(encoding="utf-8")))
+    return len(json.loads(journal_of(root / ISSUES_JSON).read_text(encoding="utf-8")))
 
 
 def finished_text(root: Path) -> str:

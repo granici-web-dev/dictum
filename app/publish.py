@@ -342,6 +342,18 @@ def make_card(
     )
 
 
+JOURNAL_NAME = "publish.json"
+
+
+def journal_of(issues_path: Path) -> Path:
+    """Журнал публикации лежит рядом с issues.json того же прогона.
+
+    Правило записано здесь одно на всех: бот читает журнал, чтобы сосчитать карточки, и пока
+    путь был написан у него отдельно, две записи могли разъехаться молча.
+    """
+    return issues_path.parent / JOURNAL_NAME
+
+
 def publish(issues_path: Path) -> list[CardOutcome]:
     text = issues_path.read_text(encoding="utf-8")
     problems = check_issues(text)
@@ -352,7 +364,7 @@ def publish(issues_path: Path) -> list[CardOutcome]:
     if not issues.run_id:
         raise MissingRunId(issues_path)
     run_id = issues.run_id
-    log_path = issues_path.parent / "publish.json"
+    log_path = journal_of(issues_path)
 
     with closing(open_trello()) as board:
         on_board = marked_cards(board.cards())
