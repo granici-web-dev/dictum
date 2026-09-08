@@ -14,8 +14,10 @@ from app.pipeline import (
     TRANSCRIPT,
     stage_named,
 )
-from app.run import Pause, Run, missing_before, walk
-from tests.helpers import FakeBoard, InstallResponses, ok, real_issues
+from app import run as walking
+from app.run import Pause, Run, ingest_body, missing_before, walk
+from app.transcribe import Transcription
+from tests.helpers import FakeBoard, InstallResponses, ok, real_issues, request_body
 from tests.test_cli import (
     BRIEF_BLOCK,
     CANDIDATES_BLOCK,
@@ -49,6 +51,44 @@ def a_run(root: Path, text: str = TEXT, auto_approve: bool = False) -> Run:
 
 def a_demo_run(root: Path, text: str = TEXT) -> Run:
     return a_run(root, text, auto_approve=True)
+
+
+def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -> Run:
+    """Прогон с голосовым. Расшифровка подменена: её собственные тесты — в test_transcribe."""
+    monkeypatch.setattr(
+        walking,
+        "transcribe",
+        lambda audio: Transcription(text=TEXT, lang=lang, duration_seconds=47),
+    )
+    return Run(
+        root=root,
+        run_id=RUN_ID,
+        lang="de",
+        audio=root / "inputs/voice.oga",
+        auto_approve=True,
+    )
+
+
+def test_a_voice_run_writes_a_transcript_that_names_the_source_and_the_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = ingest_body(a_voice_run(tmp_path, monkeypatch))[TRANSCRIPT]
+
+    assert f"run_id: {RUN_ID}\nsource: voice\nduration: 47\nlang: ru\n" in transcript
+    assert TEXT in transcript
+
+
+def test_the_language_of_the_run_follows_the_voice_and_not_the_default(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEFAULT_LANG у бота стоит до расшифровки; дальше язык артефактов называет Whisper."""
+    requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
+
+    walk(a_voice_run(tmp_path, monkeypatch), "ingest", "brief")
+
+    brief_message = request_body(requests[1])["messages"][0]["content"]
+    params = brief_message.split("<params>\n", 1)[1].split("\n</params>", 1)[0]
+    assert "lang: ru" in params.splitlines()
 
 
 def test_a_full_walk_writes_every_artifact_under_its_own_root(

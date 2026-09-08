@@ -4,8 +4,9 @@ import httpx2
 import pytest
 import respx
 from anthropic import DefaultHttpxClient
+from openai import DefaultHttpxClient as OpenAiHttpxClient
 
-from app import stages
+from app import stages, transcribe
 from app.config import settings
 from tests.helpers import FakeBoard, InstallResponses
 
@@ -52,6 +53,31 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
 
     yield install
     stages.anthropic_client.cache_clear()
+
+
+@pytest.fixture
+def whisper(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
+    """Whisper тем же способом, что и Anthropic: OpenAI SDK тоже на httpx2, мимо respx."""
+
+    def install(responses: list[httpx2.Response]) -> list[httpx2.Request]:
+        requests: list[httpx2.Request] = []
+
+        def handler(request: httpx2.Request) -> httpx2.Response:
+            requests.append(request)
+            return responses.pop(0)
+
+        monkeypatch.setattr(settings, "allow_live_api", True)
+        monkeypatch.setattr(settings, "openai_api_key", "test")
+        monkeypatch.setattr(
+            transcribe,
+            "http_client",
+            lambda: OpenAiHttpxClient(transport=httpx2.MockTransport(handler)),
+        )
+        transcribe.whisper_client.cache_clear()
+        return requests
+
+    yield install
+    transcribe.whisper_client.cache_clear()
 
 
 @pytest.fixture

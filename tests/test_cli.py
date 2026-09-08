@@ -30,7 +30,9 @@ EARLIER_RUN = "прогон-восемь"
 def transcript_of_an_earlier_run(root: Path) -> Path:
     path = root / TRANSCRIPT
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(build_transcript("Идея с прошлого прогона.", "ru", EARLIER_RUN), "utf-8")
+    path.write_text(
+        build_transcript("Идея с прошлого прогона.", "ru", EARLIER_RUN, "text", None), "utf-8"
+    )
     return path
 
 

@@ -1,9 +1,10 @@
 """ingest: вход прогона → inputs/transcript.md. Здесь и только здесь рождается run_id.
 
-См. SPEC.md §3.1. Аудио и Telegram — фазы 2 и 3, пока сюда приходит только текст.
+См. SPEC.md §3.1. Расшифровка записи живёт в app/transcribe.py, здесь — только frontmatter.
 """
 
 import secrets
+from typing import Literal
 
 import frontmatter
 
@@ -12,13 +13,19 @@ import frontmatter
 # карточки двух прогонов — второй счёл бы чужие своими и не создал бы собственные.
 RUN_ID_BYTES = 8
 
+# Файл с диктофона (source: file) и согласие на запись к нему — P3-02.
+Source = Literal["text", "voice"]
+
 
 def new_run_id() -> str:
     return secrets.token_hex(RUN_ID_BYTES)
 
 
-def build_transcript(text: str, lang: str, run_id: str) -> str:
-    header = f"run_id: {run_id}\nsource: text\nduration: null\nlang: {lang}"
+def build_transcript(
+    text: str, lang: str, run_id: str, source: Source, duration: int | None
+) -> str:
+    seconds = "null" if duration is None else str(duration)
+    header = f"run_id: {run_id}\nsource: {source}\nduration: {seconds}\nlang: {lang}"
     return f"---\n{header}\n---\n\n{text.strip()}\n"
 
 

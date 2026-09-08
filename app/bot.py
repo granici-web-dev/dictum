@@ -8,15 +8,18 @@
 import asyncio
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 
-from telegram import Update
+from telegram import Message, Update, Voice
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
-from app.ingest import new_run_id
+from app.ingest import Source, new_run_id
 from app.pipeline import Stage, stages_between
 from app.run import Run, walk
+from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
 # "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
@@ -27,6 +30,11 @@ RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 LAST_STAGE = "publish"
 JOURNAL = "outputs/publish.json"
+VOICE_FILE = "inputs/voice.oga"
+
+# Ограничение стенда, а не Whisper: минута записи стоит копейки, а вот стадии за ней думают тем
+# дольше, чем длиннее идея, и очередь у стенда этого не прощает. Нарезка длинного — P3-03.
+MAX_VOICE_SECONDS = 120
 
 LABEL = {
     "ingest": "принял идею",
@@ -38,10 +46,28 @@ LABEL = {
     "publish": "опубликовал в Trello",
 }
 
+# Голосовое расшифровывается на той же стадии, что принимает текст, а метка стадии живёт в
+# сообщении и с «▸», и с «✓»: отглагольное существительное читается верно в обоих.
+VOICE_INGEST_LABEL = "расшифровка голосового"
+
 GREETING = (
-    "Пришлите идею текстом, одну за раз. Я доведу её до карточек в Trello и дам ссылку.\n"
-    "Займёт около трёх минут, о каждом шаге буду писать здесь же."
+    "Пришлите идею голосовым или текстом, одну за раз. Я доведу её до карточек в Trello и дам "
+    "ссылку.\nЗаймёт около трёх минут, о каждом шаге буду писать здесь же."
 )
+
+BUSY = "Прогон уже идёт, дождитесь его конца."
+
+TOO_LONG = (
+    f"Голосовое длиннее {MAX_VOICE_SECONDS // 60} минут я пока не расшифровываю. "
+    "Наговорите покороче или пришлите текстом."
+)
+
+UNSUPPORTED = (
+    "Принимаю голосовое и текст. Файл с диктофона будет позже: к нему нужно подтверждение, "
+    "что все участники записи согласны."
+)
+
+VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
 
 running = asyncio.Lock()
 
@@ -63,7 +89,10 @@ def allowed_chats() -> frozenset[int]:
     return frozenset(int(part) for part in listed)
 
 
-def progress_text(run_id: str, done: list[str]) -> str:
+def progress_text(run_id: str, done: list[str], source: Source) -> str:
+    labels = dict(LABEL)
+    if source == "voice":
+        labels[FIRST_STAGE] = VOICE_INGEST_LABEL
     lines = [f"Прогон {run_id}", ""]
     marked_current = False
     for stage in stages_between(FIRST_STAGE, LAST_STAGE):
@@ -73,7 +102,7 @@ def progress_text(run_id: str, done: list[str]) -> str:
             mark, marked_current = "▸", True
         else:
             mark = "·"
-        lines.append(f"{mark} {LABEL[stage.name]}")
+        lines.append(f"{mark} {labels[stage.name]}")
     return "\n".join(lines)
 
 
@@ -89,15 +118,41 @@ def finished_text(root: Path) -> str:
     return f"Готово: {cards_published(root)} карточек.\n{board_url()}"
 
 
-def demo_run(run_id: str, text: str) -> Run:
+def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
     """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет."""
     return Run(
         root=RUNS / run_id,
         run_id=run_id,
         lang=settings.default_lang,
         text=text,
+        audio=audio,
         auto_approve=True,
     )
+
+
+def permitted(message: Message) -> bool:
+    if message.chat_id in allowed_chats():
+        return True
+    logger.warning("Сообщение из чата %s, которого нет в списке разрешённых", message.chat_id)
+    return False
+
+
+def voice_seconds(voice: Voice) -> int:
+    # python-telegram-bot отдаёт длительность либо числом, либо timedelta: чем именно, решает
+    # флаг совместимости PTB_TIMEDELTA, а не мы.
+    duration = voice.duration
+    return round(duration.total_seconds()) if isinstance(duration, timedelta) else duration
+
+
+def too_long(voice: Voice) -> bool:
+    return voice_seconds(voice) > MAX_VOICE_SECONDS
+
+
+async def save_voice(voice: Voice, run_id: str) -> Path:
+    target = RUNS / run_id / VOICE_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await (await voice.get_file()).download_to_drive(target)
+    return target
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -107,47 +162,88 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
-    if message is None or not message.text:
-        return
-    if message.chat_id not in allowed_chats():
-        logger.warning("Сообщение из чата %s, которого нет в списке разрешённых", message.chat_id)
+    if message is None or not message.text or not permitted(message):
         return
     if running.locked():
-        await message.reply_text("Прогон уже идёт, дождитесь его конца.")
+        await message.reply_text(BUSY)
         return
 
     async with running:
         run_id = new_run_id()
-        run = demo_run(run_id, message.text)
-        done: list[str] = []
-        note = await message.reply_text(progress_text(run_id, done))
-        loop = asyncio.get_running_loop()
+        note = await message.reply_text(progress_text(run_id, [], "text"))
+        await follow(note, demo_run(run_id, text=message.text))
 
-        def report(stage: Stage) -> None:
-            # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий.
-            done.append(stage.name)
-            asyncio.run_coroutine_threadsafe(note.edit_text(progress_text(run_id, done)), loop)
 
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None or message.voice is None or not permitted(message):
+        return
+    if too_long(message.voice):
+        await message.reply_text(TOO_LONG)
+        return
+    if running.locked():
+        await message.reply_text(BUSY)
+        return
+
+    async with running:
+        run_id = new_run_id()
+        # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
+        # и всё это время человек не должен смотреть в пустой чат.
+        note = await message.reply_text(progress_text(run_id, [], "voice"))
         try:
-            waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
-        except Exception:
-            # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
-            logger.exception("Прогон %s не дошёл до конца", run_id)
-            await note.edit_text(
-                f"Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
-            )
+            audio = await save_voice(message.voice, run_id)
+        except TelegramError:
+            logger.exception("Прогон %s не забрал голосовое", run_id)
+            await note.edit_text(VOICE_NOT_TAKEN)
             return
+        await follow(note, demo_run(run_id, audio=audio))
 
-        if waiting and waiting.kind == "choice":
-            await note.edit_text("В сообщении несколько идей. Пришлите одну.")
-            return
-        if waiting:
-            await note.edit_text(
-                f"Прогон {run_id} встал на воротах после стадии {waiting.stage}: "
-                "подтвердить их в чате пока нечем."
-            )
-            return
-        await note.edit_text(finished_text(run.root))
+
+async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None or not permitted(message):
+        return
+    await message.reply_text(UNSUPPORTED)
+
+
+async def follow(note: Message, run: Run) -> None:
+    """Гонит прогон в потоке и правит одно сообщение до самого конца."""
+    source: Source = "voice" if run.audio else "text"
+    done: list[str] = []
+    loop = asyncio.get_running_loop()
+
+    def report(stage: Stage) -> None:
+        # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий.
+        done.append(stage.name)
+        asyncio.run_coroutine_threadsafe(
+            note.edit_text(progress_text(run.run_id, done, source)), loop
+        )
+
+    try:
+        waiting = await asyncio.to_thread(walk, run, FIRST_STAGE, LAST_STAGE, report)
+    except TranscriptionError as error:
+        # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
+        logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
+        await note.edit_text(str(error))
+        return
+    except Exception:
+        # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
+        logger.exception("Прогон %s не дошёл до конца", run.run_id)
+        await note.edit_text(
+            f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
+        )
+        return
+
+    if waiting and waiting.kind == "choice":
+        await note.edit_text("В сообщении несколько идей. Пришлите одну.")
+        return
+    if waiting:
+        await note.edit_text(
+            f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
+            "подтвердить их в чате пока нечем."
+        )
+        return
+    await note.edit_text(finished_text(run.root))
 
 
 def main() -> None:
@@ -159,10 +255,19 @@ def main() -> None:
             "он отвечал бы отказом на каждое сообщение."
         )
     allowed_chats()
+    if not ffmpeg_installed():
+        raise ConfigError(FFMPEG_MISSING)
 
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.add_handler(CommandHandler("start", on_start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    application.add_handler(MessageHandler(filters.VOICE, on_voice))
+    # Последним и почти без фильтра по типу: молчание в ответ на присланный файл человек у стенда
+    # читает как поломку бота. Служебные события чата (кто-то вошёл, сменилось название) под отказ
+    # не попадают — им никто ничего не присылал.
+    application.add_handler(
+        MessageHandler(~filters.COMMAND & ~filters.StatusUpdate.ALL, on_anything_else)
+    )
     application.run_polling()
 
 

@@ -40,6 +40,14 @@ def server_error() -> httpx2.Response:
     )
 
 
+def heard(text: str, language: str = "russian", duration: float = 12.0) -> httpx2.Response:
+    """Ответ Whisper в verbose_json: язык словом по-английски, длительность дробными секундами."""
+    return httpx2.Response(
+        200,
+        json={"task": "transcribe", "text": text, "language": language, "duration": duration},
+    )
+
+
 def request_body(request: httpx2.Request) -> dict[str, Any]:
     body: dict[str, Any] = json.loads(request.content)
     return body

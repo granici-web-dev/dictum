@@ -24,6 +24,7 @@ from app.pipeline import (
 )
 from app.publish import publish
 from app.stages import StageError, StageResult, load_template, run_stage
+from app.transcribe import transcribe
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,10 @@ logger = logging.getLogger(__name__)
 class Run(BaseModel):
     root: Path
     run_id: str
+    # Язык входа. У голосового его назовёт Whisper, и ingest перепишет поле распознанным.
     lang: str
     text: str = ""
+    audio: Path | None = None
     # Ворота — норма, а демо — исключение (CLAUDE.md §1), поэтому снимает их тот, кто заводит
     # прогон, и делает это явно.
     auto_approve: bool = False
@@ -51,7 +54,16 @@ class Pause(BaseModel):
 
 
 def ingest_body(run: Run) -> dict[str, str]:
-    return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id)}
+    if run.audio is None:
+        return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id, "text", None)}
+    heard = transcribe(run.audio)
+    # Язык прогона задаёт голос, а не DEFAULT_LANG: brief и стадии за ним читают уже его.
+    run.lang = heard.lang
+    return {
+        TRANSCRIPT: build_transcript(
+            heard.text, heard.lang, run.run_id, "voice", heard.duration_seconds
+        )
+    }
 
 
 def research_body(run: Run) -> dict[str, str]:
