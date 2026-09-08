@@ -32,7 +32,7 @@ from app.bot import (
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
-from tests.test_candidates import MULTIPLE, NONE
+from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
 def a_run(run_id: str = "прогон", audio: Path | None = None) -> Run:
@@ -339,3 +339,15 @@ async def test_a_run_that_found_no_task_says_so_and_still_shows_what_was_discuss
     assert said.startswith(NOTHING_HEARD)
     assert "1. Сроки по текущему спринту" in said
     assert said.endswith(ASK_AGAIN)
+
+
+@pytest.mark.asyncio
+async def test_a_recording_with_nothing_in_it_gets_the_lead_and_the_ask_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пустой список — не пустая строка в чате: показывать нечего, и показывать нечего."""
+    run = a_stopped_run(tmp_path, monkeypatch, NONE_EMPTY)
+
+    said = await outcome(run, lambda stage: None)
+
+    assert said == f"{NOTHING_HEARD}\n\n{ASK_AGAIN}"

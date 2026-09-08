@@ -80,7 +80,9 @@ HEARD = "Вот что я услышал:"
 
 PICK_ONE = "Пришлите одну из них отдельным сообщением, своими словами и чуть подробнее."
 
-NOTHING_HEARD = "Задания в записи я не нашёл. Вот о чём в ней говорили:"
+NOTHING_HEARD = "Задания в записи я не нашёл."
+
+DISCUSSED = "Вот о чём в ней говорили:"
 
 ASK_AGAIN = "Пришлите идею одним сообщением и чуть подробнее: что нужно сделать и для кого."
 
@@ -272,9 +274,11 @@ def choice_text(run: Run, artifact: str) -> str:
     """
     found = parse_candidates(read_artifact(run.root, artifact))
     listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
-    if found.outcome == "none":
-        return "\n".join([NOTHING_HEARD, "", *listed, "", ASK_AGAIN])
-    return "\n".join([HEARD, "", *listed, "", PICK_ONE])
+    if found.outcome == "multiple":
+        return "\n".join([HEARD, "", *listed, "", PICK_ONE])
+    if not listed:
+        return "\n".join([NOTHING_HEARD, "", ASK_AGAIN])
+    return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
 
 
 async def outcome(run: Run, report: Callable[[Stage], None]) -> str:

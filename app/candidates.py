@@ -60,7 +60,10 @@ def check_candidates(text: str) -> list[str]:
         problems.append(f"outcome: {outcome!r} — во frontmatter нужно multiple или none")
     numbered = [int(number) for number in NUMBERED_LINE.findall(post.content)]
     named = [idea.number for idea in ideas_in(post.content)]
-    if not numbered:
+    # Список обязателен только при multiple: выбирать надо из чего-то. При none обсуждения
+    # могло не быть вовсе, и строка ради формы — выдуманные данные (CLAUDE.md §5): на живом
+    # трёхсекундном голосовом модель дописала тему «Пустая запись», которой в записи не было.
+    if not numbered and outcome != "none":
         problems.append("нет ни одной строки вида `N. **Название** — …` с начала строки")
     unnamed = [number for number in numbered if number not in named]
     if unnamed:

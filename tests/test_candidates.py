@@ -5,6 +5,7 @@ from app.candidates import check_candidates, parse_candidates
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 MULTIPLE = (FIXTURES / "candidates_multiple.md").read_text(encoding="utf-8")
 NONE = (FIXTURES / "candidates_none.md").read_text(encoding="utf-8")
+NONE_EMPTY = (FIXTURES / "candidates_none_empty.md").read_text(encoding="utf-8")
 
 
 def test_the_list_keeps_the_numbers_and_drops_the_bookkeeping() -> None:
@@ -46,12 +47,18 @@ def test_an_unknown_outcome_is_rejected() -> None:
     ]
 
 
-def test_prose_without_a_list_is_rejected() -> None:
-    prose = "---\noutcome: none\n---\n\n# Идея не найдена\n\nВ записи только обсуждение.\n"
+def test_several_ideas_without_a_list_are_rejected() -> None:
+    prose = "---\noutcome: multiple\n---\n\n# В записи найдено 2 идеи\n\nПервая и вторая.\n"
 
     problems = check_candidates(prose)
 
     assert problems == ["нет ни одной строки вида `N. **Название** — …` с начала строки"]
+
+
+def test_an_empty_list_is_the_right_answer_when_nothing_was_discussed() -> None:
+    """Трёхсекундное «Эээ, погоди, не, не то»: тема ради формы — выдуманные данные."""
+    assert check_candidates(NONE_EMPTY) == []
+    assert parse_candidates(NONE_EMPTY).ideas == []
 
 
 def test_a_nested_item_is_not_an_idea() -> None:
