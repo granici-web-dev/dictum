@@ -129,6 +129,10 @@ def finished_text(root: Path) -> str:
     return f"Готово: {cards_published(root)} карточек.\n{board_url()}"
 
 
+def source_of(run: Run) -> Source:
+    return "voice" if run.audio else "text"
+
+
 def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
     """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет."""
     return Run(
@@ -170,11 +174,9 @@ def too_long(voice: Voice) -> bool:
     return voice_seconds(voice) > MAX_VOICE_SECONDS
 
 
-async def save_voice(voice: Voice, run_id: str) -> Path:
-    target = RUNS / run_id / VOICE_FILE
+async def save_voice(voice: Voice, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     await (await voice.get_file()).download_to_drive(target)
-    return target
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,9 +193,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
-        run_id = new_run_id()
-        note = await message.reply_text(progress_text(run_id, [], "text"))
-        await follow(note, demo_run(run_id, text=message.text))
+        run = demo_run(new_run_id(), text=message.text)
+        note = await message.reply_text(progress_text(run.run_id, [], source_of(run)))
+        await follow(note, run)
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -216,16 +218,18 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     async with running:
         run_id = new_run_id()
+        audio = RUNS / run_id / VOICE_FILE
+        run = demo_run(run_id, audio=audio)
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
-        note = await message.reply_text(progress_text(run_id, [], "voice"))
+        note = await message.reply_text(progress_text(run.run_id, [], source_of(run)))
         try:
-            audio = await save_voice(message.voice, run_id)
+            await save_voice(message.voice, audio)
         except TelegramError:
             logger.exception("Прогон %s не забрал голосовое", run_id)
             await note.edit_text(VOICE_NOT_TAKEN)
             return
-        await follow(note, demo_run(run_id, audio=audio))
+        await follow(note, run)
 
 
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -237,7 +241,6 @@ async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def follow(note: Message, run: Run) -> None:
     """Гонит прогон в потоке и правит одно сообщение до самого конца."""
-    source: Source = "voice" if run.audio else "text"
     done: list[str] = []
     loop = asyncio.get_running_loop()
     progress: list[Future[Message | bool]] = []
@@ -247,7 +250,7 @@ async def follow(note: Message, run: Run) -> None:
         done.append(stage.name)
         progress.append(
             asyncio.run_coroutine_threadsafe(
-                note.edit_text(progress_text(run.run_id, done, source)), loop
+                note.edit_text(progress_text(run.run_id, done, source_of(run))), loop
             )
         )
 
