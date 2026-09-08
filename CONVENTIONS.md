@@ -61,6 +61,7 @@ Do not change a row without recording the decision in `SPEC.md`.
 - **Sync stages, async bot.** All pipeline code (stages, clients, DB access, Celery tasks) is synchronous: `anthropic.Anthropic`, `httpx.Client`, SQLAlchemy sync session. Only `app/bot.py` is async, because python-telegram-bot requires it. Never maintain sync and async variants of the same function.
 - **Pydantic everywhere.** Artifact contracts, internal structures, settings: all `BaseModel`. One model style to hold in your head. SQLAlchemy `Mapped` classes stay separate from Pydantic models; convert explicitly at the DB boundary.
 - **Prompts are files, not code.** `app/stages.py` reads `.claude/commands/<stage>.md` as the system prompt. Editing a prompt is a product change and gets its own commit.
+- **Describe the good answer before bounding the bad one.** A rule of form beats the number that follows it: raising the title limit from 60 to 80 characters only moved the wall, while saying what a title is ("a verb and an object, at most eight words, no subordinate clause") halved their length on the next run. Write the shape first, then the limit as a backstop.
 - **State lives in Postgres.** Run status, gates and `publish_log` are rows. Files under `runs/<run_id>/` (or `outputs/` locally) hold artifacts only.
 
 ### Rejected
