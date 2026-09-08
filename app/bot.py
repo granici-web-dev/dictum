@@ -159,8 +159,9 @@ async def refuse(message: Message, tag: str, text: str) -> None:
 
 
 def voice_seconds(voice: Voice) -> int:
-    # python-telegram-bot отдаёт длительность либо числом, либо timedelta: чем именно, решает
-    # флаг совместимости PTB_TIMEDELTA, а не мы.
+    # Сегодня PTB отдаёт число при любом входе, и ветка с timedelta недостижима. Она стоит
+    # потому, что тип объявлен `int | timedelta`, а с флагом PTB_TIMEDELTA (который станет
+    # умолчанием) станет достижимой. Тест на неё написать нечем: флаг читается при импорте.
     duration = voice.duration
     return round(duration.total_seconds()) if isinstance(duration, timedelta) else duration
 

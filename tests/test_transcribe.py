@@ -5,7 +5,7 @@ import pytest
 
 from app import transcribe
 from app.config import LiveApiNotAllowed, settings
-from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3, ffmpeg_installed
+from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3
 from tests.helpers import InstallResponses, heard
 
 
@@ -116,14 +116,6 @@ def test_ffmpeg_that_could_not_read_the_file_names_it_and_quotes_the_reason(
     with pytest.raises(TranscriptionError, match="Invalid data found") as refusal:
         convert_to_mp3(tmp_path / "voice.oga")
     assert "voice.oga" in str(refusal.value)
-
-
-def test_the_missing_binary_is_visible_before_the_bot_starts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(subprocess, "run", missing_binary)
-
-    assert not ffmpeg_installed()
 
 
 def missing_binary(*args: object, **kwargs: object) -> None:

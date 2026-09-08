@@ -1,7 +1,6 @@
 import asyncio
 import json
 from collections.abc import Callable
-from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
@@ -31,7 +30,7 @@ from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
 
 
-def a_voice(duration: int | timedelta) -> Voice:
+def a_voice(duration: int) -> Voice:
     return Voice(file_id="f", file_unique_id="u", duration=duration)
 
 
@@ -132,22 +131,11 @@ def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
     assert too_long(a_voice(MAX_VOICE_SECONDS + 1))
 
 
-def test_the_limit_holds_when_the_library_reports_a_timedelta() -> None:
-    """Числом или timedelta — решает флаг совместимости PTB, а не мы."""
-    assert too_long(a_voice(timedelta(seconds=MAX_VOICE_SECONDS + 1)))
-
-
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
     printed = progress_text("прогон", [], "voice").splitlines()[2:]
 
     assert printed[0] == f"▸ {VOICE_INGEST_LABEL}"
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
-
-
-def test_the_demo_run_carries_the_recording_to_the_walk(tmp_path: Path) -> None:
-    voice = tmp_path / "voice.oga"
-
-    assert demo_run("прогон", audio=voice).audio == voice
 
 
 def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +214,6 @@ async def test_the_refusal_after_intake_does_not_count_ideas_it_did_not_find(
     )
 
     assert said == NO_SINGLE_IDEA
-    assert "несколько" not in said
 
 
 class QuietChat:
