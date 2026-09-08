@@ -14,7 +14,7 @@ from app.cli import (
 from app import bot, cli, publish, stages
 from app.config import settings
 from app.ingest import build_transcript, run_id_of
-from app.pipeline import BRIEF, CANDIDATES, PRD, RESEARCH, TRANSCRIPT
+from app.pipeline import BRIEF, CANDIDATES, IDEA, PRD, RESEARCH, TRANSCRIPT
 from tests.helpers import (
     BROKEN_ISSUES,
     InstallResponses,
@@ -203,6 +203,29 @@ def test_run_text_reports_an_api_error_without_a_traceback(
     llm([server_error(), server_error(), server_error()])
 
     assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
+
+
+def test_a_continued_run_keeps_the_language_of_its_transcript(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """С P3-01 транскрипт несёт язык от Whisper, а не всегдашний DEFAULT_LANG.
+
+    Продолженный прогон обязан взять его оттуда: иначе по русской идее соберётся немецкий бриф.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "default_lang", "de")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / TRANSCRIPT).write_text(
+        build_transcript("Хочу бота.", "ru", EARLIER_RUN, "voice", 34), encoding="utf-8"
+    )
+    (tmp_path / IDEA).write_text("# Идея\n", encoding="utf-8")
+    requests = llm([ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+
+    assert main(["--from", "brief"]) == EXIT_OK
+
+    brief_message = request_body(requests[0])["messages"][0]["content"]
+    params = brief_message.split("<params>\n", 1)[1].split("\n</params>", 1)[0]
+    assert "lang: ru" in params.splitlines()
 
 
 def test_run_text_takes_the_language_from_the_input_file(

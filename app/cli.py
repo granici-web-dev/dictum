@@ -110,13 +110,21 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"для --from {args.start} нужен {needed}, а его нет{hint}")
         # Прогон продолжается, а не начинается, поэтому свой run_id ему брать неоткуда: выдать
         # второй значило бы, что у одного прогона их два, и publish создал бы карточки заново.
-        started = run_id_of(read_artifact(Path('.'), TRANSCRIPT))
+        transcript = read_artifact(Path("."), TRANSCRIPT)
+        started = run_id_of(transcript)
         if not started:
             parser.error(
                 f"в {TRANSCRIPT} нет run_id: транскрипт старше этого правила, начните прогон заново"
             )
+        # Язык оттуда же, откуда run_id: с P3-01 транскрипт голосового несёт язык от Whisper, и
+        # подстановка DEFAULT_LANG собрала бы немецкий бриф по русской идее.
+        _, spoken = read_input(transcript)
         return start_pipeline(
-            args.start, "", args.lang or settings.default_lang, started, not args.gates
+            args.start,
+            "",
+            args.lang or spoken or settings.default_lang,
+            started,
+            not args.gates,
         )
 
     if not (args.text or args.file):
