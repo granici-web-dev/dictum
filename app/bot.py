@@ -18,7 +18,10 @@ from app.ingest import new_run_id
 from app.pipeline import Stage, stages_between
 from app.run import Run, walk
 
-logger = logging.getLogger(__name__)
+# Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
+# "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
+# такие записи до человека не доходят.
+logger = logging.getLogger("app.bot")
 
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"

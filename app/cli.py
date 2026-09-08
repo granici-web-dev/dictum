@@ -19,7 +19,10 @@ from app.pipeline import NAMES, TRANSCRIPT, produced_by
 from app.run import Run, missing_before, read_artifact, walk
 from app.stages import StageError
 
-logger = logging.getLogger(__name__)
+# Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
+# "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
+# такие записи до человека не доходят.
+logger = logging.getLogger("app.cli")
 
 EXIT_OK = 0
 EXIT_STAGE_FAILED = 1

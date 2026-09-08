@@ -10,7 +10,7 @@ from app.cli import (
     EXIT_USAGE,
     main,
 )
-from app import stages
+from app import bot, cli, publish, stages
 from app.config import settings
 from app.ingest import build_transcript, run_id_of
 from app.pipeline import BRIEF, CANDIDATES, PRD, RESEARCH, TRANSCRIPT
@@ -418,3 +418,13 @@ def test_a_missing_transcript_says_it_is_the_run_id_that_is_wanted(
 
     assert exit_info.value.code == EXIT_USAGE
     assert "run_id" in capsys.readouterr().err
+
+
+def test_a_module_run_as_a_command_names_its_logger_by_hand() -> None:
+    """`python -m app.cli` даёт __name__ == "__main__", а уровень INFO поднимают дереву "app".
+
+    caplog ловит запись при любом имени логгера, поэтому промах видно только по имени.
+    """
+    named = [module.logger.name for module in (cli, bot, publish)]
+
+    assert named == ["app.cli", "app.bot", "app.publish"]

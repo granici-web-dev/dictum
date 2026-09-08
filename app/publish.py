@@ -23,7 +23,10 @@ from app.models import Area, Issue, IssuesFile, Phase
 from app.trello import Trello, TrelloCard, TrelloChecklist, TrelloError, open_trello
 from app.validate import check_issues
 
-logger = logging.getLogger(__name__)
+# Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
+# "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
+# такие записи до человека не доходят.
+logger = logging.getLogger("app.publish")
 
 BACKLOG = "Backlog"
 DOD = "DoD"
