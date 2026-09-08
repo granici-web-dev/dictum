@@ -304,7 +304,7 @@ async def test_a_finished_run_reports_how_long_the_person_waited(
 async def test_the_stop_after_intake_shows_what_the_model_heard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """До кнопок (P3-04) человек выбирает сам, поэтому обязан видеть, между чем."""
+    """До кнопок (P3-07) человек выбирает сам, поэтому обязан видеть, между чем."""
     run = a_stopped_run(tmp_path, monkeypatch, MULTIPLE)
 
     said = await outcome(run, lambda stage: None)

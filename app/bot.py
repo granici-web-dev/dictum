@@ -268,7 +268,7 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
 def choice_text(run: Run, artifact: str) -> str:
     """Что показать, когда одной идеи не вышло: список из candidates.md.
 
-    Кнопки — P3-04; до них человек присылает выбранную идею обычным сообщением.
+    Кнопки — P3-07; до них человек присылает выбранную идею обычным сообщением.
     """
     found = parse_candidates(read_artifact(run.root, artifact))
     listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
