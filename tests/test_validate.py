@@ -30,7 +30,7 @@ def test_the_answer_that_forgot_the_deferred_titles_is_reported() -> None:
 
 def test_a_schema_problem_is_reported_under_the_id_of_its_issue() -> None:
     data = real_issues()
-    data["issues"][0]["title"] = "П" * 81
+    data["issues"][0]["title"] = "П" * 101
 
     problems = problems_of(data)
 

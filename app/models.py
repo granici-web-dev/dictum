@@ -18,7 +18,7 @@ class Issue(BaseModel):
     phase: int = Field(ge=1)
     scope_id: str = Field(pattern=r"^S\d+$")
     area: Area
-    title: str = Field(max_length=80)
+    title: str = Field(max_length=100)
     description: str
     dod: list[str] = Field(min_length=2)
     depends_on: list[str] = Field(default_factory=list)
