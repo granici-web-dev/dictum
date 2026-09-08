@@ -15,9 +15,10 @@ from anthropic import DefaultHttpxClient
 from anthropic.types import Message, MessageParam
 from pydantic import BaseModel
 
+from app.candidates import check_candidates
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.models import IssuesFile
-from app.pipeline import ISSUES_JSON, ISSUES_MD, stage_named
+from app.pipeline import CANDIDATES, ISSUES_JSON, ISSUES_MD, stage_named
 from app.render import issues_markdown
 from app.validate import check_issues
 
@@ -46,6 +47,8 @@ def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
         return []
     if stage == "decompose":
         return check_issues(files[ISSUES_JSON])
+    if CANDIDATES in files:
+        return check_candidates(files[CANDIDATES])
     return []
 
 

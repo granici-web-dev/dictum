@@ -14,7 +14,8 @@ from app.bot import (
     BUSY,
     LABEL,
     MAX_VOICE_SECONDS,
-    NO_SINGLE_IDEA,
+    ASK_AGAIN,
+    NOTHING_HEARD,
     PICK_ONE,
     VOICE_INGEST_LABEL,
     allowed_chats,
@@ -31,7 +32,7 @@ from app.bot import (
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Run
-from tests.test_render import REAL_CANDIDATES
+from tests.test_candidates import MULTIPLE, NONE
 
 
 def a_run(run_id: str = "прогон", audio: Path | None = None) -> Run:
@@ -304,7 +305,7 @@ async def test_the_stop_after_intake_shows_what_the_model_heard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """До кнопок (P3-04) человек выбирает сам, поэтому обязан видеть, между чем."""
-    run = a_stopped_run(tmp_path, monkeypatch, REAL_CANDIDATES)
+    run = a_stopped_run(tmp_path, monkeypatch, MULTIPLE)
 
     said = await outcome(run, lambda stage: None)
 
@@ -314,12 +315,14 @@ async def test_the_stop_after_intake_shows_what_the_model_heard(
 
 
 @pytest.mark.asyncio
-async def test_a_candidates_file_without_a_list_asks_for_one_idea_instead(
+async def test_a_run_that_found_no_task_says_so_and_still_shows_what_was_discussed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Кандидаты бывают и от пустоты: на двухсекундном голосовом идея не нашлась вовсе."""
-    run = a_stopped_run(tmp_path, monkeypatch, "# Идея не найдена\n")
+    """Тот же список в том же файле, но это темы разговора: подать их как идеи значит соврать."""
+    run = a_stopped_run(tmp_path, monkeypatch, NONE)
 
     said = await outcome(run, lambda stage: None)
 
-    assert said == NO_SINGLE_IDEA
+    assert said.startswith(NOTHING_HEARD)
+    assert "1. Сроки по текущему спринту" in said
+    assert said.endswith(ASK_AGAIN)

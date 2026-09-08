@@ -252,6 +252,39 @@ def test_run_stage_gives_up_when_the_issues_are_still_invalid(llm: InstallRespon
     assert len(requests) == 2
 
 
+def candidates_answer(body: str) -> str:
+    return f'<file path="outputs/candidates.md">\n{body}</file>'
+
+
+WITHOUT_OUTCOME = "# В записи найдено 2 идеи\n\n1. **Раз** — одно.\n2. **Два** — другое.\n"
+WITH_OUTCOME = "---\noutcome: multiple\n---\n\n" + WITHOUT_OUTCOME
+
+
+def test_candidates_without_an_outcome_are_sent_back_for_repair(llm: InstallResponses) -> None:
+    """Исход заявляет intake: по нему бот решает, показывать идеи или темы разговора."""
+    requests = llm([ok(candidates_answer(WITHOUT_OUTCOME)), ok(candidates_answer(WITH_OUTCOME))])
+
+    result = run_stage("intake", INPUTS, RUN)
+
+    assert len(requests) == 2
+    assert "во frontmatter нужно multiple или none" in request_body(requests[1])["messages"][-1][
+        "content"
+    ]
+    assert "outcome: multiple" in result.files["outputs/candidates.md"]
+
+
+def test_run_stage_gives_up_when_the_candidates_keep_their_shape_broken(
+    llm: InstallResponses,
+) -> None:
+    broken = candidates_answer("---\noutcome: multiple\n---\n\n# Идей две\n\nПрозой.\n")
+    requests = llm([ok(broken), ok(broken)])
+
+    with pytest.raises(StageError, match="нет ни одной строки вида"):
+        run_stage("intake", INPUTS, RUN)
+
+    assert len(requests) == 2
+
+
 def test_run_stage_gives_up_after_one_repair_attempt(llm: InstallResponses) -> None:
     requests = llm([ok("Без тегов."), ok("Снова без тегов.")])
 

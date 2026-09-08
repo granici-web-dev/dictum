@@ -18,11 +18,11 @@ from telegram import Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from app.candidates import parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
 from app.pipeline import CANDIDATES, ISSUES_JSON, Stage, stages_between
 from app.publish import journal_of
-from app.render import candidate_titles
 from app.run import Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
@@ -76,17 +76,13 @@ UNSUPPORTED = (
 
 VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
 
-# Кандидатов intake отдаёт и когда идей несколько, и когда не нашёл ни одной, поэтому отказ их
-# не считает: на двухсекундном голосовом бот сообщал «в сообщении несколько идей», а в
-# артефакте стояло «идея не найдена».
-NO_SINGLE_IDEA = (
-    "Не смог выделить одну идею. Пришлите её одним сообщением и чуть подробнее: "
-    "что нужно сделать и для кого."
-)
-
 HEARD = "Вот что я услышал:"
 
 PICK_ONE = "Пришлите одну из них отдельным сообщением, своими словами и чуть подробнее."
+
+NOTHING_HEARD = "Задания в записи я не нашёл. Вот о чём в ней говорили:"
+
+ASK_AGAIN = "Пришлите идею одним сообщением и чуть подробнее: что нужно сделать и для кого."
 
 running = asyncio.Lock()
 
@@ -270,13 +266,14 @@ async def follow(note: Message, run: Run, asked_at: datetime) -> None:
 
 
 def choice_text(run: Run) -> str:
-    """Что показать, когда idea одна не вышла: список того, между чем выбирать.
+    """Что показать, когда одной идеи не вышло: список из candidates.md.
 
     Кнопки — P3-04; до них человек присылает выбранную идею обычным сообщением.
     """
-    listed = candidate_titles(read_artifact(run.root, CANDIDATES))
-    if not listed:
-        return NO_SINGLE_IDEA
+    found = parse_candidates(read_artifact(run.root, CANDIDATES))
+    listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
+    if found.outcome == "none":
+        return "\n".join([NOTHING_HEARD, "", *listed, "", ASK_AGAIN])
     return "\n".join([HEARD, "", *listed, "", PICK_ONE])
 
 

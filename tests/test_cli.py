@@ -41,7 +41,8 @@ IDEA_BLOCK = (
     "# Напоминания о дедлайнах\n\n## Суть\nБот присылает список карточек.\n</file>"
 )
 CANDIDATES_BLOCK = (
-    '<file path="outputs/candidates.md">\n# В записи найдено 2 идеи\n\n'
+    '<file path="outputs/candidates.md">\n---\noutcome: multiple\n---\n\n'
+    "# В записи найдено 2 идеи\n\n"
     "1. **Напоминания** — бот шлёт список.\n2. **Отчёты** — сводка за неделю.\n</file>"
 )
 BRIEF_BLOCK = (
