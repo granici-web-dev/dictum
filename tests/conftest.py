@@ -10,6 +10,27 @@ from app.config import settings
 from tests.helpers import FakeBoard, InstallResponses
 
 
+# Ключи и флаг живут в .env и попадают в settings при импорте. Тест, который по недосмотру
+# доберётся до настоящего клиента, ушёл бы с ними в сеть: так пятнадцать карточек из фикстуры
+# однажды уехали на живую доску. Гасим для всех, а llm и board включают себе обратно.
+DISARMED = {
+    "allow_live_api": False,
+    "anthropic_api_key": "",
+    "trello_key": "",
+    "trello_token": "",
+    "trello_board_id": "",
+    "telegram_bot_token": "",
+    "telegram_allowed_chat_ids": "",
+    "openai_api_key": "",
+}
+
+
+@pytest.fixture(autouse=True)
+def disarmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in DISARMED.items():
+        monkeypatch.setattr(settings, name, value)
+
+
 @pytest.fixture
 def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
     def install(responses: list[httpx2.Response]) -> list[httpx2.Request]:
