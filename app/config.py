@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
     anthropic_model_decompose: str = "claude-sonnet-5"
-    anthropic_max_tokens: int = 16000
+    anthropic_max_tokens: int = 24000
     allow_live_api: bool = False
     openai_api_key: str = ""
     telegram_bot_token: str = ""

@@ -26,6 +26,11 @@ COMMANDS_DIR = ROOT / ".claude" / "commands"
 API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 STAGES = ("intake", "brief", "research", "prd", "decompose")
 
+# Без явного таймаута SDK считает выход по 28 токенов в секунду и запрещает нестримовый запрос
+# уже на 21 334 токенах. Замеренная скорость стадий — около 110 в секунду, то есть потолок
+# в 24 000 укладывается примерно в четыре минуты; десять — запас на медленный ответ.
+REQUEST_TIMEOUT_SECONDS = 600.0
+
 ISSUES_JSON = "outputs/issues.json"
 ISSUES_MD = "outputs/issues.md"
 
@@ -105,6 +110,7 @@ def anthropic_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(
         api_key=settings.anthropic_api_key,
         max_retries=2,
+        timeout=REQUEST_TIMEOUT_SECONDS,
         http_client=http_client(),
     )
 
