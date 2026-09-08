@@ -4,7 +4,7 @@
 токенов срезал ответ, и две копии могли разойтись, не поспорив об этом вслух.
 """
 
-from app.models import Deferred, Issue, IssuesFile, Phase
+from app.models import Issue, IssuesFile
 
 NOTHING = "—"
 
@@ -28,23 +28,6 @@ def issue_lines(issue: Issue) -> list[str]:
     ]
 
 
-def phase_lines(phase: Phase, issues: list[Issue]) -> list[str]:
-    lines = [f"## Фаза {phase.n} — {phase.title}", "", f"Цель: {phase.goal}"]
-    for issue in issues:
-        lines += ["", *issue_lines(issue)]
-    return lines
-
-
-def deferred_lines(deferred: list[Deferred]) -> list[str]:
-    return [
-        "## Отложено",
-        "",
-        "| Скоп | Название | Причина |",
-        "|---|---|---|",
-        *(f"| {d.scope_id} | {cell(d.title)} | {cell(d.reason)} |" for d in deferred),
-    ]
-
-
 def issues_markdown(issues_file: IssuesFile) -> str:
     lines = [
         "# Бэклог",
@@ -53,10 +36,15 @@ def issues_markdown(issues_file: IssuesFile) -> str:
         "после подтверждения `/publish` берёт `outputs/issues.json`.",
     ]
     for phase in issues_file.phases:
-        of_phase = [issue for issue in issues_file.issues if issue.phase == phase.n]
-        lines += ["", *phase_lines(phase, of_phase)]
+        lines += ["", f"## Фаза {phase.n} — {phase.title}", "", f"Цель: {phase.goal}"]
+        for issue in issues_file.issues:
+            if issue.phase == phase.n:
+                lines += ["", *issue_lines(issue)]
     if issues_file.deferred:
-        lines += ["", *deferred_lines(issues_file.deferred)]
+        lines += ["", "## Отложено", "", "| Скоп | Название | Причина |", "|---|---|---|"]
+        lines += [
+            f"| {d.scope_id} | {cell(d.title)} | {cell(d.reason)} |" for d in issues_file.deferred
+        ]
     if issues_file.open_questions:
         lines += ["", "## Открытые вопросы", ""]
         lines += [f"- {question}" for question in issues_file.open_questions]
