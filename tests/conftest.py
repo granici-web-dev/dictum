@@ -23,6 +23,8 @@ DISARMED = {
     "telegram_bot_token": "",
     "telegram_allowed_chat_ids": "",
     "openai_api_key": "",
+    # Не ключ, но тоже из .env: с KEEP_AUDIO=true у разработчика падал тест на удаление записи.
+    "keep_audio": False,
 }
 
 

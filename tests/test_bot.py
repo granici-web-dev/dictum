@@ -2,10 +2,11 @@ import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from telegram import Message, Voice
+from telegram.ext import Application
 
 from app import bot
 from app.bot import (
@@ -241,3 +242,21 @@ async def test_a_refusal_leaves_a_line_the_rehearsal_can_count(
 
     assert "refusal=busy chat=12" in caplog.text
     assert chat.replies == [BUSY]
+
+
+def test_the_bot_answers_while_a_run_is_walking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без этого флага PTB берёт следующее обновление только после конца прогона.
+
+    Отказ «прогон уже идёт» тогда недостижим, и три сообщения подряд становятся тремя
+    оплаченными прогонами вместо одного и двух отказов.
+    """
+    started: list[Application[Any, Any, Any, Any, Any, Any]] = []
+    monkeypatch.setattr(settings, "telegram_bot_token", "1:token")
+    monkeypatch.setattr(settings, "allow_live_api", True)
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "ffmpeg_installed", lambda: True)
+    monkeypatch.setattr(Application, "run_polling", lambda self, **kwargs: started.append(self))
+
+    main()
+
+    assert started[0].concurrent_updates > 1

@@ -120,3 +120,22 @@ def test_ffmpeg_that_could_not_read_the_file_names_it_and_quotes_the_reason(
 
 def missing_binary(*args: object, **kwargs: object) -> None:
     raise FileNotFoundError(2, "No such file or directory: 'ffmpeg'")
+
+
+def test_the_recording_is_recoded_the_way_whisper_is_fed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mp3 16 kHz mono — контракт SPEC §3.1, и ошибка в -ar или -ac уехала бы зелёной."""
+    asked: list[list[str]] = []
+
+    def remember(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", remember)
+
+    target = convert_to_mp3(tmp_path / "voice.oga")
+
+    assert target.name == "voice.mp3"
+    assert asked[0][:2] == ["ffmpeg", "-y"]
+    assert asked[0][-5:] == ["-ac", "1", "-ar", "16000", str(target)]
