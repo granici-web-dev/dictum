@@ -279,7 +279,16 @@ def main() -> None:
     if not ffmpeg_installed():
         raise ConfigError(FFMPEG_MISSING)
 
-    application = Application.builder().token(settings.telegram_bot_token).build()
+    # Без concurrent_updates бот разбирает обновления по одному и второе сообщение достаёт из
+    # очереди только после того, как вернётся обработчик первого, то есть через весь прогон.
+    # Отказ «прогон уже идёт» при этом недостижим, а человек три минуты не получает ничего и
+    # потом оплачивает свой прогон. Однопрогонность стережёт замок, а не очередь апдейтов.
+    application = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .concurrent_updates(True)
+        .build()
+    )
     application.add_handler(CommandHandler("start", on_start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
