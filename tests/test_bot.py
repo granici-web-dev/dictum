@@ -10,18 +10,20 @@ from telegram import Message, Voice
 
 from app import bot
 from app.bot import (
+    BUSY,
     LABEL,
     MAX_VOICE_SECONDS,
+    NO_SINGLE_IDEA,
     VOICE_INGEST_LABEL,
     allowed_chats,
     cards_published,
     demo_run,
     finished_text,
-    NO_SINGLE_IDEA,
     follow,
     main,
     outcome,
     progress_text,
+    refuse,
     too_long,
 )
 from app.config import ConfigError, settings
@@ -225,3 +227,30 @@ async def test_the_refusal_after_intake_does_not_count_ideas_it_did_not_find(
 
     assert said == NO_SINGLE_IDEA
     assert "несколько" not in said
+
+
+class QuietChat:
+    """Сообщение из чата 12: отвечать умеет, больше от него ничего не нужно."""
+
+    chat_id = 12
+
+    def __init__(self) -> None:
+        self.replies: list[str] = []
+
+    async def reply_text(self, text: str) -> Message:
+        self.replies.append(text)
+        return cast(Message, self)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_leaves_a_line_the_rehearsal_can_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отчёт P2-06 считает отказы grep-ом, поэтому у каждого свой tag и id чата рядом."""
+    chat = QuietChat()
+
+    with caplog.at_level("INFO", logger="app.bot"):
+        await refuse(cast(Message, chat), "busy", BUSY)
+
+    assert "refusal=busy chat=12" in caplog.text
+    assert chat.replies == [BUSY]

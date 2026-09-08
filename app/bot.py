@@ -144,8 +144,18 @@ def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
 def permitted(message: Message) -> bool:
     if message.chat_id in allowed_chats():
         return True
-    logger.warning("Сообщение из чата %s, которого нет в списке разрешённых", message.chat_id)
+    logger.warning("refusal=stranger chat=%s: чата нет в списке разрешённых", message.chat_id)
     return False
+
+
+async def refuse(message: Message, tag: str, text: str) -> None:
+    """Отвечает отказом и оставляет счётную запись.
+
+    Отчёт репетиции (P2-06) отвечает на вопрос «сколько человек упёрлось» числом, а не памятью,
+    поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ.
+    """
+    logger.info("refusal=%s chat=%s", tag, message.chat_id)
+    await message.reply_text(text)
 
 
 def voice_seconds(voice: Voice) -> int:
@@ -176,7 +186,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None or not message.text or not permitted(message):
         return
     if running.locked():
-        await message.reply_text(BUSY)
+        await refuse(message, "busy", BUSY)
         return
 
     async with running:
@@ -190,10 +200,17 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None or message.voice is None or not permitted(message):
         return
     if too_long(message.voice):
+        # Длительность в записи, а не только тег: на репетиции важно, насколько именно
+        # переговорили лимит, иначе непонятно, двигать его или оставить.
+        logger.info(
+            "refusal=too_long chat=%s seconds=%d",
+            message.chat_id,
+            voice_seconds(message.voice),
+        )
         await message.reply_text(TOO_LONG)
         return
     if running.locked():
-        await message.reply_text(BUSY)
+        await refuse(message, "busy", BUSY)
         return
 
     async with running:
@@ -214,7 +231,7 @@ async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = update.message
     if message is None or not permitted(message):
         return
-    await message.reply_text(UNSUPPORTED)
+    await refuse(message, "unsupported", UNSUPPORTED)
 
 
 async def follow(note: Message, run: Run) -> None:
@@ -258,8 +275,10 @@ async def outcome(run: Run, report: Callable[[Stage], None]) -> str:
         return f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз."
 
     if waiting and waiting.kind == "choice":
+        logger.info("stop=choice run=%s", run.run_id)
         return NO_SINGLE_IDEA
     if waiting:
+        logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
         return (
             f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
             "подтвердить их в чате пока нечем."
