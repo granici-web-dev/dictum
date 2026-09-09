@@ -731,31 +731,27 @@ def gate_text(run: Run, stop: Pause) -> str:
     return f"{digest(run)}\n\n{GATE_TAIL}"
 
 
-def decision_of(query: CallbackQuery) -> tuple[str, str, str] | None:
-    """Прогон, ворота и решение из данных кнопки. None — кнопка не той формы.
+def button_of(query: CallbackQuery, fields: int) -> list[str] | None:
+    """Поля из данных кнопки. None — кнопка не той формы.
 
     Данные писал сам бот, и разбирать их как чужой ввод незачем — но сообщения переживают
     выкладку, а формат кнопки уже менялся однажды. Нажатая кнопка прошлой формы обязана
     получить тот же отказ, что и протухшая, а не уронить обработчик молчанием в ответ.
     """
     parts = (query.data or "").split(":")
-    if len(parts) != 4:
-        return None
-    _, run_id, stage, decision = parts
-    return run_id, stage, decision
+    return parts if len(parts) == fields else None
+
+
+def decision_of(query: CallbackQuery) -> tuple[str, str, str] | None:
+    """Прогон, ворота и решение из данных кнопки."""
+    parts = button_of(query, 4)
+    return (parts[1], parts[2], parts[3]) if parts else None
 
 
 def choice_of(query: CallbackQuery) -> tuple[str, str] | None:
-    """Прогон и номер идеи из данных кнопки. None — кнопка не той формы.
-
-    Номер проверяется, хотя данные писал сам бот: нечисловой ушёл бы в стадию правкой из
-    мусора, а сообщения переживают выкладку, и формат кнопки уже менялся однажды.
-    """
-    parts = (query.data or "").split(":")
-    if len(parts) != 3 or not parts[2].isdecimal():
-        return None
-    _, run_id, number = parts
-    return run_id, number
+    """Прогон и номер идеи из данных кнопки. Нечисловой номер ушёл бы в стадию правкой из мусора."""
+    parts = button_of(query, 3)
+    return (parts[1], parts[2]) if parts and parts[2].isdecimal() else None
 
 
 def choice_ending(run: Run, stop: Pause) -> Ending:
