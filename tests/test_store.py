@@ -22,6 +22,7 @@ from sqlalchemy.engine import make_url
 from app.config import settings
 from app.store import (
     AWAITING_CHOICE,
+    AWAITING_GATE,
     FAILED,
     PUBLISHED,
     Base,
@@ -34,7 +35,7 @@ from app.store import (
     one_bot_per_database,
     session,
     start_run,
-    stop_on_choice,
+    stop_run,
     waiting_for,
 )
 
@@ -42,6 +43,7 @@ from app.store import (
 pytestmark = [pytest.mark.db, pytest.mark.timeout(30)]
 
 CANDIDATES = "outputs/candidates.md"
+BRIEF = "outputs/brief.md"
 TEST_DATABASE = "dictum_test"
 
 
@@ -105,7 +107,12 @@ def db(migrated: None) -> Iterator[None]:
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
     start_run(run_id, chat_id, "voice", "ru", True)
-    stop_on_choice(run_id, "intake", CANDIDATES)
+    stop_run(run_id, "choice", "intake", CANDIDATES)
+
+
+def a_gated_run(run_id: str = "прогон", chat_id: int = 12) -> None:
+    start_run(run_id, chat_id, "text", "ru", False)
+    stop_run(run_id, "gate", "brief", BRIEF)
 
 
 def test_the_migration_is_what_the_models_say(db: None) -> None:
@@ -113,7 +120,7 @@ def test_the_migration_is_what_the_models_say(db: None) -> None:
 
     Чего эта сверка не видит: предиката частичного индекса и server default — `compare_metadata`
     их не сравнивает (проверено подменой предиката на выдуманный, расхождений ноль). За тем, что
-    индекс уникален именно на `awaiting_choice`, следит тест про две остановки в одном чате.
+    индекс уникален на обоих статусах остановки, следят тесты про две остановки в одном чате.
     """
     with engine().connect() as connection:
         context = MigrationContext.configure(connection)
@@ -172,11 +179,40 @@ def test_a_chat_cannot_hold_two_stops_at_once(db: None) -> None:
     start_run("второй", 12, "voice", "ru", True)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
-        stop_on_choice("второй", "intake", CANDIDATES)
+        stop_run("второй", "choice", "intake", CANDIDATES)
+
+
+def test_a_gate_stop_collides_with_a_choice_stop_in_the_same_chat(db: None) -> None:
+    """Род остановки на счёт не влияет: ответ человека всё равно один, и прогон для него один."""
+    a_stopped_run("первый")
+    start_run("второй", 12, "text", "ru", False)
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        stop_run("второй", "gate", "brief", BRIEF)
 
 
 def test_leaving_the_choice_drops_the_stop_and_keeps_the_run(db: None) -> None:
     a_stopped_run()
+
+    drop_stop(12)
+
+    assert waiting_for(12) is None
+
+
+def test_a_gate_stop_is_found_with_its_kind_and_the_source_of_the_run(db: None) -> None:
+    """Род остановки несёт статус, а source — подпись прогресса у продолженного прогона."""
+    a_gated_run()
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None
+    assert (stopped.kind, stopped.stage, stopped.artifact) == ("gate", "brief", BRIEF)
+    assert (stopped.source, stopped.auto_approve) == ("text", False)
+
+
+def test_leaving_a_gate_drops_the_stop_too(db: None) -> None:
+    """«Стоп» на воротах, голосовое и `/start` — один и тот же выход из остановки."""
+    a_gated_run()
 
     drop_stop(12)
 
@@ -223,4 +259,18 @@ def test_a_stopped_run_keeps_where_it_stopped(db: None) -> None:
             AWAITING_CHOICE,
             "intake",
             CANDIDATES,
+        )
+
+
+def test_a_gated_run_waits_under_its_own_status(db: None) -> None:
+    a_gated_run()
+
+    with session() as opened:
+        row = opened.get(RunRow, "прогон")
+
+        assert row is not None
+        assert (row.status, row.stopped_stage, row.stopped_artifact) == (
+            AWAITING_GATE,
+            "brief",
+            BRIEF,
         )

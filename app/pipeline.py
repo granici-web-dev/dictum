@@ -9,6 +9,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Род остановки обхода (SPEC §3.2). Объявлен здесь, потому что читают его с двух сторон:
+# `Pause` и `Redo` в app/run.py и `Stopped` в app/store.py, а общий у них только этот модуль.
+StopKind = Literal["choice", "gate"]
+
 TRANSCRIPT = "inputs/transcript.md"
 IDEA = "inputs/idea.md"
 CANDIDATES = "outputs/candidates.md"

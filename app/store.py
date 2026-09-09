@@ -28,7 +28,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.config import ConfigError, settings
-from app.pipeline import NAMES
+from app.pipeline import NAMES, StopKind
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 BOT_LOCK = 20260902
 
 AWAITING_CHOICE = "awaiting_choice"
+AWAITING_GATE = "awaiting_gate"
 PUBLISHED = "published"
 NO_TASK = "no_task"
 DROPPED = "dropped"
@@ -45,6 +46,12 @@ FAILED = "failed"
 # ним. Прогон в рабочем статусе на старте процесса означает, что процесс умер вместе с ним.
 WORKING = frozenset(NAMES)
 FIRST_STATUS = NAMES[0]
+
+# Род остановки статус и несёт: выбор и ворота ждут ответа из одного чата и различаются только
+# тем, чего от человека ждут. Отдельной колонки под род поэтому нет.
+STATUS_OF_STOP: dict[StopKind, str] = {"choice": AWAITING_CHOICE, "gate": AWAITING_GATE}
+KIND_OF_STOP: dict[str, StopKind] = {status: kind for kind, status in STATUS_OF_STOP.items()}
+STOP_STATUSES = frozenset(STATUS_OF_STOP.values())
 
 
 class Base(DeclarativeBase):
@@ -60,7 +67,7 @@ class RunRow(Base):
     lang: Mapped[str] = mapped_column(String(8))
     status: Mapped[str] = mapped_column(String(16))
     auto_approve: Mapped[bool]
-    # Заполнены только при `awaiting_choice`: куда возвращаться с ответом человека.
+    # Заполнены только у остановленного прогона: куда возвращаться с ответом человека.
     stopped_stage: Mapped[str | None] = mapped_column(String(16))
     stopped_artifact: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -71,23 +78,30 @@ class RunRow(Base):
     __table_args__ = (
         # Остановку ищут по чату и статусу: единственный запрос бота на горячем пути.
         Index("ix_runs_chat_status", "chat_id", "status"),
-        # Остановка в чате одна: вторая означала бы, что ответ человека уходит непонятно в
-        # какой прогон. Пусть об этом скажет база, а не разбирающийся потом человек.
+        # Остановка в чате одна, какого бы рода она ни была: вторая означала бы, что ответ
+        # человека уходит непонятно в какой прогон. Пусть об этом скажет база, а не
+        # разбирающийся потом человек.
         Index(
             "ux_runs_one_stop_per_chat",
             "chat_id",
             unique=True,
-            postgresql_where=text(f"status = '{AWAITING_CHOICE}'"),
+            postgresql_where=text(f"status in ('{AWAITING_CHOICE}', '{AWAITING_GATE}')"),
         ),
     )
 
 
 class Stopped(BaseModel):
-    """Прогон, ждущий ответа из чата: всё, чтобы вернуться в него хоть после перезапуска."""
+    """Прогон, ждущий ответа из чата: всё, чтобы вернуться в него хоть после перезапуска.
+
+    `source` держится здесь, а не выводится из прогона: у продолженного `Run` записи уже нет
+    (её мог унести `KEEP_AUDIO=false`), а прогресс голосового подписан иначе, чем текстовый.
+    """
 
     run_id: str
     lang: str
+    source: str
     auto_approve: bool
+    kind: StopKind
     stage: str
     artifact: str
 
@@ -181,12 +195,14 @@ def mark_stage(run_id: str, status: str, lang: str) -> None:
         )
 
 
-def stop_on_choice(run_id: str, stage: str, artifact: str) -> None:
+def stop_run(run_id: str, kind: StopKind, stage: str, artifact: str) -> None:
     with session() as opened:
         opened.execute(
             update(RunRow)
             .where(RunRow.id == run_id)
-            .values(status=AWAITING_CHOICE, stopped_stage=stage, stopped_artifact=artifact)
+            .values(
+                status=STATUS_OF_STOP[kind], stopped_stage=stage, stopped_artifact=artifact
+            )
         )
 
 
@@ -200,11 +216,11 @@ def finish_run(run_id: str, status: str) -> None:
 
 
 def drop_stop(chat_id: int) -> None:
-    """Человек ушёл от выбора сам: заговорил голосом или послал `/start` (SPEC §7.3)."""
+    """Человек ушёл от остановки сам: заговорил голосом, послал `/start` или нажал «Стоп»."""
     with session() as opened:
         opened.execute(
             update(RunRow)
-            .where(RunRow.chat_id == chat_id, RunRow.status == AWAITING_CHOICE)
+            .where(RunRow.chat_id == chat_id, RunRow.status.in_(STOP_STATUSES))
             .values(status=DROPPED, stopped_stage=None, stopped_artifact=None)
         )
 
@@ -212,7 +228,7 @@ def drop_stop(chat_id: int) -> None:
 def waiting_for(chat_id: int) -> Stopped | None:
     with session() as opened:
         row = opened.scalars(
-            select(RunRow).where(RunRow.chat_id == chat_id, RunRow.status == AWAITING_CHOICE)
+            select(RunRow).where(RunRow.chat_id == chat_id, RunRow.status.in_(STOP_STATUSES))
         ).one_or_none()
         if row is None:
             return None
@@ -225,7 +241,9 @@ def waiting_for(chat_id: int) -> Stopped | None:
         return Stopped(
             run_id=row.id,
             lang=row.lang,
+            source=row.source,
             auto_approve=row.auto_approve,
+            kind=KIND_OF_STOP[row.status],
             stage=row.stopped_stage,
             artifact=row.stopped_artifact,
         )

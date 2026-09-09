@@ -40,7 +40,7 @@ from app.store import (
     finish_run,
     mark_stage,
     start_run,
-    stop_on_choice,
+    stop_run,
     waiting_for,
 )
 from app.transcribe import FFMPEG_MISSING, NothingHeard, TranscriptionError, ffmpeg_installed
@@ -387,7 +387,7 @@ async def follow(
     try:
         if ending.stop:
             await asyncio.to_thread(
-                stop_on_choice, run.run_id, ending.stop.stage, ending.stop.artifact
+                stop_run, run.run_id, ending.stop.kind, ending.stop.stage, ending.stop.artifact
             )
         else:
             await asyncio.to_thread(finish_run, run.run_id, ending.status)

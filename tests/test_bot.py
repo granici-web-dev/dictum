@@ -46,9 +46,9 @@ from app.bot import (
 )
 from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
-from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
+from app.pipeline import CANDIDATES, NAMES, Stage, StopKind, stages_between
 from app.run import Pause, Redo, Run, walk
-from app.store import AWAITING_CHOICE, DROPPED, FAILED, NO_TASK, PUBLISHED, Stopped
+from app.store import DROPPED, FAILED, NO_TASK, PUBLISHED, STATUS_OF_STOP, Stopped
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
@@ -63,11 +63,14 @@ class FakeStore:
         self.stops: dict[int, Stopped] = {}
         self.chats: dict[str, int] = {}
         self.status: dict[str, str] = {}
+        self.sources: dict[str, str] = {}
         self.started: list[tuple[str, int, str]] = []
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
         self.chats[stopped.run_id] = chat_id
+        # Источник прогона — колонка строки, а не свойство остановки: она его переживает.
+        self.sources.setdefault(stopped.run_id, stopped.source)
 
     def waiting_for(self, chat_id: int) -> Stopped | None:
         return self.stops.get(chat_id)
@@ -78,16 +81,23 @@ class FakeStore:
         self.started.append((run_id, chat_id, source))
         self.chats[run_id] = chat_id
         self.status[run_id] = NAMES[0]
+        self.sources[run_id] = source
 
     def mark_stage(self, run_id: str, status: str, lang: str) -> None:
         self.status[run_id] = status
 
-    def stop_on_choice(self, run_id: str, stage: str, artifact: str) -> None:
-        self.status[run_id] = AWAITING_CHOICE
+    def stop_run(self, run_id: str, kind: StopKind, stage: str, artifact: str) -> None:
+        self.status[run_id] = STATUS_OF_STOP[kind]
         self.stop(
             self.chats[run_id],
             Stopped(
-                run_id=run_id, lang="ru", auto_approve=True, stage=stage, artifact=artifact
+                run_id=run_id,
+                lang="ru",
+                source=self.sources[run_id],
+                auto_approve=True,
+                kind=kind,
+                stage=stage,
+                artifact=artifact,
             ),
         )
 
@@ -108,7 +118,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
         "waiting_for",
         "start_run",
         "mark_stage",
-        "stop_on_choice",
+        "stop_run",
         "finish_run",
         "drop_stop",
     ):
@@ -481,7 +491,13 @@ def a_stopped_choice(
     (root / "outputs").mkdir(parents=True, exist_ok=True)
     (root / CANDIDATES).write_text(candidates, encoding="utf-8")
     return Stopped(
-        run_id="прогон", lang="ru", auto_approve=True, stage="intake", artifact=CANDIDATES
+        run_id="прогон",
+        lang="ru",
+        source="voice",
+        auto_approve=True,
+        kind="choice",
+        stage="intake",
+        artifact=CANDIDATES,
     )
 
 
