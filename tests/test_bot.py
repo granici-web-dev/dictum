@@ -64,13 +64,15 @@ class FakeStore:
         self.chats: dict[str, int] = {}
         self.status: dict[str, str] = {}
         self.sources: dict[str, str] = {}
+        self.approved: dict[str, bool] = {}
         self.started: list[tuple[str, int, str]] = []
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
         self.chats[stopped.run_id] = chat_id
-        # Источник прогона — колонка строки, а не свойство остановки: она его переживает.
+        # Источник и режим ворот — колонки строки, а не свойства остановки: она их переживает.
         self.sources.setdefault(stopped.run_id, stopped.source)
+        self.approved.setdefault(stopped.run_id, stopped.auto_approve)
 
     def waiting_for(self, chat_id: int) -> Stopped | None:
         return self.stops.get(chat_id)
@@ -82,6 +84,7 @@ class FakeStore:
         self.chats[run_id] = chat_id
         self.status[run_id] = NAMES[0]
         self.sources[run_id] = source
+        self.approved[run_id] = auto_approve
 
     def mark_stage(self, run_id: str, status: str, lang: str) -> None:
         self.status[run_id] = status
@@ -94,7 +97,7 @@ class FakeStore:
                 run_id=run_id,
                 lang="ru",
                 source=self.sources[run_id],
-                auto_approve=True,
+                auto_approve=self.approved[run_id],
                 kind=kind,
                 stage=stage,
                 artifact=artifact,
@@ -172,27 +175,27 @@ def test_something_that_is_not_an_id_is_named_in_the_refusal(
 
 
 def test_the_progress_shows_every_stage_of_the_walk_in_its_order() -> None:
-    text = progress_text(a_run(), [])
+    text = progress_text(a_run(), [], voice=False)
 
     printed = [line[2:] for line in text.splitlines()[2:]]
     assert printed == [LABEL[name] for name in NAMES]
 
 
 def test_the_progress_marks_what_is_done_and_what_runs_now() -> None:
-    text = progress_text(a_run(), ["ingest", "intake"])
+    text = progress_text(a_run(), ["ingest", "intake"], voice=False)
 
     marks = [line[0] for line in text.splitlines()[2:]]
     assert marks == ["✓", "✓", "▸", "·", "·", "·", "·"]
 
 
 def test_a_finished_walk_marks_everything_and_points_at_nothing() -> None:
-    text = progress_text(a_run(), list(NAMES))
+    text = progress_text(a_run(), list(NAMES), voice=False)
 
     assert [line[0] for line in text.splitlines()[2:]] == ["✓"] * len(NAMES)
 
 
 def test_the_progress_carries_the_run_id_so_the_log_can_be_found() -> None:
-    assert progress_text(a_run("a1b2c3d4"), []).startswith("Прогон a1b2c3d4")
+    assert progress_text(a_run("a1b2c3d4"), [], voice=False).startswith("Прогон a1b2c3d4")
 
 
 def test_the_last_message_counts_the_cards_and_links_the_board(
@@ -232,7 +235,7 @@ def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
 
 
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
-    printed = progress_text(a_run(audio=Path("voice.oga")), []).splitlines()[2:]
+    printed = progress_text(a_run(), [], voice=True).splitlines()[2:]
 
     assert printed[0] == f"▸ {VOICE_INGEST_LABEL}"
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
@@ -483,7 +486,10 @@ NO_CONTEXT = cast(ContextTypes.DEFAULT_TYPE, None)
 
 
 def a_stopped_choice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidates: str = MULTIPLE
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidates: str = MULTIPLE,
+    auto_approve: bool = True,
 ) -> Stopped:
     """Остановка, пережившая процесс: строка помнит место, список лежит файлом в прогоне."""
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
@@ -494,7 +500,7 @@ def a_stopped_choice(
         run_id="прогон",
         lang="ru",
         source="voice",
-        auto_approve=True,
+        auto_approve=auto_approve,
         kind="choice",
         stage="intake",
         artifact=CANDIDATES,
@@ -538,7 +544,7 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
         )
     ]
     assert 12 not in store.stops
-    assert chat.replies[0].splitlines()[2] == "✓ принял идею"
+    assert chat.replies[0].splitlines()[2] == f"✓ {VOICE_INGEST_LABEL}"
 
 
 @pytest.mark.asyncio
@@ -807,6 +813,22 @@ async def test_start_drops_a_stopped_run_so_a_new_idea_can_begin(
 
     assert 12 not in store.stops
     assert chat.replies == [GREETING]
+
+
+def test_a_continued_run_takes_its_facts_from_the_row_and_not_from_the_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Прогон, начатый с воротами, обязан с ними и кончиться, а язык голосовому назвал Whisper.
+
+    Продолженный прогон шёл через `demo_run`: тот жёстко снимал ворота и брал язык из настроек.
+    """
+    monkeypatch.setattr(settings, "default_lang", "de")
+    stopped = a_stopped_choice(tmp_path, monkeypatch, auto_approve=False)
+
+    run = bot.continued(stopped)
+
+    assert not run.auto_approve
+    assert run.lang == "ru"
 
 
 def test_a_number_becomes_the_choice_the_stage_can_read() -> None:
