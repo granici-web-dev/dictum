@@ -292,14 +292,15 @@ async def save_voice(voice: Voice, target: Path) -> None:
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
+    message = update.message
+    if message is None or not permitted(message):
         return
     # Замок берётся ради остановки, а не ради приветствия: без него `/start`, посланный во время
     # прогона, снимал пустоту, а прогон в конце записывал остановку обратно.
     async with running:
-        dropped = await asyncio.to_thread(drop_stop, update.message.chat_id)
-    logger.info("command=start chat=%s dropped=%s", update.message.chat_id, dropped or NOTHING)
-    await update.message.reply_text(GREETING)
+        dropped = await asyncio.to_thread(drop_stop, message.chat_id)
+    logger.info("command=start chat=%s dropped=%s", message.chat_id, dropped or NOTHING)
+    await message.reply_text(GREETING)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

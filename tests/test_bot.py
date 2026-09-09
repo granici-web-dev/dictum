@@ -751,6 +751,7 @@ async def test_start_waits_for_the_run_so_its_reset_is_not_written_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
     """`/start` во время прогона снимал пустоту: остановку прогон записывал уже после него."""
+    listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     chat = TextChat("/start")
     await bot.running.acquire()
@@ -860,6 +861,7 @@ async def test_start_drops_a_stopped_run_so_a_new_idea_can_begin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
     """Выхода из остановки больше нет: текст — это выбор, а голосовое есть не у всех."""
+    listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     chat = TextChat("/start")
 
@@ -1217,6 +1219,7 @@ async def test_start_leaves_a_line_naming_the_run_it_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`/start` не оставлял в логе ничего: по нему нельзя было сказать, чей прогон оборвался."""
+    listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
 
     with caplog.at_level(logging.INFO, logger="app.bot"):
@@ -1227,9 +1230,11 @@ async def test_start_leaves_a_line_naming_the_run_it_dropped(
 
 @pytest.mark.asyncio
 async def test_start_without_a_stop_says_so_with_a_dash(
-    caplog: pytest.LogCaptureFixture, store: FakeStore
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, store: FakeStore
 ) -> None:
     """Пустое место читалось бы как оборванная строка, а прочерк — как ответ."""
+    listed(monkeypatch, "12")
+
     with caplog.at_level(logging.INFO, logger="app.bot"):
         await on_start(an_update(TextChat("/start")), NO_CONTEXT)
 
@@ -1390,3 +1395,18 @@ async def test_a_gate_whose_file_did_not_go_still_shows_its_buttons(
     assert chat.edits[-1].startswith("Бриф готов")
     assert isinstance(chat.keyboards[-1], InlineKeyboardMarkup)
     assert chat.documents == []
+
+
+@pytest.mark.asyncio
+async def test_start_from_a_stranger_gets_silence_like_every_other_message(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`/start` был единственным обработчиком без белого списка: чужой чат получал приветствие."""
+    listed(monkeypatch, "-100500")
+    chat = TextChat("/start")
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await on_start(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == []
+    assert "refusal=stranger chat=12" in caplog.text
