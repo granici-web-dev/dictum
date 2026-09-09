@@ -452,7 +452,11 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     run_id, stage, decision = pressed
     if running.locked():
-        await refuse(message, "busy", BUSY, run=run_id)
+        # Решение называется и здесь, хотя до его разбора дело не дойдёт: репетиция 09.09.2026
+        # оставила в логе `refusal=busy` от кнопки, и по нему нельзя было сказать, нажали
+        # «Дальше», «Править» или «Стоп». Кнопки ворот живут в чате рядом, и разбор упирался
+        # в память участников.
+        await refuse(message, "busy", BUSY, run=run_id, gate=stage, press=decision)
         return
 
     async with running:
@@ -508,7 +512,7 @@ async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     run_id, number = picked
     if running.locked():
-        await refuse(message, "busy", BUSY, run=run_id)
+        await refuse(message, "busy", BUSY, run=run_id, pick=number)
         return
 
     async with running:

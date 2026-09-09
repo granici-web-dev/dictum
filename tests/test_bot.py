@@ -1209,7 +1209,7 @@ async def test_a_button_pressed_during_a_run_is_refused_like_a_message(
 
     assert chat.replies == [BUSY]
     assert chat.answered == 1
-    assert "refusal=busy chat=12 run=прогон" in caplog.text
+    assert "refusal=busy chat=12 run=прогон gate=brief press=next" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1474,7 +1474,7 @@ async def test_a_choice_button_pressed_during_a_run_is_refused_like_a_message(
 
     assert chat.replies == [BUSY]
     assert chat.answered == 1
-    assert "refusal=busy chat=12 run=прогон" in caplog.text
+    assert "refusal=busy chat=12 run=прогон pick=1" in caplog.text
 
 
 @pytest.mark.asyncio
