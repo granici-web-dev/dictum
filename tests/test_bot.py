@@ -1418,3 +1418,32 @@ def test_a_gate_that_no_digest_knows_about_falls_instead_of_lying(tmp_path: Path
 
     with pytest.raises(ValueError, match="у ворот после prd"):
         bot.gate_text(run, Pause(stage="prd", artifact=BRIEF, kind="gate"))
+
+
+@pytest.mark.asyncio
+async def test_a_continued_run_stops_at_the_next_gate_and_shows_its_own_voice_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """План обещал обе проверки, а тест «Дальше» шёл через двойник, который не встаёт нигде.
+
+    Продолженный прогон обязан упереться в следующие ворота (иначе `auto_approve` из строки
+    ничего не значит) и остаться голосовым в подписи прогресса: записи на диске уже нет.
+    """
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch, source="voice"))
+    at_decompose = Pause(stage="decompose", artifact=ISSUES_MD, kind="gate")
+    monkeypatch.setattr(
+        bot,
+        "walk",
+        walk_stopping_in_turn(
+            [at_decompose], {ISSUES_JSON: REAL_ISSUES, ISSUES_MD: "# Backlog\n"}
+        ),
+    )
+    chat = ButtonChat("прогон", "next")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies[0].splitlines()[2] == f"✓ {VOICE_INGEST_LABEL}"
+    assert chat.edits[-1].startswith("Бэклог готов")
+    assert store.stops[12].stage == "decompose"
+    assert store.status["прогон"] == AWAITING_GATE
