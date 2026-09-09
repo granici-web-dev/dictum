@@ -15,7 +15,16 @@ from app.pipeline import (
     stage_named,
 )
 from app import run as walking
-from app.run import Pause, Redo, Run, ingest_body, missing_before, read_artifact, walk
+from app.run import (
+    Pause,
+    Redo,
+    Run,
+    ingest_body,
+    missing_before,
+    outputs_after,
+    read_artifact,
+    walk,
+)
 from app.stages import StageError
 from app.transcribe import Transcription
 from tests.helpers import FakeBoard, InstallResponses, ok, real_issues, request_body
@@ -174,7 +183,8 @@ def test_a_redo_reaches_the_stage_it_was_meant_for_and_no_other(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
-    walk(run, "intake", "brief", redo=Redo(user_edit="Выбрана идея 2: Отчёты", artifact=CANDIDATES))
+    picked = Redo(kind="choice", user_edit="Выбрана идея 2: Отчёты", artifact=CANDIDATES)
+    walk(run, "intake", "brief", redo=picked)
 
     chosen = request_body(requests[1])["messages"]
     assert "<user_edit>\nВыбрана идея 2: Отчёты\n</user_edit>" in chosen[-1]["content"]
@@ -189,7 +199,7 @@ def test_a_redo_carries_the_previous_answer_so_the_stage_does_not_start_over(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
-    walk(run, "intake", "intake", redo=Redo(user_edit="Первую", artifact=CANDIDATES))
+    walk(run, "intake", "intake", redo=Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES))
 
     history = request_body(requests[1])["messages"][0]
     assert history["role"] == "assistant"
@@ -205,7 +215,9 @@ def test_a_second_list_after_a_choice_is_repaired_into_the_chosen_idea(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
-    assert walk(run, "intake", "intake", redo=Redo(user_edit="Первую", artifact=CANDIDATES)) is None
+    picked = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
+
+    assert walk(run, "intake", "intake", redo=picked) is None
 
     claim = request_body(requests[2])["messages"][-1]["content"]
     assert "допустим только inputs/idea.md" in claim
@@ -220,8 +232,23 @@ def test_a_stage_that_asks_again_after_a_choice_falls_instead_of_stopping_twice(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
+    picked = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
+
     with pytest.raises(StageError, match="expected inputs/idea.md, got outputs/candidates.md"):
-        walk(run, "intake", "intake", redo=Redo(user_edit="Первую", artifact=CANDIDATES))
+        walk(run, "intake", "intake", redo=picked)
+
+
+def test_a_choice_redo_may_not_ask_the_same_question_again() -> None:
+    choice = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
+
+    assert outputs_after(stage_named("intake"), choice) == (frozenset({IDEA}),)
+
+
+def test_a_gate_redo_hands_back_the_same_artifact_because_that_is_the_point() -> None:
+    """На воротах правят сам артефакт: тот же запрет закрыл бы стадию наглухо."""
+    fixed = Redo(kind="gate", user_edit="Заголовок другой", artifact=BRIEF)
+
+    assert outputs_after(stage_named("brief"), fixed) == stage_named("brief").outputs
 
 
 def test_a_gate_after_brief_stops_a_run_that_was_not_auto_approved(
