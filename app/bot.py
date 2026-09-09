@@ -412,7 +412,11 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     # Часы на кнопке крутятся, пока Telegram не получит ответ: снимаем их до всего остального.
     await query.answer()
-    run_id, stage, decision = decision_of(query)
+    pressed = decision_of(query)
+    if pressed is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    run_id, stage, decision = pressed
     if running.locked():
         await refuse(message, "busy", BUSY, run=run_id)
         return
@@ -605,9 +609,17 @@ def gate_text(run: Run, stop: Pause) -> str:
     return f"{digest(run)}\n\n{GATE_TAIL}"
 
 
-def decision_of(query: CallbackQuery) -> tuple[str, str, str]:
-    """Прогон, ворота и решение из данных кнопки. Их писал сам бот, разбирать как ввод незачем."""
-    _, run_id, stage, decision = (query.data or "").split(":")
+def decision_of(query: CallbackQuery) -> tuple[str, str, str] | None:
+    """Прогон, ворота и решение из данных кнопки. None — кнопка не той формы.
+
+    Данные писал сам бот, и разбирать их как чужой ввод незачем — но сообщения переживают
+    выкладку, а формат кнопки уже менялся однажды. Нажатая кнопка прошлой формы обязана
+    получить тот же отказ, что и протухшая, а не уронить обработчик молчанием в ответ.
+    """
+    parts = (query.data or "").split(":")
+    if len(parts) != 4:
+        return None
+    _, run_id, stage, decision = parts
     return run_id, stage, decision
 
 

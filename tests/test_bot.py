@@ -1451,3 +1451,19 @@ async def test_a_continued_run_stops_at_the_next_gate_and_shows_its_own_voice_la
     assert chat.edits[-1].startswith("Бэклог готов")
     assert store.stops[12].stage == "decompose"
     assert store.status["прогон"] == AWAITING_GATE
+
+
+@pytest.mark.asyncio
+async def test_a_button_from_before_the_format_changed_is_refused_like_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Сообщения переживают выкладку: кнопка прошлой формы роняла обработчик молчанием."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    chat = ButtonChat("прогон", "next")
+    chat.data = "gate:прогон:next"
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert store.stops[12].stage == "brief"
