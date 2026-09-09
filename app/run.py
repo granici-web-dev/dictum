@@ -68,7 +68,7 @@ class Redo(BaseModel):
 def ingest_body(run: Run) -> dict[str, str]:
     if run.audio is None:
         return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id, "text", None)}
-    heard = transcribe(run.audio)
+    heard = transcribe(run.audio, run.run_id)
     # Язык прогона задаёт голос, а не DEFAULT_LANG: brief и стадии за ним читают уже его.
     run.lang = heard.lang
     return {

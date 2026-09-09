@@ -120,7 +120,7 @@ def language_code(detected: str) -> str:
     return code
 
 
-def transcribe(audio: Path) -> Transcription:
+def transcribe(audio: Path, run_id: str) -> Transcription:
     # Клиент строится первым: он проверяет ALLOW_LIVE_API и ключ, и делать это после ffmpeg
     # значит запустить подпроцесс ради прогона, который всё равно откажется.
     client = whisper_client()
@@ -131,7 +131,8 @@ def transcribe(audio: Path) -> Transcription:
             model=MODEL, file=recording, response_format="verbose_json"
         )
     logger.info(
-        "stage=ingest model=%s audio_seconds=%d duration_ms=%d",
+        "stage=ingest run=%s model=%s audio_seconds=%d duration_ms=%d",
+        run_id,
         MODEL,
         round(answer.duration),
         int((time.perf_counter() - started) * 1000),

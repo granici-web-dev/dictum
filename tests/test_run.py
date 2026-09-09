@@ -68,7 +68,7 @@ def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -
     monkeypatch.setattr(
         walking,
         "transcribe",
-        lambda audio: Transcription(text=TEXT, lang=lang, duration_seconds=47),
+        lambda audio, run_id: Transcription(text=TEXT, lang=lang, duration_seconds=47),
     )
     return Run(
         root=root,

@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from app import transcribe
 from app.config import LiveApiNotAllowed, settings
 from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3
 from tests.helpers import InstallResponses, heard
+
+RUN = "прогон-для-теста"
 
 
 @pytest.fixture
@@ -29,11 +32,23 @@ def test_the_transcript_takes_the_language_whisper_detected(
 ) -> None:
     whisper([heard("Хочу бота, который напоминает о дедлайнах.", "russian", 12.4)])
 
-    heard_out = transcribe.transcribe(recording)
+    heard_out = transcribe.transcribe(recording, RUN)
 
     assert heard_out.text == "Хочу бота, который напоминает о дедлайнах."
     assert heard_out.lang == "ru"
     assert heard_out.duration_seconds == 12
+
+
+def test_the_record_of_the_transcription_names_the_run(
+    whisper: InstallResponses, recording: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Строка стадии без прогона ничья: у ingest она такая же запись вызова, как у остальных."""
+    whisper([heard("Идея.")])
+
+    with caplog.at_level(logging.INFO, logger="app.transcribe"):
+        transcribe.transcribe(recording, RUN)
+
+    assert f"stage=ingest run={RUN} model=" in caplog.text
 
 
 def test_the_call_asks_for_the_format_that_carries_the_language(
@@ -41,7 +56,7 @@ def test_the_call_asks_for_the_format_that_carries_the_language(
 ) -> None:
     requests = whisper([heard("Идея.")])
 
-    transcribe.transcribe(recording)
+    transcribe.transcribe(recording, RUN)
 
     sent = requests[0].content
     assert b"whisper-1" in sent
@@ -54,7 +69,7 @@ def test_a_language_outside_the_table_keeps_the_name_whisper_returned(
     """Соврать «de» вместо нераспознанного языка нельзя: артефакты прогона несут его дальше."""
     whisper([heard("Nataka bot.", "swahili")])
 
-    assert transcribe.transcribe(recording).lang == "swahili"
+    assert transcribe.transcribe(recording, RUN).lang == "swahili"
 
 
 def test_the_recording_is_gone_once_the_text_is_in_hand(
@@ -62,7 +77,7 @@ def test_the_recording_is_gone_once_the_text_is_in_hand(
 ) -> None:
     whisper([heard("Идея.")])
 
-    transcribe.transcribe(recording)
+    transcribe.transcribe(recording, RUN)
 
     assert not recording.exists()
     assert not recording.with_suffix(".mp3").exists()
@@ -74,7 +89,7 @@ def test_keep_audio_leaves_both_files_on_disk(
     monkeypatch.setattr(settings, "keep_audio", True)
     whisper([heard("Идея.")])
 
-    transcribe.transcribe(recording)
+    transcribe.transcribe(recording, RUN)
 
     assert recording.exists()
     assert recording.with_suffix(".mp3").exists()
@@ -86,7 +101,7 @@ def test_silence_is_refused_before_a_single_stage_is_paid_for(
     whisper([heard("   ")])
 
     with pytest.raises(TranscriptionError, match=NOTHING_HEARD):
-        transcribe.transcribe(recording)
+        transcribe.transcribe(recording, RUN)
 
 
 def test_transcription_without_the_live_flag_does_not_even_start_ffmpeg(
@@ -100,7 +115,7 @@ def test_transcription_without_the_live_flag_does_not_even_start_ffmpeg(
     monkeypatch.setattr(transcribe, "convert_to_mp3", never)
 
     with pytest.raises(LiveApiNotAllowed, match="ALLOW_LIVE_API"):
-        transcribe.transcribe(recording)
+        transcribe.transcribe(recording, RUN)
 
 
 def test_a_missing_ffmpeg_says_how_to_install_it(
