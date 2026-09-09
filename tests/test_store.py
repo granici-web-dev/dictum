@@ -9,6 +9,7 @@ SQLite подменил бы диалект и спрятал ровно то, �
 """
 
 from collections.abc import Iterator
+from typing import get_args
 
 import pytest
 import sqlalchemy
@@ -20,13 +21,18 @@ from sqlalchemy import delete, text
 from sqlalchemy.engine import make_url
 
 from app.config import settings
+from app.dialog import Turn
+from app.pipeline import StopKind
 from app.store import (
+    AWAITING_ANSWER,
     AWAITING_CHOICE,
     AWAITING_GATE,
     FAILED,
     PUBLISHED,
+    STATUS_OF_STOP,
     Base,
     RunRow,
+    add_turn,
     drop_stop,
     engine,
     fail_orphans,
@@ -44,6 +50,7 @@ pytestmark = [pytest.mark.db, pytest.mark.timeout(30)]
 
 CANDIDATES = "outputs/candidates.md"
 BRIEF = "outputs/brief.md"
+QUESTION = "outputs/brief_question.md"
 TEST_DATABASE = "dictum_test"
 
 
@@ -113,6 +120,11 @@ def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
 def a_gated_run(run_id: str = "прогон", chat_id: int = 12) -> None:
     start_run(run_id, chat_id, "text", "ru", False)
     stop_run(run_id, "gate", "brief", BRIEF)
+
+
+def an_asked_run(run_id: str = "прогон", chat_id: int = 12) -> None:
+    start_run(run_id, chat_id, "text", "ru", False)
+    stop_run(run_id, "answer", "brief", QUESTION)
 
 
 def test_the_migration_is_what_the_models_say(db: None) -> None:
@@ -279,3 +291,52 @@ def test_a_gated_run_waits_under_its_own_status(db: None) -> None:
             "brief",
             BRIEF,
         )
+
+
+def test_every_kind_of_stop_has_a_status_of_its_own(db: None) -> None:
+    """Род остановки несёт статус, и забытый род оставил бы прогон без места возврата."""
+    assert set(STATUS_OF_STOP) == set(get_args(StopKind))
+    assert len(set(STATUS_OF_STOP.values())) == len(STATUS_OF_STOP)
+
+
+def test_a_run_waiting_for_an_answer_waits_under_its_own_status(db: None) -> None:
+    an_asked_run()
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None
+    assert (stopped.kind, stopped.stage, stopped.artifact) == ("answer", "brief", QUESTION)
+    with session() as opened:
+        assert opened.get(RunRow, "прогон").status == AWAITING_ANSWER  # type: ignore[union-attr]
+
+
+def test_a_question_stop_collides_with_a_gate_stop_in_the_same_chat(db: None) -> None:
+    """Третий род остановки считается тем же индексом: ответ человека уходит в один прогон."""
+    an_asked_run("первый")
+    start_run("второй", 12, "text", "ru", False)
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError):
+        stop_run("второй", "gate", "brief", BRIEF)
+
+
+def test_the_dialog_comes_back_with_the_stop_in_the_order_it_was_said(db: None) -> None:
+    """Ответы человека не лежат ни в одном артефакте: без строки стадия спросит их заново."""
+    an_asked_run()
+    add_turn("прогон", "Кто пользователь?\n", "Наша же команда")
+    add_turn("прогон", "Как часто?\n", "Каждый день")
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None
+    assert stopped.turns == (
+        Turn(question="Кто пользователь?\n", answer="Наша же команда"),
+        Turn(question="Как часто?\n", answer="Каждый день"),
+    )
+
+
+def test_a_run_that_was_never_asked_anything_carries_an_empty_dialog(db: None) -> None:
+    a_gated_run()
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None and stopped.turns == ()

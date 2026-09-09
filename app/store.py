@@ -23,11 +23,13 @@ from sqlalchemy import (
     text,
     update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.config import ConfigError, settings
+from app.dialog import Turn
 from app.pipeline import NAMES, StopKind
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ BOT_LOCK = 20260902
 
 AWAITING_CHOICE = "awaiting_choice"
 AWAITING_GATE = "awaiting_gate"
+AWAITING_ANSWER = "awaiting_answer"
 PUBLISHED = "published"
 NO_TASK = "no_task"
 DROPPED = "dropped"
@@ -47,9 +50,13 @@ FAILED = "failed"
 WORKING = frozenset(NAMES)
 FIRST_STATUS = NAMES[0]
 
-# Род остановки статус и несёт: выбор и ворота ждут ответа из одного чата и различаются только
-# тем, чего от человека ждут. Отдельной колонки под род поэтому нет.
-STATUS_OF_STOP: dict[StopKind, str] = {"choice": AWAITING_CHOICE, "gate": AWAITING_GATE}
+# Род остановки статус и несёт: все три ждут ответа из одного чата и различаются только тем,
+# чего от человека ждут. Отдельной колонки под род поэтому нет.
+STATUS_OF_STOP: dict[StopKind, str] = {
+    "choice": AWAITING_CHOICE,
+    "gate": AWAITING_GATE,
+    "answer": AWAITING_ANSWER,
+}
 KIND_OF_STOP: dict[str, StopKind] = {status: kind for kind, status in STATUS_OF_STOP.items()}
 STOP_STATUSES = frozenset(STATUS_OF_STOP.values())
 
@@ -70,6 +77,11 @@ class RunRow(Base):
     # Заполнены только у остановленного прогона: куда возвращаться с ответом человека.
     stopped_stage: Mapped[str | None] = mapped_column(String(16))
     stopped_artifact: Mapped[str | None] = mapped_column(String(64))
+    # Ходы brief-диалога (SPEC §3.3): вопрос стадии и ответ человека на него. Ответы не лежат
+    # ни в одном артефакте, а пережить перезапуск обязаны — потому и живут в строке.
+    brief_dialog: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -85,7 +97,11 @@ class RunRow(Base):
             "ux_runs_one_stop_per_chat",
             "chat_id",
             unique=True,
-            postgresql_where=text(f"status in ('{AWAITING_CHOICE}', '{AWAITING_GATE}')"),
+            postgresql_where=text(
+                "status in ("
+                + ", ".join(f"'{status}'" for status in sorted(STATUS_OF_STOP.values()))
+                + ")"
+            ),
         ),
     )
 
@@ -104,6 +120,9 @@ class Stopped(BaseModel):
     kind: StopKind
     stage: str
     artifact: str
+    # Пусто у всех остановок, кроме вопроса брифа, и у первого его вопроса тоже: отвечать не на
+    # что было.
+    turns: tuple[Turn, ...] = ()
 
     @property
     def voice(self) -> bool:
@@ -255,7 +274,19 @@ def waiting_for(chat_id: int) -> Stopped | None:
             kind=KIND_OF_STOP[row.status],
             stage=row.stopped_stage,
             artifact=row.stopped_artifact,
+            turns=tuple(Turn.model_validate(turn) for turn in row.brief_dialog),
         )
+
+
+def add_turn(run_id: str, question: str, answer: str) -> None:
+    """Записывает ход brief-диалога: этот вопрос стадии и этот ответ человека (SPEC §3.3).
+
+    Пишется целым списком, а не дописыванием на месте: SQLAlchemy заметит только присвоение,
+    и правка внутри JSON уехала бы в никуда молча.
+    """
+    with session() as opened:
+        row = opened.scalars(select(RunRow).where(RunRow.id == run_id)).one()
+        row.brief_dialog = [*row.brief_dialog, {"question": question, "answer": answer}]
 
 
 def fail_orphans() -> list[Orphan]:
