@@ -38,13 +38,27 @@ FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""",
 NO_FILE_BLOCKS = 'в ответе нет ни одного тега <file path="...">'
 
 
-def repairable_problems(stage: str, files: dict[str, str]) -> list[str]:
+def closed_branch(got: frozenset[str], allowed: tuple[frozenset[str], ...]) -> str:
+    listed = " или ".join(", ".join(sorted(paths)) for paths in allowed)
+    return (
+        f"стадия отдала {', '.join(sorted(got))}, а после правки человека допустим "
+        f"только {listed}"
+    )
+
+
+def repairable_problems(
+    stage: str, files: dict[str, str], allowed: tuple[frozenset[str], ...]
+) -> list[str]:
     if not files:
         return [NO_FILE_BLOCKS]
     # Чужой набор файлов ремонту не подлежит, и run_stage обязан упасть на нём раньше,
     # чем на претензиях: иначе порядок двух проверок в конце run_stage перестанет быть верным.
     if frozenset(files) not in stage_named(stage).outputs:
         return []
+    # Набор знакомый, но повтор его уже не принимает: человек выбрал идею, а стадия отдала
+    # второй список кандидатов. Это ремонтируется — стадия видит свой прошлый ответ и правку.
+    if frozenset(files) not in allowed:
+        return [closed_branch(frozenset(files), allowed)]
     if stage == "decompose":
         return check_issues(files[ISSUES_JSON])
     if CANDIDATES in files:
@@ -190,7 +204,10 @@ def run_stage(
     user_edit: str | None = None,
     history: list[MessageParam] | None = None,
     params: dict[str, str] | None = None,
+    allowed: tuple[frozenset[str], ...] | None = None,
 ) -> StageResult:
+    """`allowed` сужает выходы стадии: повтор по правке не принимает ветку, которая его вызвала."""
+    outputs = allowed if allowed is not None else stage_named(stage).outputs
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
     messages: list[MessageParam] = [
         *(history or []),
@@ -202,7 +219,7 @@ def run_stage(
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
 
-    problems = repairable_problems(stage, files)
+    problems = repairable_problems(stage, files, outputs)
     if problems:
         # Удачный ремонт стирал причину: прогон выглядел как два вызова без объяснения,
         # а претензии оставались только у провалившихся.
@@ -222,12 +239,10 @@ def run_stage(
         response = repair
         raw = answer_text(stage, repair)
         files = parse_file_blocks(raw)
-        problems = repairable_problems(stage, files)
+        problems = repairable_problems(stage, files, outputs)
 
-    if frozenset(files) not in stage_named(stage).outputs:
-        expected = " or ".join(
-            ", ".join(sorted(paths)) for paths in stage_named(stage).outputs
-        )
+    if frozenset(files) not in outputs:
+        expected = " or ".join(", ".join(sorted(paths)) for paths in outputs)
         got = ", ".join(sorted(files)) or "no <file> blocks"
         raise StageError(f"{stage}: expected {expected}, got {got}", raw)
     if problems:

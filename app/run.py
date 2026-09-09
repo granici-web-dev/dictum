@@ -126,6 +126,17 @@ def missing_before(root: Path, start: str, stop: str) -> list[str]:
     return missing
 
 
+def outputs_after(stage: Stage, redo: Redo | None) -> tuple[frozenset[str], ...]:
+    """Что стадии позволено отдать. Повтор снимает ветку, которая остановила обход.
+
+    Человек ответил на `redo.artifact` — значит, отдать его снова стадия не вправе: прогон встал
+    бы на том же месте с тем же вопросом, а ответ человека пропал бы.
+    """
+    if redo is None:
+        return stage.outputs
+    return tuple(paths for paths in stage.outputs if redo.artifact not in paths)
+
+
 def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResult:
     inputs = {path: read_artifact(run.root, path) for path in stage.inputs}
     if stage.template:
@@ -144,6 +155,7 @@ def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResu
             user_edit=redo.user_edit if redo else None,
             history=history,
             params=params,
+            allowed=outputs_after(stage, redo),
         )
     except StageError as error:
         write_artifact(run.root, f"outputs/{stage.name}.raw.md", error.raw)
