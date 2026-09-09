@@ -51,14 +51,15 @@ def repairable_problems(
 ) -> list[str]:
     if not files:
         return [NO_FILE_BLOCKS]
+    given = frozenset(files)
     # Чужой набор файлов ремонту не подлежит, и run_stage обязан упасть на нём раньше,
     # чем на претензиях: иначе порядок двух проверок в конце run_stage перестанет быть верным.
-    if frozenset(files) not in stage_named(stage).outputs:
+    if given not in stage_named(stage).outputs:
         return []
     # Набор знакомый, но повтор его уже не принимает: человек выбрал идею, а стадия отдала
     # второй список кандидатов. Это ремонтируется — стадия видит свой прошлый ответ и правку.
-    if frozenset(files) not in allowed:
-        return [closed_branch(frozenset(files), allowed)]
+    if given not in allowed:
+        return [closed_branch(given, allowed)]
     if stage == "decompose":
         return check_issues(files[ISSUES_JSON])
     if CANDIDATES in files:

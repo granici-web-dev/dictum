@@ -15,6 +15,7 @@ from app.bot import (
     BROKEN_REDO,
     BUSY,
     EMPTY,
+    FIRST_STAGE,
     GREETING,
     HEARD,
     LABEL,
@@ -35,7 +36,6 @@ from app.bot import (
     on_text,
     on_voice,
     outcome,
-    out_of_range,
     progress_text,
     refuse,
     too_long,
@@ -43,7 +43,7 @@ from app.bot import (
 from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
-from app.run import Pause, Redo, Run
+from app.run import Pause, Redo, Run, walk
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
@@ -213,6 +213,12 @@ class SlowNote:
         return cast(Message, self)
 
 
+# Двойники обхода объявлены типом настоящего `walk`, а не `Callable[..., Pause | None]`:
+# со стёртой сигнатурой её смена проходила мимо mypy и всплывала шестью красными тестами.
+Walking = Callable[[Run, str, str, Callable[[Stage], None], Redo | None], Pause | None]
+walk_itself: Walking = walk
+
+
 def walk_reporting_every_stage(
     run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
 ) -> Pause | None:
@@ -243,6 +249,12 @@ async def test_the_link_is_the_last_thing_the_message_shows(
     assert len(note.edits) == len(NAMES) + 1
 
 
+def walk_breaking(
+    run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+) -> Pause | None:
+    raise RuntimeError("стадия не ответила")
+
+
 def walk_stopping_on_choice(
     run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
 ) -> Pause | None:
@@ -250,9 +262,7 @@ def walk_stopping_on_choice(
 
 
 def a_stopped_run(root: Path, monkeypatch: pytest.MonkeyPatch, candidates: str) -> Run:
-    (root / "outputs").mkdir(exist_ok=True)
-    (root / CANDIDATES).write_text(candidates, encoding="utf-8")
-    monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
+    monkeypatch.setattr(bot, "walk", walk_stopping_with(candidates))
     return Run(root=root, run_id="прогон", lang="ru", text="…", auto_approve=True)
 
 
@@ -327,7 +337,7 @@ async def test_the_stop_after_intake_shows_what_the_model_heard(
     """До кнопок (P3-07) человек выбирает сам, поэтому обязан видеть, между чем."""
     run = a_stopped_run(tmp_path, monkeypatch, MULTIPLE)
 
-    said = (await outcome(run, lambda stage: None)).text
+    said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
     assert "1. Бот для онбординга новичков" in said
     assert "2. Утренняя сводка по просроченным дедлайнам" in said
@@ -342,7 +352,7 @@ async def test_a_missing_candidates_file_still_ends_the_message(
     monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
     run = Run(root=tmp_path, run_id="прогон", lang="ru", text="…", auto_approve=True)
 
-    said = (await outcome(run, lambda stage: None)).text
+    said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
     assert "сорвался" in said
 
@@ -354,7 +364,7 @@ async def test_a_run_that_found_no_task_says_so_and_still_shows_what_was_discuss
     """Тот же список в том же файле, но это темы разговора: подать их как идеи значит соврать."""
     run = a_stopped_run(tmp_path, monkeypatch, NONE)
 
-    said = (await outcome(run, lambda stage: None)).text
+    said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
     assert said.startswith(NOTHING_HEARD)
     assert "1. Сроки по текущему спринту" in said
@@ -368,7 +378,7 @@ async def test_a_recording_with_nothing_in_it_gets_the_lead_and_the_ask_alone(
     """Пустой список — не пустая строка в чате: показывать нечего, и показывать нечего."""
     run = a_stopped_run(tmp_path, monkeypatch, NONE_EMPTY)
 
-    said = (await outcome(run, lambda stage: None)).text
+    said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
     assert said == f"{NOTHING_HEARD}\n\n{ASK_AGAIN}"
 
@@ -408,7 +418,7 @@ def a_stopped_choice(root: Path, candidates: str = MULTIPLE) -> Waiting:
     )
 
 
-def walk_recording(seen: list[tuple[str, str, Redo | None]]) -> Callable[..., Pause | None]:
+def walk_recording(seen: list[tuple[str, str, Redo | None]]) -> Walking:
     def walking(
         run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
     ) -> Pause | None:
@@ -430,7 +440,9 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
-    await on_text(an_update(TextChat("2")), NO_CONTEXT)
+    chat = TextChat("2")
+
+    await on_text(an_update(chat), NO_CONTEXT)
 
     assert seen == [
         (
@@ -444,6 +456,7 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
         )
     ]
     assert 12 not in bot.paused
+    assert chat.replies[0].splitlines()[2] == "✓ принял идею"
 
 
 @pytest.mark.asyncio
@@ -460,7 +473,7 @@ async def test_a_number_outside_the_list_keeps_the_run_waiting(
 
     await on_text(an_update(chat), NO_CONTEXT)
 
-    assert chat.replies == [out_of_range(parse_candidates(MULTIPLE))]
+    assert chat.replies == ["Идей всего 2. Пришлите номер от 1 до 2 или саму идею словами."]
     assert bot.paused[12] == stopped
     assert seen == []
 
@@ -524,10 +537,7 @@ async def test_a_broken_redo_keeps_the_recording_and_the_stop(
     stopped = a_stopped_choice(tmp_path)
     bot.paused[12] = stopped
 
-    def walk_failing(*args: object, **kwargs: object) -> Pause | None:
-        raise RuntimeError("стадия не ответила")
-
-    monkeypatch.setattr(bot, "walk", walk_failing)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
     chat = TextChat("2")
 
     await on_text(an_update(chat), NO_CONTEXT)
@@ -625,7 +635,7 @@ def test_a_number_that_is_not_in_the_list_is_not_a_choice() -> None:
     assert chosen_edit("7", parse_candidates(MULTIPLE)) is None
 
 
-def walk_stopping_with(candidates: str) -> Callable[..., Pause | None]:
+def walk_stopping_with(candidates: str) -> Walking:
     def walking(
         run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
     ) -> Pause | None:
@@ -665,3 +675,4 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert bot.paused == {}
+    assert chat.edits[-1].startswith(NOTHING_HEARD)

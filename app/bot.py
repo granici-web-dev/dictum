@@ -24,7 +24,7 @@ from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
 from app.pipeline import ISSUES_JSON, NAMES, Stage, stages_between
 from app.publish import journal_of
-from app.run import Redo, Run, read_artifact, walk
+from app.run import Pause, Redo, Run, read_artifact, walk
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
@@ -374,11 +374,24 @@ def choice_text(found: Candidates) -> str:
     return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
 
 
+def choice_ending(run: Run, stop: Pause) -> Ending:
+    """Остановка на выборе, разобранная для человека: список ему и остановка боту."""
+    found = parse_candidates(read_artifact(run.root, stop.artifact))
+    # Ждать ответа есть смысл, только когда есть из чего выбирать: при none в записи не было
+    # ничего, и следующее сообщение — новый прогон, а не правка к пустому.
+    if found.outcome != "multiple":
+        return Ending(text=choice_text(found))
+    return Ending(
+        text=choice_text(found),
+        waiting=Waiting(run=run, stage=stop.stage, artifact=stop.artifact, found=found),
+    )
+
+
 async def outcome(
     run: Run,
     report: Callable[[Stage], None],
-    start: str = FIRST_STAGE,
-    redo: Redo | None = None,
+    start: str,
+    redo: Redo | None,
 ) -> Ending:
     """Чем кончился прогон: строка человеку и остановка, если от него ждут ответа."""
     # Ответ человеку собирается внутри того же try: и концовка, и выбор читают файл с диска
@@ -388,18 +401,7 @@ async def outcome(
         waiting = await asyncio.to_thread(walk, run, start, LAST_STAGE, report, redo)
         if waiting and waiting.kind == "choice":
             logger.info("stop=choice run=%s", run.run_id)
-            found = parse_candidates(read_artifact(run.root, waiting.artifact))
-            # Ждать ответа есть смысл, только когда есть из чего выбирать: при none в записи
-            # не было ничего, и следующее сообщение — новый прогон, а не правка к пустому.
-            keep = found.outcome == "multiple"
-            return Ending(
-                text=choice_text(found),
-                waiting=Waiting(
-                    run=run, stage=waiting.stage, artifact=waiting.artifact, found=found
-                )
-                if keep
-                else None,
-            )
+            return choice_ending(run, waiting)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return Ending(
