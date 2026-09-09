@@ -61,9 +61,13 @@ def migrated() -> Iterator[None]:
 
 @pytest.fixture
 def db(migrated: None) -> Iterator[None]:
+    # Прибираем и после себя: та же база стоит на стенде, и строка «прогон» из теста однажды
+    # попала в выдачу живого прогона, где её пришлось объяснять.
     with session() as opened:
         opened.execute(delete(RunRow))
     yield
+    with session() as opened:
+        opened.execute(delete(RunRow))
 
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
