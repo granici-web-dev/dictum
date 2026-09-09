@@ -1,4 +1,4 @@
-.PHONY: up down bot test run-text clean-board clean-runs
+.PHONY: up down bot test run-text clean-board clean-runs db
 up:
 	docker compose up -d
 down:
@@ -19,3 +19,5 @@ clean-runs:
 	@printf "Введите «да», чтобы удалить их с диска: " && read answer && [ "$$answer" = "да" ] \
 		&& find runs -mindepth 1 -maxdepth 1 -exec rm -rf {} + \
 		&& echo "Готово, runs/ пуст." || echo "Отменено, ничего не удалено."
+db:
+	uv run alembic upgrade head

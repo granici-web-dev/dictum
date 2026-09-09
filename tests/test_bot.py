@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +26,6 @@ from app.bot import (
     NOTHING_HEARD,
     PICK_ONE,
     VOICE_INGEST_LABEL,
-    Waiting,
     allowed_chats,
     cards_published,
     chosen_edit,
@@ -46,15 +45,70 @@ from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Redo, Run, walk
+from app.store import AWAITING_CHOICE, Stopped
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
+class FakeStore:
+    """Строка прогона в памяти теста: те же вызовы, что бот делает к базе.
+
+    Настоящую базу трогают только тесты `app/store.py` (TESTING.md): поднимать Postgres ради
+    проверки обработчика значит проверять две вещи разом и падать по второй.
+    """
+
+    def __init__(self) -> None:
+        self.stops: dict[int, Stopped] = {}
+        self.chats: dict[str, int] = {}
+        self.status: dict[str, str] = {}
+        self.started: list[tuple[str, int, str]] = []
+
+    def stop(self, chat_id: int, stopped: Stopped) -> None:
+        self.stops[chat_id] = stopped
+        self.chats[stopped.run_id] = chat_id
+
+    def waiting_for(self, chat_id: int) -> Stopped | None:
+        return self.stops.get(chat_id)
+
+    def start_run(
+        self, run_id: str, chat_id: int, source: str, lang: str, auto_approve: bool
+    ) -> None:
+        self.started.append((run_id, chat_id, source))
+        self.chats[run_id] = chat_id
+        self.status[run_id] = NAMES[0]
+
+    def mark_stage(self, run_id: str, status: str, lang: str) -> None:
+        self.status[run_id] = status
+
+    def stop_on_choice(self, run_id: str, stage: str, artifact: str) -> None:
+        self.status[run_id] = AWAITING_CHOICE
+        self.stop(
+            self.chats[run_id],
+            Stopped(
+                run_id=run_id, lang="ru", auto_approve=True, stage=stage, artifact=artifact
+            ),
+        )
+
+    def finish_run(self, run_id: str, status: str) -> None:
+        self.status[run_id] = status
+        self.stops.pop(self.chats.get(run_id, 0), None)
+
+    def drop_stop(self, chat_id: int) -> None:
+        self.stops.pop(chat_id, None)
+
+
 @pytest.fixture(autouse=True)
-def no_stopped_runs() -> Iterator[None]:
-    """Остановки живут в модуле, и чужая, забытая в словаре, свернула бы следующий тест."""
-    bot.paused.clear()
-    yield
-    bot.paused.clear()
+def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
+    fake = FakeStore()
+    for name in (
+        "waiting_for",
+        "start_run",
+        "mark_stage",
+        "stop_on_choice",
+        "finish_run",
+        "drop_stop",
+    ):
+        monkeypatch.setattr(bot, name, getattr(fake, name))
+    return fake
 
 
 def a_run(run_id: str = "прогон", audio: Path | None = None) -> Run:
@@ -412,11 +466,16 @@ def an_update(message: object) -> Update:
 NO_CONTEXT = cast(ContextTypes.DEFAULT_TYPE, None)
 
 
-def a_stopped_choice(root: Path, candidates: str = MULTIPLE) -> Waiting:
-    """Остановка без файла на диске: список она несёт с собой, читать его заново некому."""
-    run = Run(root=root, run_id="прогон", lang="ru", auto_approve=True)
-    return Waiting(
-        run=run, stage="intake", artifact=CANDIDATES, found=parse_candidates(candidates)
+def a_stopped_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidates: str = MULTIPLE
+) -> Stopped:
+    """Остановка, пережившая процесс: строка помнит место, список лежит файлом в прогоне."""
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    root = tmp_path / "runs" / "прогон"
+    (root / "outputs").mkdir(parents=True, exist_ok=True)
+    (root / CANDIDATES).write_text(candidates, encoding="utf-8")
+    return Stopped(
+        run_id="прогон", lang="ru", auto_approve=True, stage="intake", artifact=CANDIDATES
     )
 
 
@@ -434,11 +493,10 @@ def walk_recording(seen: list[tuple[str, str, Redo | None]]) -> Walking:
 
 @pytest.mark.asyncio
 async def test_the_answer_after_a_choice_continues_the_same_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Расшифровка уже есть: новый прогон означал бы просьбу надиктовать идею заново."""
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
@@ -457,18 +515,17 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
             ),
         )
     ]
-    assert 12 not in bot.paused
+    assert 12 not in store.stops
     assert chat.replies[0].splitlines()[2] == "✓ принял идею"
 
 
 @pytest.mark.asyncio
 async def test_a_number_outside_the_list_keeps_the_run_waiting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Прогон не сбрасывается из-за опечатки: человек ещё выбирает."""
     listed(monkeypatch, "12")
-    stopped = a_stopped_choice(tmp_path)
-    bot.paused[12] = stopped
+    stopped = a_stopped_choice(tmp_path, monkeypatch)
+    store.stop(12, stopped)
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
     chat = TextChat("7")
@@ -476,17 +533,16 @@ async def test_a_number_outside_the_list_keeps_the_run_waiting(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert chat.replies == ["Идей всего 2. Пришлите номер от 1 до 2 или саму идею словами."]
-    assert bot.paused[12] == stopped
+    assert store.stops[12] == stopped
     assert seen == []
 
 
 @pytest.mark.asyncio
 async def test_the_list_lives_in_the_stop_so_a_lost_file_cannot_swallow_the_answer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Ответ разбирался повторным чтением candidates.md, и стёртый файл ронял обработчик молча."""
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
@@ -498,11 +554,10 @@ async def test_the_list_lives_in_the_stop_so_a_lost_file_cannot_swallow_the_answ
 
 @pytest.mark.asyncio
 async def test_a_digit_that_is_no_number_goes_to_the_stage_instead_of_crashing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """У «²» isdigit истинен, а int падает: обработчик срывался, и человек не получал ничего."""
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
@@ -513,12 +568,11 @@ async def test_a_digit_that_is_no_number_goes_to_the_stage_instead_of_crashing(
 
 @pytest.mark.asyncio
 async def test_an_empty_message_is_refused_and_the_stop_stays(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Пробел снимал остановку и уходил в стадию правкой без единого слова."""
     listed(monkeypatch, "12")
-    stopped = a_stopped_choice(tmp_path)
-    bot.paused[12] = stopped
+    stopped = a_stopped_choice(tmp_path, monkeypatch)
+    store.stop(12, stopped)
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
     chat = TextChat("   ")
@@ -526,18 +580,17 @@ async def test_an_empty_message_is_refused_and_the_stop_stays(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert chat.replies == [EMPTY]
-    assert bot.paused[12] == stopped
+    assert store.stops[12] == stopped
     assert seen == []
 
 
 @pytest.mark.asyncio
 async def test_a_broken_redo_keeps_the_recording_and_the_stop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Иначе сорванная стадия теряет расшифровку — та самая потеря, ради которой был P3-04."""
     listed(monkeypatch, "12")
-    stopped = a_stopped_choice(tmp_path)
-    bot.paused[12] = stopped
+    stopped = a_stopped_choice(tmp_path, monkeypatch)
+    store.stop(12, stopped)
 
     monkeypatch.setattr(bot, "walk", walk_breaking)
     chat = TextChat("2")
@@ -545,19 +598,18 @@ async def test_a_broken_redo_keeps_the_recording_and_the_stop(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert chat.edits[-1] == BROKEN_REDO.format(run_id="прогон")
-    assert bot.paused[12] == stopped
+    assert store.stops[12] == stopped
 
 
 @pytest.mark.asyncio
 async def test_a_run_whose_files_are_gone_drops_the_stop_instead_of_looping(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """`make clean-runs` между репетициями уносит расшифровку: повторять станет нечего.
 
     Остановка при этом копила бы один и тот же отказ на каждый следующий ответ человека.
     """
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
 
     def walk_without_files(
         run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
@@ -570,16 +622,19 @@ async def test_a_run_whose_files_are_gone_drops_the_stop_instead_of_looping(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert chat.edits[-1] == LOST.format(run_id="прогон")
-    assert 12 not in bot.paused
+    assert 12 not in store.stops
 
 
 @pytest.mark.asyncio
 async def test_the_answer_to_a_choice_leaves_a_line_to_count(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    store: FakeStore,
 ) -> None:
     """Отчёт репетиции (P2-06) считает воронку grep-ом: `stop=choice` был, ответов на него нет."""
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
@@ -590,19 +645,21 @@ async def test_the_answer_to_a_choice_leaves_a_line_to_count(
 
 
 @pytest.mark.asyncio
-async def test_start_waits_for_the_run_so_its_reset_is_not_written_over(tmp_path: Path) -> None:
+async def test_start_waits_for_the_run_so_its_reset_is_not_written_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
     """`/start` во время прогона снимал пустоту: остановку прогон записывал уже после него."""
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     chat = TextChat("/start")
     await bot.running.acquire()
     started = asyncio.create_task(on_start(an_update(chat), NO_CONTEXT))
     await asyncio.sleep(0.01)
-    waited = chat.replies == [] and 12 in bot.paused
+    waited = chat.replies == [] and 12 in store.stops
     bot.running.release()
     await started
 
     assert waited
-    assert 12 not in bot.paused
+    assert 12 not in store.stops
     assert chat.replies == [GREETING]
 
 
@@ -613,11 +670,10 @@ async def saved_empty(voice: Voice, target: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """На стенде следующий человек говорит голосом: его запись — не правка к чужому выбору."""
     listed(monkeypatch, "12")
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     monkeypatch.setattr(bot, "save_voice", saved_empty)
     seen: list[tuple[str, str, Redo | None]] = []
@@ -625,14 +681,13 @@ async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
 
     await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
 
-    assert 12 not in bot.paused
+    assert 12 not in store.stops
     assert [(start, redo) for _, start, redo in seen] == [("ingest", None)]
 
 
 @pytest.mark.asyncio
 async def test_a_choice_after_a_voice_is_remembered_as_after_a_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Живой прогон 664534620c9a1c10: остановку записывал только on_text, а голос её терял.
 
     На стенде идею наговаривают, поэтому «1» после голосового уходило новым прогоном —
@@ -645,19 +700,21 @@ async def test_a_choice_after_a_voice_is_remembered_as_after_a_text(
 
     await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
 
-    assert bot.paused[12].stage == "intake"
-    assert bot.paused[12].artifact == CANDIDATES
+    assert store.stops[12].stage == "intake"
+    assert store.stops[12].artifact == CANDIDATES
 
 
 @pytest.mark.asyncio
-async def test_start_drops_a_stopped_run_so_a_new_idea_can_begin(tmp_path: Path) -> None:
+async def test_start_drops_a_stopped_run_so_a_new_idea_can_begin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
     """Выхода из остановки больше нет: текст — это выбор, а голосовое есть не у всех."""
-    bot.paused[12] = a_stopped_choice(tmp_path)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     chat = TextChat("/start")
 
     await on_start(an_update(chat), NO_CONTEXT)
 
-    assert 12 not in bot.paused
+    assert 12 not in store.stops
     assert chat.replies == [GREETING]
 
 
@@ -691,8 +748,7 @@ def walk_stopping_with(candidates: str) -> Walking:
 
 @pytest.mark.asyncio
 async def test_a_choice_is_remembered_so_the_next_message_can_answer_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     monkeypatch.setattr(bot, "walk", walk_stopping_with(MULTIPLE))
@@ -700,15 +756,14 @@ async def test_a_choice_is_remembered_so_the_next_message_can_answer_it(
 
     await on_text(an_update(chat), NO_CONTEXT)
 
-    assert bot.paused[12].stage == "intake"
-    assert bot.paused[12].artifact == CANDIDATES
+    assert store.stops[12].stage == "intake"
+    assert store.stops[12].artifact == CANDIDATES
     assert chat.edits[-1].startswith(HEARD)
 
 
 @pytest.mark.asyncio
 async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Ждать ответа не на что: в записи не было ничего, и правка пришлась бы к пустому."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
@@ -717,5 +772,5 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
 
     await on_text(an_update(chat), NO_CONTEXT)
 
-    assert bot.paused == {}
+    assert store.stops == {}
     assert chat.edits[-1].startswith(NOTHING_HEARD)

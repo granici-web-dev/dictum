@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     trello_token: str = ""
     trello_board_id: str = ""
     project_key: str = ""
-    database_url: str = "postgresql+psycopg://i2b:i2b@localhost:5432/i2b"
+    database_url: str = "postgresql+psycopg://dictum:dictum@localhost:5434/dictum"
     default_lang: str = "de"
     keep_audio: bool = False
 

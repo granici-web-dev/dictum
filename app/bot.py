@@ -13,6 +13,7 @@ from concurrent.futures import Future
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 from telegram import Message, Update, Voice
@@ -22,9 +23,23 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import ISSUES_JSON, NAMES, Stage, stages_between
+from app.pipeline import ISSUES_JSON, NAMES, Stage, after, stages_between
 from app.publish import journal_of
 from app.run import Pause, Redo, Run, read_artifact, walk
+from app.store import (
+    AWAITING_CHOICE,
+    FAILED,
+    NO_TASK,
+    PUBLISHED,
+    Stopped,
+    drop_stop,
+    fail_orphans,
+    finish_run,
+    mark_stage,
+    start_run,
+    stop_on_choice,
+    waiting_for,
+)
 from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
@@ -97,34 +112,27 @@ BROKEN_REDO = (
 
 LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
 
+ORPHANED = (
+    "Бот перезапустился, прогон {run_id} прерван на стадии {stage} — пришлите идею заново."
+)
+
+# PTB типизирует Application шестью параметрами; здесь важен только сам объект.
+BotApplication = Application[Any, Any, Any, Any, Any, Any]
+
 running = asyncio.Lock()
 
 
-class Waiting(BaseModel):
-    """Прогон, вставший на выборе и ждущий ответа из этого чата: куда возвращаться и с чем.
+class Ending(BaseModel):
+    """Чем кончился прогон: что сказать человеку и каким статусом закрыть строку.
 
-    Список несёт разобранным, а не путём к файлу: по нему уже составлено сообщение человеку, и
-    второе чтение того же файла могло разойтись с тем, что человек видит перед собой.
+    `stop` заполнен, когда прогон ждёт ответа: и когда встал на выборе, и когда повтор сорвался,
+    а ответить ещё раз есть смысл. Статус при этом всегда `awaiting_choice` — строка и есть
+    остановка, второго места для неё нет (§4.1).
     """
 
-    run: Run
-    stage: str
-    artifact: str
-    found: Candidates
-
-
-class Ending(BaseModel):
-    """Чем кончился прогон: что сказать человеку, ждать ли от него ответа и дошёл ли обход."""
-
     text: str
-    waiting: Waiting | None = None
-    # Есть ли человеку смысл ответить ещё раз: от этого зависит, доживёт ли остановка до его
-    # следующего сообщения. Сорванная стадия — да, пропавшие файлы прогона — нет.
-    answerable: bool = False
-
-
-# Остановка живёт в памяти процесса, как и сам прогон: строкой в runs она станет в P2-02.
-paused: dict[int, Waiting] = {}
+    status: str
+    stop: Pause | None = None
 
 
 def allowed_chats() -> frozenset[int]:
@@ -172,16 +180,30 @@ def finished_text(root: Path) -> str:
     )
 
 
-def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
-    """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет."""
+def demo_run(
+    run_id: str, text: str = "", audio: Path | None = None, lang: str = ""
+) -> Run:
+    """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет.
+
+    Язык у нового прогона берётся из настроек, у продолженного — из строки: голосовое уже
+    прошло Whisper, и `DEFAULT_LANG` соврал бы про запись, которую бот слышал сам.
+    """
     return Run(
         root=RUNS / run_id,
         run_id=run_id,
-        lang=settings.default_lang,
+        lang=lang or settings.default_lang,
         text=text,
         audio=audio,
         auto_approve=True,
     )
+
+
+def continued(stopped: Stopped) -> Run:
+    return demo_run(stopped.run_id, lang=stopped.lang)
+
+
+def read_candidates(run: Run, artifact: str) -> Candidates:
+    return parse_candidates(read_artifact(run.root, artifact))
 
 
 def permitted(message: Message) -> bool:
@@ -226,7 +248,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Замок берётся ради остановки, а не ради приветствия: без него `/start`, посланный во время
     # прогона, снимал пустоту, а прогон в конце записывал остановку обратно.
     async with running:
-        paused.pop(update.message.chat_id, None)
+        await asyncio.to_thread(drop_stop, update.message.chat_id)
     await update.message.reply_text(GREETING)
 
 
@@ -242,23 +264,36 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
-        stopped = paused.get(message.chat_id)
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
             run, start, redo = demo_run(new_run_id(), text=message.text), FIRST_STAGE, None
+            await asyncio.to_thread(
+                start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
+            )
         else:
-            edit = chosen_edit(message.text, stopped.found)
+            run = continued(stopped)
+            try:
+                found = await asyncio.to_thread(read_candidates, run, stopped.artifact)
+            except OSError:
+                # Файлы прогона мог унести `make clean-runs`: отвечать человеку нечем, и
+                # остановка после этого копила бы один и тот же отказ на каждый ответ.
+                logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
+                await asyncio.to_thread(finish_run, run.run_id, FAILED)
+                await message.reply_text(LOST.format(run_id=run.run_id))
+                return
+            edit = chosen_edit(message.text, found)
             if edit is None:
-                await refuse(message, "unknown_number", out_of_range(stopped.found))
+                await refuse(message, "unknown_number", out_of_range(found))
                 return
             # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него
             # нет, и «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
             logger.info(
                 "answer=%s run=%s chat=%s",
                 "choice" if message.text.strip().isdecimal() else "edit",
-                stopped.run.run_id,
+                run.run_id,
                 message.chat_id,
             )
-            run, start = stopped.run, stopped.stage
+            start = stopped.stage
             redo = Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
         note = await message.reply_text(progress_text(run, done_before(start)))
         await follow(note, run, message.date, start, redo)
@@ -280,10 +315,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         # Голосовое всегда начинает новый прогон и снимает остановку: на стенде следующий
         # человек говорит голосом, и его запись не должна стать правкой к чужому выбору.
-        paused.pop(message.chat_id, None)
+        await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
         run = demo_run(run_id, audio=audio)
+        await asyncio.to_thread(
+            start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
+        )
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
         note = await message.reply_text(progress_text(run, []))
@@ -310,21 +348,25 @@ async def follow(
     start: str = FIRST_STAGE,
     redo: Redo | None = None,
 ) -> None:
-    """Гонит прогон в потоке, правит одно сообщение до конца и помнит остановку.
+    """Гонит прогон в потоке, правит одно сообщение до конца и закрывает строку прогона.
 
-    Остановку и записывает, и снимает сюда, а не обработчик: `on_voice` её однажды не записал,
-    и выбор после голосового ушёл новым прогоном (живой прогон 664534620c9a1c10). Снимается она
-    только после удачного повтора: сорвись он раньше, человек остался бы без остановки и без
-    расшифровки, то есть ровно с той потерей, ради которой затевался P3-04. Чат берётся у
-    сообщения о ходе — оно в том же чате, что и вопрос.
+    Строку закрывает сюда, а не обработчик: `on_voice` однажды не записал остановку, и выбор
+    после голосового ушёл новым прогоном (живой прогон 664534620c9a1c10). Остановка держится,
+    пока повтор не удался: сорвись он, человек остался бы и без остановки, и без расшифровки —
+    ровно с той потерей, ради которой затевался P3-04.
     """
     done = done_before(start)
     loop = asyncio.get_running_loop()
     progress: list[Future[Message | bool]] = []
 
     def report(stage: Stage) -> None:
-        # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий.
+        # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий. Строку пишем
+        # прямо отсюда: этот поток и так не цикл событий, а язык прогона после ingest назвал
+        # Whisper, и до записи он живёт только в памяти обхода (§4.1).
         done.append(stage.name)
+        following = after(stage.name)
+        if following:
+            mark_stage(run.run_id, following, run.lang)
         progress.append(
             asyncio.run_coroutine_threadsafe(
                 note.edit_text(progress_text(run, done)), loop
@@ -332,10 +374,12 @@ async def follow(
         )
 
     ending = await outcome(run, report, start, redo)
-    if ending.waiting:
-        paused[note.chat_id] = ending.waiting
-    elif redo and not ending.answerable:
-        del paused[note.chat_id]
+    if ending.stop:
+        await asyncio.to_thread(
+            stop_on_choice, run.run_id, ending.stop.stage, ending.stop.artifact
+        )
+    else:
+        await asyncio.to_thread(finish_run, run.run_id, ending.status)
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -387,16 +431,13 @@ def choice_text(found: Candidates) -> str:
 
 
 def choice_ending(run: Run, stop: Pause) -> Ending:
-    """Остановка на выборе, разобранная для человека: список ему и остановка боту."""
-    found = parse_candidates(read_artifact(run.root, stop.artifact))
+    """Остановка на выборе, разобранная для человека: список ему и статус строке."""
+    found = read_candidates(run, stop.artifact)
     # Ждать ответа есть смысл, только когда есть из чего выбирать: при none в записи не было
     # ничего, и следующее сообщение — новый прогон, а не правка к пустому.
     if found.outcome != "multiple":
-        return Ending(text=choice_text(found))
-    return Ending(
-        text=choice_text(found),
-        waiting=Waiting(run=run, stage=stop.stage, artifact=stop.artifact, found=found),
-    )
+        return Ending(text=choice_text(found), status=NO_TASK)
+    return Ending(text=choice_text(found), status=AWAITING_CHOICE, stop=stop)
 
 
 async def outcome(
@@ -418,25 +459,47 @@ async def outcome(
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return Ending(
                 text=f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
-                "подтвердить их в чате пока нечем."
+                "подтвердить их в чате пока нечем.",
+                status=FAILED,
             )
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
-        return Ending(text=finished_text(run.root))
+        return Ending(text=finished_text(run.root), status=PUBLISHED)
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        return Ending(text=str(error))
+        return Ending(text=str(error), status=NO_TASK)
     except OSError:
         # Файлы прогона мог унести `make clean-runs` между репетициями. Повторять нечего:
         # остановка после этого копила бы один и тот же отказ на каждый ответ человека.
         logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
-        return Ending(text=LOST.format(run_id=run.run_id))
+        return Ending(text=LOST.format(run_id=run.run_id), status=FAILED)
     except Exception:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
-        broken = BROKEN_REDO if redo else BROKEN
-        return Ending(text=broken.format(run_id=run.run_id), answerable=redo is not None)
+        if redo:
+            # Расшифровка цела, и остановка возвращается на то же место: человек отвечает ещё
+            # раз, а не диктует идею заново.
+            return Ending(
+                text=BROKEN_REDO.format(run_id=run.run_id),
+                status=AWAITING_CHOICE,
+                stop=Pause(stage=start, artifact=redo.artifact, kind="choice"),
+            )
+        return Ending(text=BROKEN.format(run_id=run.run_id), status=FAILED)
+
+
+async def warn_orphans(application: BotApplication) -> None:
+    """Прогоны, не пережившие прошлый процесс: закрыть и сказать людям, что они брошены.
+
+    Молчание тут дороже сообщения: человек у стенда ждёт ответа на голосовое, которого больше
+    некому дождаться, и без строки бот об этих прогонах вообще ничего не знал.
+    """
+    for orphan in await asyncio.to_thread(fail_orphans):
+        logger.info("orphan run=%s stage=%s chat=%s", orphan.run_id, orphan.stage, orphan.chat_id)
+        with suppress(TelegramError):
+            await application.bot.send_message(
+                orphan.chat_id, ORPHANED.format(run_id=orphan.run_id, stage=orphan.stage)
+            )
 
 
 def main() -> None:
@@ -466,6 +529,7 @@ def main() -> None:
         Application.builder()
         .token(settings.telegram_bot_token)
         .concurrent_updates(True)
+        .post_init(warn_orphans)
         .build()
     )
     application.add_handler(CommandHandler("start", on_start))
