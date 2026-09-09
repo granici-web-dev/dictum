@@ -45,8 +45,8 @@ from app.bot import (
     on_voice,
     outcome,
     progress_text,
-    demo_run,
     refuse,
+    started_run,
     too_long,
 )
 from app.candidates import parse_candidates
@@ -247,9 +247,15 @@ def test_every_stage_of_the_walk_has_something_to_show_a_person() -> None:
     assert set(LABEL) == set(NAMES)
 
 
-def test_the_demo_run_is_auto_approved_by_the_flag_it_sets_itself() -> None:
-    """Ворота бот проходит режимом прогона, а не тем, что кнопок для них ещё нет."""
-    assert demo_run("прогон", text="Идея").auto_approve
+def test_a_new_run_takes_the_gates_from_the_settings_and_not_from_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ворота — норма (CLAUDE.md §1), а стенд снимает их своим .env, а не умолчанием кода."""
+    assert not started_run("прогон", text="Идея").auto_approve
+
+    monkeypatch.setattr(settings, "auto_approve", True)
+
+    assert started_run("прогон", text="Идея").auto_approve
 
 
 def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
@@ -848,10 +854,9 @@ async def test_start_drops_a_stopped_run_so_a_new_idea_can_begin(
 def test_a_continued_run_takes_its_facts_from_the_row_and_not_from_the_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Прогон, начатый с воротами, обязан с ними и кончиться, а язык голосовому назвал Whisper.
-
-    Продолженный прогон шёл через `demo_run`: тот жёстко снимал ворота и брал язык из настроек.
-    """
+    """Настройка могла смениться между сообщением человека и его ответом: прогон, начатый с
+    воротами, обязан с ними и кончиться, а язык голосовому назвал Whisper, а не DEFAULT_LANG."""
+    monkeypatch.setattr(settings, "auto_approve", True)
     monkeypatch.setattr(settings, "default_lang", "de")
     stopped = a_stopped_choice(tmp_path, monkeypatch, auto_approve=False)
 

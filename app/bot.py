@@ -218,15 +218,18 @@ def finished_text(root: Path) -> str:
     )
 
 
-def demo_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
-    """Прогон стенда. Ворота сняты флагом (SPEC §3.2), а не тем, что кнопок ещё нет."""
+def started_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
+    """Новый прогон из чата. Ворота снимает флаг настроек (SPEC §3.2), а не отсутствие кнопок.
+
+    Умолчание у флага — «ворота есть» (`CLAUDE.md` §1); стенд снимает их своим `.env`.
+    """
     return Run(
         root=RUNS / run_id,
         run_id=run_id,
         lang=settings.default_lang,
         text=text,
         audio=audio,
-        auto_approve=True,
+        auto_approve=settings.auto_approve,
     )
 
 
@@ -308,7 +311,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
-            run, start, redo = demo_run(new_run_id(), text=message.text), FIRST_STAGE, None
+            run, start, redo = started_run(new_run_id(), text=message.text), FIRST_STAGE, None
             voice = False
             await asyncio.to_thread(
                 start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
@@ -368,7 +371,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
-        run = demo_run(run_id, audio=audio)
+        run = started_run(run_id, audio=audio)
         await asyncio.to_thread(
             start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
         )
@@ -657,6 +660,9 @@ def main() -> None:
     if not ffmpeg_installed():
         raise ConfigError(FFMPEG_MISSING)
     ensure_schema()
+    # Режим прогона — в лог одной строкой: утренний чек-лист стенда спрашивает, сняты ли
+    # ворота, и ответ на это не должен зависеть от памяти о содержимом .env.
+    logger.info("auto_approve=%s", settings.auto_approve)
 
     # Без concurrent_updates бот разбирает обновления по одному и второе сообщение достаёт из
     # очереди только после того, как вернётся обработчик первого, то есть через весь прогон.

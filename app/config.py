@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://dictum:dictum@localhost:5434/dictum"
     default_lang: str = "de"
     keep_audio: bool = False
+    # Ворота — норма, а не опция (CLAUDE.md §1): снимает их стенд своим .env, а не умолчание.
+    auto_approve: bool = False
 
 
 class ConfigError(RuntimeError):
