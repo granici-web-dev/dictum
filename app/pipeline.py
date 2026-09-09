@@ -117,3 +117,16 @@ def stages_between(start: str, stop: str) -> tuple[Stage, ...]:
     first = NAMES.index(stage_named(start).name)
     last = NAMES.index(stage_named(stop).name)
     return STAGES[first : last + 1]
+
+
+def after(name: str) -> Stage:
+    """Следующая запись: откуда идти дальше прогону, подтверждённому на воротах.
+
+    Ворот после последней стадии не бывает — обход их не отдаёт, — поэтому вопрос «что после
+    publish» может задать только ошибка в данных, и отвечать на неё `None` значит завести у
+    вызывающего ветку, которой неоткуда случиться.
+    """
+    following = NAMES.index(stage_named(name).name) + 1
+    if following == len(STAGES):
+        raise ValueError(f"после стадии {name} других нет")
+    return STAGES[following]

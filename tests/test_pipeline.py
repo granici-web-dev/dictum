@@ -1,6 +1,6 @@
 import pytest
 
-from app.pipeline import NAMES, STAGES, stage_named, stages_between
+from app.pipeline import NAMES, STAGES, after, stage_named, stages_between
 from app.run import BODIES
 from app.stages import COMMANDS_DIR
 
@@ -38,4 +38,13 @@ def test_an_unknown_stage_is_refused_by_name() -> None:
         stage_named("publush")
 
 
+def test_the_stage_after_a_gate_is_the_one_the_run_continues_from() -> None:
+    """«Дальше» на воротах ведёт за подтверждённую стадию, а не в неё."""
+    assert after("brief").name == "research"
+    assert after("decompose").name == "publish"
 
+
+def test_there_is_nothing_after_the_last_stage() -> None:
+    """Ворот после publish не бывает: вопрос может задать только ошибка в данных."""
+    with pytest.raises(ValueError, match="после стадии publish"):
+        after("publish")

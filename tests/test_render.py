@@ -1,6 +1,6 @@
 from app.models import Deferred
-from app.render import issues_markdown
-from tests.helpers import FIXTURES, real_issues
+from app.render import backlog_digest, brief_digest, issues_markdown
+from tests.helpers import FIXTURES, REAL_BRIEF, real_issues
 
 
 def test_the_rendered_backlog_matches_the_snapshot() -> None:
@@ -60,3 +60,36 @@ def test_the_file_ends_with_a_single_newline() -> None:
 
     assert rendered.endswith("\n")
     assert not rendered.endswith("\n\n")
+
+
+def test_the_brief_digest_says_what_the_frontmatter_says() -> None:
+    """Пересказ брифа своими словами был бы выдуманными данными: показываем объявленное."""
+    digest = brief_digest(REAL_BRIEF)
+
+    assert digest == "Бриф готов: Бот для анбординга новичков\nОткрытых вопросов: 15."
+
+
+def test_a_brief_without_frontmatter_still_says_that_it_is_ready() -> None:
+    """Frontmatter пишет модель, и заглушка вместо имени соврала бы про артефакт."""
+    assert brief_digest("# Бриф\n") == "Бриф готов."
+
+
+def test_the_backlog_digest_counts_the_issues_of_every_phase() -> None:
+    issues_file = real_issues()
+    first, second = issues_file.phases
+
+    digest = backlog_digest(issues_file)
+
+    assert digest.startswith(
+        f"Бэклог готов: {len(issues_file.issues)} задач, фаз {len(issues_file.phases)}."
+    )
+    for phase in (first, second):
+        here = sum(1 for issue in issues_file.issues if issue.phase == phase.n)
+        assert f"{phase.n}. {phase.title} — {here}" in digest
+
+
+def test_the_backlog_digest_counts_the_deferred_scopes_when_there_are_any() -> None:
+    issues_file = real_issues()
+    issues_file.deferred = [Deferred(scope_id="S7", title="Экспорт", reason="позже")]
+
+    assert "Отложено скоупов: 1." in backlog_digest(issues_file)

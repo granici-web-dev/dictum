@@ -8,6 +8,8 @@
 нам встречались, и не заводят словарь ради одного файла.
 """
 
+import frontmatter
+
 from app.models import Issue, IssuesFile
 
 NOTHING = "—"
@@ -53,3 +55,31 @@ def issues_markdown(issues_file: IssuesFile) -> str:
         lines += ["", "## Open questions", ""]
         lines += [f"- {question}" for question in issues_file.open_questions]
     return "\n".join(lines) + "\n"
+
+
+def brief_digest(content: str) -> str:
+    """Бриф на воротах в двух строках: только то, что стадия объявила во frontmatter.
+
+    Пересказывать бриф своими словами нечем — это выдуманные данные (CLAUDE.md §5), — а
+    целиком он уходит человеку файлом. Поля необязательны: frontmatter пишет модель, и
+    отсутствующее имя лучше показать пропуском, чем заглушкой.
+    """
+    written = frontmatter.loads(content).metadata
+    lines = [f"Бриф готов: {written['name']}" if "name" in written else "Бриф готов."]
+    if "open_questions" in written:
+        lines.append(f"Открытых вопросов: {written['open_questions']}.")
+    return "\n".join(lines)
+
+
+def backlog_digest(issues_file: IssuesFile) -> str:
+    """Бэклог на воротах числами: сколько задач, по каким фазам, сколько отложено."""
+    lines = [
+        f"Бэклог готов: {len(issues_file.issues)} задач, фаз {len(issues_file.phases)}.",
+        "",
+    ]
+    for phase in issues_file.phases:
+        here = sum(1 for issue in issues_file.issues if issue.phase == phase.n)
+        lines.append(f"{phase.n}. {phase.title} — {here}")
+    if issues_file.deferred:
+        lines += ["", f"Отложено скоупов: {len(issues_file.deferred)}."]
+    return "\n".join(lines)

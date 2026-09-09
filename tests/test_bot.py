@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import OperationalError
-from telegram import Message, Update, Voice
+from telegram import InlineKeyboardMarkup, Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
@@ -19,6 +19,9 @@ from app.bot import (
     BUSY,
     EMPTY,
     FIRST_STAGE,
+    GATE_EDIT_ASKED,
+    GATE_STOPPED,
+    GATE_TAIL,
     LOST,
     GREETING,
     HEARD,
@@ -27,28 +30,48 @@ from app.bot import (
     ASK_AGAIN,
     NOTHING_HEARD,
     PICK_ONE,
+    STALE_BUTTON,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
     cards_published,
     chosen_edit,
-    demo_run,
     finished_text,
     follow,
     main,
+    on_gate_button,
     on_start,
     on_text,
     on_voice,
     outcome,
     progress_text,
+    demo_run,
     refuse,
     too_long,
 )
 from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
-from app.pipeline import CANDIDATES, NAMES, Stage, StopKind, stages_between
+from app.pipeline import (
+    BRIEF,
+    CANDIDATES,
+    ISSUES_JSON,
+    ISSUES_MD,
+    NAMES,
+    Stage,
+    StopKind,
+    stages_between,
+)
 from app.run import Pause, Redo, Run, walk
-from app.store import DROPPED, FAILED, NO_TASK, PUBLISHED, STATUS_OF_STOP, Stopped
+from app.store import (
+    AWAITING_GATE,
+    DROPPED,
+    FAILED,
+    NO_TASK,
+    PUBLISHED,
+    STATUS_OF_STOP,
+    Stopped,
+)
+from tests.helpers import REAL_BRIEF, REAL_ISSUES
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
@@ -281,7 +304,7 @@ class SlowNote:
     def __init__(self) -> None:
         self.edits: list[str] = []
 
-    async def edit_text(self, text: str) -> Message:
+    async def edit_text(self, text: str, reply_markup: object = None) -> Message:
         await asyncio.sleep(0.05 if text.startswith("Прогон") else 0)
         self.edits.append(text)
         return cast(Message, self)
@@ -466,9 +489,16 @@ class TextChat(QuietChat):
         self.text = text
         self.date = datetime.now(timezone.utc)
         self.edits: list[str] = []
+        self.keyboards: list[object] = []
+        self.documents: list[Path] = []
 
-    async def edit_text(self, text: str) -> Message:
+    async def edit_text(self, text: str, reply_markup: object = None) -> Message:
         self.edits.append(text)
+        self.keyboards.append(reply_markup)
+        return cast(Message, self)
+
+    async def reply_document(self, document: Path) -> Message:
+        self.documents.append(document)
         return cast(Message, self)
 
 
@@ -645,7 +675,7 @@ async def test_a_broken_redo_keeps_the_recording_and_the_stop(
 
     await on_text(an_update(chat), NO_CONTEXT)
 
-    assert chat.edits[-1] == BROKEN_REDO.format(run_id="прогон")
+    assert chat.edits[-1] == BROKEN_REDO["choice"].format(run_id="прогон")
     assert store.stops[12] == stopped
 
 
@@ -888,3 +918,271 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
     assert store.stops == {}
     assert chat.edits[-1].startswith(NOTHING_HEARD)
     assert store.status[store.started[0][0]] == NO_TASK
+
+
+class ButtonChat(TextChat):
+    """Нажатая кнопка: сам callback и сообщение, на котором она висела."""
+
+    def __init__(self, run_id: str, decision: str) -> None:
+        super().__init__("")
+        self.data = f"gate:{run_id}:{decision}"
+        self.answered = 0
+        self.markups: list[object] = []
+
+    async def answer(self, text: str | None = None) -> bool:
+        self.answered += 1
+        return True
+
+    async def edit_message_reply_markup(self, reply_markup: object = None) -> Message:
+        self.markups.append(reply_markup)
+        return cast(Message, self)
+
+
+def a_press(chat: ButtonChat) -> Update:
+    # `effective_message` у настоящего Update — свойство; двойник отдаёт то же самое полем.
+    return cast(Update, SimpleNamespace(callback_query=chat, effective_message=chat))
+
+
+def a_stopped_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str = "brief",
+    artifact: str = BRIEF,
+    source: str = "text",
+    auto_approve: bool = False,
+) -> Stopped:
+    """Прогон, ждущий решения на воротах: артефакт лежит файлом, место помнит строка."""
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    root = tmp_path / "runs" / "прогон"
+    (root / "outputs").mkdir(parents=True, exist_ok=True)
+    (root / artifact).write_text(REAL_BRIEF, encoding="utf-8")
+    return Stopped(
+        run_id="прогон",
+        lang="ru",
+        source=source,
+        auto_approve=auto_approve,
+        kind="gate",
+        stage=stage,
+        artifact=artifact,
+    )
+
+
+def walk_stopping_at_a_gate(stage: str, artifact: str, files: dict[str, str]) -> Walking:
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        for path, content in files.items():
+            (run.root / path).write_text(content, encoding="utf-8")
+        return Pause(stage=stage, artifact=artifact, kind="gate")
+
+    return walking
+
+
+@pytest.mark.asyncio
+async def test_a_gate_shows_the_numbers_the_artifact_gives_and_sends_it_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Подтвердить то, чего не видел, — не ворота: в сообщении числа, файл идёт следом."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_at_a_gate("brief", BRIEF, {BRIEF: REAL_BRIEF}))
+    chat = TextChat("Идея")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert chat.edits[-1] == (
+        f"Бриф готов: Бот для анбординга новичков\nОткрытых вопросов: 15.\n\n{GATE_TAIL}"
+    )
+    assert chat.documents == [tmp_path / "runs" / run_id / BRIEF]
+    assert store.stops[12].stage == "brief"
+    assert store.status[run_id] == AWAITING_GATE
+
+
+@pytest.mark.asyncio
+async def test_the_gate_message_carries_the_three_buttons_of_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Прогон назван в самой кнопке: вчерашняя не должна двигать сегодняшний."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_at_a_gate("brief", BRIEF, {BRIEF: REAL_BRIEF}))
+    chat = TextChat("Идея")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    keyboard = chat.keyboards[-1]
+    assert isinstance(keyboard, InlineKeyboardMarkup)
+    pressed = [(button.text, button.callback_data) for button in keyboard.inline_keyboard[0]]
+    run_id = store.started[0][0]
+    assert pressed == [
+        ("Дальше", f"gate:{run_id}:next"),
+        ("Править", f"gate:{run_id}:edit"),
+        ("Стоп", f"gate:{run_id}:stop"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_next_at_a_gate_continues_from_the_stage_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Подтверждённую стадию переигрывать значит оплатить её второй раз и получить другое."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = ButtonChat("прогон", "next")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert seen == [("прогон", "research", None)]
+    assert chat.markups == [None]
+    assert store.status["прогон"] == PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_the_edit_button_asks_for_text_and_leaves_the_gate_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Кнопки не снимаются: человек может передумать и подтвердить как есть."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_gate(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = ButtonChat("прогон", "edit")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [GATE_EDIT_ASKED]
+    assert chat.markups == []
+    assert store.stops[12] == stopped
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_the_text_after_a_gate_goes_back_into_the_same_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Правка — про артефакт этой стадии, поэтому обход возвращается ровно в неё."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_text(an_update(TextChat("Убери пятый раздел")), NO_CONTEXT)
+
+    assert seen == [
+        ("прогон", "brief", Redo(kind="gate", user_edit="Убери пятый раздел", artifact=BRIEF))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stop_at_a_gate_ends_the_run_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """«Стоп» — тот же выход из остановки, что голосовое и `/start`."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = ButtonChat("прогон", "stop")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [GATE_STOPPED.format(run_id="прогон")]
+    assert 12 not in store.stops
+    assert store.status["прогон"] == DROPPED
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_button_of_a_run_that_no_longer_waits_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Сообщение с воротами живёт в чате вечно, а остановку снимают голосовое, `/start` и «Стоп»."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = ButtonChat("вчерашний", "next")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert seen == []
+    assert store.stops[12].run_id == "прогон"
+
+
+@pytest.mark.asyncio
+async def test_a_button_pressed_during_a_run_is_refused_like_a_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    chat = ButtonChat("прогон", "next")
+    await bot.running.acquire()
+    try:
+        await on_gate_button(a_press(chat), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert chat.replies == [BUSY]
+    assert chat.answered == 1
+
+
+@pytest.mark.asyncio
+async def test_a_broken_gate_redo_asks_for_the_edit_again_and_keeps_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Остановка снимается только удачным повтором: иначе прогон теряется на первом сбое."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_gate(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    chat = TextChat("Убери пятый раздел")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == BROKEN_REDO["gate"].format(run_id="прогон")
+    assert store.stops[12] == stopped
+    assert store.status["прогон"] == AWAITING_GATE
+
+
+@pytest.mark.asyncio
+async def test_a_gate_after_decompose_counts_the_backlog_it_holds_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Читает человек issues.md, а числа берутся из issues.json: их там не пересказывают."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(
+        bot,
+        "walk",
+        walk_stopping_at_a_gate(
+            "decompose", ISSUES_MD, {ISSUES_JSON: REAL_ISSUES, ISSUES_MD: "# Backlog\n"}
+        ),
+    )
+
+    chat = TextChat("Идея")
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert chat.edits[-1].startswith("Бэклог готов: ")
+    assert chat.documents == [tmp_path / "runs" / run_id / ISSUES_MD]
+
+
+@pytest.mark.asyncio
+async def test_the_decision_on_a_gate_leaves_a_line_to_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отчёт репетиции считает воронку grep-ом: сколько дошло до ворот и что там нажали."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_gate_button(a_press(ButtonChat("прогон", "stop")), NO_CONTEXT)
+
+    assert "gate=stop run=прогон chat=12" in caplog.text

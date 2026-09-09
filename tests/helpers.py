@@ -60,6 +60,10 @@ BROKEN_ISSUES = (FIXTURES / "issues_deferred_without_title.json").read_text(enco
 
 DEPENDENCY_BELOW = (FIXTURES / "issues_dependency_below.json").read_text(encoding="utf-8")
 
+# Бриф живого прогона 1d03c663aad86f72: продолжение того же выбора, что лежит в
+# candidates_multiple.md, — выбрана идея 1, «бот для онбординга новичков».
+REAL_BRIEF = (FIXTURES / "brief_real.md").read_text(encoding="utf-8")
+
 
 def real_issues() -> IssuesFile:
     return IssuesFile.model_validate_json(REAL_ISSUES)

@@ -16,24 +16,42 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
-from telegram import Message, Update, Voice
+from telegram import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+    Voice,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from telegram.error import TelegramError
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import ISSUES_JSON, NAMES, Stage, stages_between
+from app.models import IssuesFile
+from app.pipeline import ISSUES_JSON, ISSUES_MD, NAMES, Stage, after, stages_between
 from app.publish import journal_of
+from app.render import backlog_digest, brief_digest
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
     AWAITING_CHOICE,
+    AWAITING_GATE,
     FAILED,
     NO_TASK,
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
+    STATUS_OF_STOP,
     Stopped,
     drop_stop,
     fail_orphans,
@@ -109,9 +127,24 @@ ASK_AGAIN = "Пришлите идею одним сообщением и чут
 
 BROKEN = "Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
 
-BROKEN_REDO = (
-    "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})"
-)
+BROKEN_REDO = {
+    "choice": "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})",
+    "gate": "Не получилось переделать, но прогон цел. Пришлите правку ещё раз. (прогон {run_id})",
+}
+
+# Ворота (SPEC §3.2). Артефакт уходит человеку файлом, в сообщении — то, что о нём можно
+# сказать числами, и просьба: любой текст на воротах и есть правка, кнопка её только называет.
+GATE_TAIL = "Дальше — кнопкой. Правку пришлите текстом, я переделаю этот шаг."
+
+GATE_EDIT_ASKED = "Пришлите правку одним сообщением: что поменять в этом шаге."
+
+GATE_STOPPED = "Остановил прогон {run_id}. Пришлите новую идею, когда будет готово."
+
+STALE_BUTTON = "Эти кнопки от прогона, который уже не ждёт ответа."
+
+NEXT, EDIT, STOP = "next", "edit", "stop"
+
+GATE_BUTTONS = ((NEXT, "Дальше"), (EDIT, "Править"), (STOP, "Стоп"))
 
 LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
 
@@ -128,9 +161,9 @@ running = asyncio.Lock()
 class Ending(BaseModel):
     """Чем кончился прогон: что сказать человеку и каким статусом закрыть строку.
 
-    `stop` заполнен, когда прогон ждёт ответа: и когда встал на выборе, и когда повтор сорвался,
-    а ответить ещё раз есть смысл. Статус при этом всегда `awaiting_choice` — строка и есть
-    остановка, второго места для неё нет (§4.1).
+    `stop` заполнен, когда прогон ждёт ответа: на выборе, на воротах и когда повтор сорвался,
+    а ответить ещё раз есть смысл. Статус при этом всегда один из статусов остановки — строка
+    и есть остановка, второго места для неё нет (§4.1).
     """
 
     text: str
@@ -280,6 +313,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.to_thread(
                 start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
             )
+        elif stopped.kind == "gate":
+            # Текст на воротах и есть правка: тот же уговор, что и на выборе, и второго
+            # состояния ожидания («нажал Править, теперь жду текст») он не заводит.
+            run, voice = continued(stopped), stopped.source == "voice"
+            logger.info("answer=edit run=%s chat=%s", run.run_id, message.chat_id)
+            start = stopped.stage
+            redo = Redo(kind="gate", user_edit=message.text.strip(), artifact=stopped.artifact)
         else:
             run, voice = continued(stopped), stopped.source == "voice"
             try:
@@ -347,6 +387,46 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await follow(note, run, message.date, voice=True)
 
 
+async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Решение человека на воротах. «Править» только просит текст: правку принимает `on_text`."""
+    query, message = update.callback_query, update.effective_message
+    if query is None or message is None or not permitted(message):
+        return
+    # Часы на кнопке крутятся, пока Telegram не получит ответ: снимаем их до всего остального.
+    await query.answer()
+    if running.locked():
+        await refuse(message, "busy", BUSY)
+        return
+
+    async with running:
+        run_id, decision = decision_of(query)
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is None or stopped.kind != "gate" or stopped.run_id != run_id:
+            # Сообщение с воротами остаётся в чате навсегда, а остановку снимают голосовое,
+            # `/start` и «Стоп»: нажатая назавтра кнопка не должна двигать чужой прогон.
+            await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
+            return
+        logger.info("gate=%s run=%s chat=%s", decision, run_id, message.chat_id)
+        if decision != EDIT:
+            # «Править» кнопки не снимает: человек может передумать и подтвердить как есть.
+            # Сбой самой правки решению не помеха, она косметическая.
+            with suppress(TelegramError):
+                await query.edit_message_reply_markup(reply_markup=None)
+        if decision == STOP:
+            await asyncio.to_thread(drop_stop, message.chat_id)
+            await message.reply_text(GATE_STOPPED.format(run_id=run_id))
+            return
+        if decision == EDIT:
+            await message.reply_text(GATE_EDIT_ASKED)
+            return
+        run, voice = continued(stopped), stopped.source == "voice"
+        # Со следующей стадии, а не с той, что встала на воротах: подтверждённую переигрывать
+        # значит оплатить её второй раз и получить другой артефакт вместо принятого.
+        start = after(stopped.stage).name
+        note = await message.reply_text(progress_text(run, done_before(start), voice))
+        await follow(note, run, datetime.now(timezone.utc), start, voice=voice)
+
+
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not permitted(message):
@@ -410,7 +490,12 @@ async def follow(
     for edit in progress:
         with suppress(TelegramError):
             await asyncio.wrap_future(edit)
-    await note.edit_text(ending.text)
+    if ending.stop and ending.stop.kind == "gate":
+        # Артефакт целиком уходит файлом: подтвердить то, чего не видел, — не ворота, а кнопка.
+        await note.reply_document(run.root / ending.stop.artifact)
+        await note.edit_text(ending.text, reply_markup=gate_keyboard(run.run_id))
+    else:
+        await note.edit_text(ending.text)
     # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
     # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
     waited = datetime.now(timezone.utc) - asked_at
@@ -453,6 +538,33 @@ def choice_text(found: Candidates) -> str:
     return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
 
 
+def gate_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    # Прогон назван в самой кнопке: сообщения с воротами остаются в чате навсегда, и нажатую
+    # вчера надо отличить от сегодняшней раньше, чем она продолжит чужой прогон.
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(title, callback_data=f"gate:{run_id}:{decision}")
+                for decision, title in GATE_BUTTONS
+            ]
+        ]
+    )
+
+
+def gate_text(run: Run, stop: Pause) -> str:
+    """Что сказать о готовом артефакте: числа из него самого, а он уходит следом файлом."""
+    if stop.artifact == ISSUES_MD:
+        backlog = IssuesFile.model_validate_json(read_artifact(run.root, ISSUES_JSON))
+        return f"{backlog_digest(backlog)}\n\n{GATE_TAIL}"
+    return f"{brief_digest(read_artifact(run.root, stop.artifact))}\n\n{GATE_TAIL}"
+
+
+def decision_of(query: CallbackQuery) -> tuple[str, str]:
+    """Прогон и решение из данных кнопки. Их писал сам бот, разбирать их как чужой ввод незачем."""
+    _, run_id, decision = (query.data or "").split(":")
+    return run_id, decision
+
+
 def choice_ending(run: Run, stop: Pause) -> Ending:
     """Остановка на выборе, разобранная для человека: список ему и статус строке."""
     found = read_candidates(run, stop.artifact)
@@ -480,11 +592,7 @@ async def outcome(
             return choice_ending(run, waiting)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
-            return Ending(
-                text=f"Прогон {run.run_id} встал на воротах после стадии {waiting.stage}: "
-                "подтвердить их в чате пока нечем.",
-                status=FAILED,
-            )
+            return Ending(text=gate_text(run, waiting), status=AWAITING_GATE, stop=waiting)
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)
@@ -509,9 +617,9 @@ async def outcome(
             # Расшифровка цела, и остановка возвращается на то же место: человек отвечает ещё
             # раз, а не диктует идею заново.
             return Ending(
-                text=BROKEN_REDO.format(run_id=run.run_id),
-                status=AWAITING_CHOICE,
-                stop=Pause(stage=start, artifact=redo.artifact, kind="choice"),
+                text=BROKEN_REDO[redo.kind].format(run_id=run.run_id),
+                status=STATUS_OF_STOP[redo.kind],
+                stop=Pause(stage=start, artifact=redo.artifact, kind=redo.kind),
             )
         return Ending(text=BROKEN.format(run_id=run.run_id), status=FAILED)
 
@@ -564,6 +672,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", on_start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
+    application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не
