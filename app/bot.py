@@ -95,6 +95,8 @@ BROKEN_REDO = (
     "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})"
 )
 
+LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
+
 running = asyncio.Lock()
 
 
@@ -116,7 +118,9 @@ class Ending(BaseModel):
 
     text: str
     waiting: Waiting | None = None
-    broke: bool = False
+    # Есть ли человеку смысл ответить ещё раз: от этого зависит, доживёт ли остановка до его
+    # следующего сообщения. Сорванная стадия — да, пропавшие файлы прогона — нет.
+    answerable: bool = False
 
 
 # Остановка живёт в памяти процесса, как и сам прогон: строкой в runs она станет в P2-02.
@@ -246,6 +250,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if edit is None:
                 await refuse(message, "unknown_number", out_of_range(stopped.found))
                 return
+            # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него
+            # нет, и «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
+            logger.info(
+                "answer=%s run=%s chat=%s",
+                "choice" if message.text.strip().isdecimal() else "edit",
+                stopped.run.run_id,
+                message.chat_id,
+            )
             run, start = stopped.run, stopped.stage
             redo = Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
         note = await message.reply_text(progress_text(run, done_before(start)))
@@ -322,7 +334,7 @@ async def follow(
     ending = await outcome(run, report, start, redo)
     if ending.waiting:
         paused[note.chat_id] = ending.waiting
-    elif redo and not ending.broke:
+    elif redo and not ending.answerable:
         del paused[note.chat_id]
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
@@ -414,12 +426,17 @@ async def outcome(
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        return Ending(text=str(error), broke=True)
+        return Ending(text=str(error))
+    except OSError:
+        # Файлы прогона мог унести `make clean-runs` между репетициями. Повторять нечего:
+        # остановка после этого копила бы один и тот же отказ на каждый ответ человека.
+        logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
+        return Ending(text=LOST.format(run_id=run.run_id))
     except Exception:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
         broken = BROKEN_REDO if redo else BROKEN
-        return Ending(text=broken.format(run_id=run.run_id), broke=True)
+        return Ending(text=broken.format(run_id=run.run_id), answerable=redo is not None)
 
 
 def main() -> None:

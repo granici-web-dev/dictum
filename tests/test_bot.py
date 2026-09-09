@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.bot import (
     BUSY,
     EMPTY,
     FIRST_STAGE,
+    LOST,
     GREETING,
     HEARD,
     LABEL,
@@ -345,7 +347,7 @@ async def test_the_stop_after_intake_shows_what_the_model_heard(
 
 
 @pytest.mark.asyncio
-async def test_a_missing_candidates_file_still_ends_the_message(
+async def test_a_missing_candidates_file_names_the_cause_it_knows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Чтение артефакта идёт после обхода: без перехвата человек остался бы без концовки."""
@@ -354,7 +356,7 @@ async def test_a_missing_candidates_file_still_ends_the_message(
 
     said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
-    assert "сорвался" in said
+    assert said == LOST.format(run_id="прогон")
 
 
 @pytest.mark.asyncio
@@ -544,6 +546,47 @@ async def test_a_broken_redo_keeps_the_recording_and_the_stop(
 
     assert chat.edits[-1] == BROKEN_REDO.format(run_id="прогон")
     assert bot.paused[12] == stopped
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_files_are_gone_drops_the_stop_instead_of_looping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`make clean-runs` между репетициями уносит расшифровку: повторять станет нечего.
+
+    Остановка при этом копила бы один и тот же отказ на каждый следующий ответ человека.
+    """
+    listed(monkeypatch, "12")
+    bot.paused[12] = a_stopped_choice(tmp_path)
+
+    def walk_without_files(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        raise FileNotFoundError(run.root / "inputs/transcript.md")
+
+    monkeypatch.setattr(bot, "walk", walk_without_files)
+    chat = TextChat("1")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == LOST.format(run_id="прогон")
+    assert 12 not in bot.paused
+
+
+@pytest.mark.asyncio
+async def test_the_answer_to_a_choice_leaves_a_line_to_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Отчёт репетиции (P2-06) считает воронку grep-ом: `stop=choice` был, ответов на него нет."""
+    listed(monkeypatch, "12")
+    bot.paused[12] = a_stopped_choice(tmp_path)
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(TextChat("1")), NO_CONTEXT)
+
+    assert "answer=choice run=прогон chat=12" in caplog.text
 
 
 @pytest.mark.asyncio
