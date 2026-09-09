@@ -67,6 +67,26 @@ def repairable_problems(
     return []
 
 
+def without_extras(stage: str, files: dict[str, str]) -> dict[str, str]:
+    """Выбрасывает лишний файл при полном ожидаемом наборе. Недостающий — по-прежнему ошибка.
+
+    Живой прогон 2ebcf8868ca3dbf9 умер на том, что decompose прислал вместе с issues.json ещё и
+    issues.md, хотя промпт этого прямо не велит: половина из 9585 токенов ушла на копию, которую
+    код всё равно рисует сам из JSON, и прогон встал на проверке набора. Копия ничего не решает
+    и ремонтного повтора не стоит — она выбрасывается, а запись в логе даёт чем посчитать дрейф
+    промпта. Файла, которого стадия ждёт, это не касается: он так и остаётся ошибкой.
+    """
+    given = frozenset(files)
+    for wanted in stage_named(stage).outputs:
+        extra = given - wanted
+        if wanted <= given and extra:
+            logger.warning(
+                "stage=%s extra=%s", stage, ", ".join(sorted(extra))
+            )
+            return {path: files[path] for path in sorted(wanted)}
+    return files
+
+
 def previous_answer(path: str, content: str) -> list[MessageParam]:
     """Прошлый ответ стадии для истории повтора, собранный из артефакта.
 
@@ -220,7 +240,7 @@ def run_stage(
     ]
     response, duration_ms = ask_model(stage, run_id, model, messages)
     raw = answer_text(stage, response)
-    files = parse_file_blocks(raw)
+    files = without_extras(stage, parse_file_blocks(raw))
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
 
@@ -246,7 +266,7 @@ def run_stage(
         output_tokens += repair.usage.output_tokens
         response = repair
         raw = answer_text(stage, repair)
-        files = parse_file_blocks(raw)
+        files = without_extras(stage, parse_file_blocks(raw))
         problems = repairable_problems(stage, files, outputs)
 
     if frozenset(files) not in outputs:

@@ -186,14 +186,6 @@ def test_run_stage_raises_when_stage_returns_a_file_it_does_not_own(llm: Install
         run_stage("intake", INPUTS, RUN)
 
 
-def test_run_stage_raises_when_decompose_writes_the_page_itself(llm: InstallResponses) -> None:
-    both = decompose_answer() + '\n<file path="outputs/issues.md">\n# Бэклог\n</file>'
-    llm([ok(both)])
-
-    with pytest.raises(StageError, match="expected outputs/issues.json"):
-        run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
-
-
 def test_run_stage_raises_when_two_blocks_share_a_path(llm: InstallResponses) -> None:
     twice = (
         '<file path="inputs/idea.md">\n# Первая\n</file>\n'
@@ -305,3 +297,27 @@ def test_every_call_of_the_model_names_the_run_it_was_paid_for(
         run_stage("intake", INPUTS, RUN)
 
     assert f"stage=intake run={RUN} model=" in caplog.text
+
+
+def test_an_extra_file_beside_the_whole_expected_set_is_dropped_with_a_line(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Живой прогон 2ebcf8868ca3dbf9: decompose прислал ещё и issues.md, и прогон умер.
+
+    Копию всё равно рисует код из того же JSON, и ремонтного повтора она не стоит.
+    """
+    llm([ok(decompose_answer() + '\n<file path="outputs/issues.md">\n# Чужой бэклог\n</file>')])
+
+    with caplog.at_level(logging.WARNING, logger="app.stages"):
+        result = run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
+
+    assert "stage=decompose extra=outputs/issues.md" in caplog.text
+    assert result.files["outputs/issues.md"] == issues_markdown(real_issues())
+
+
+def test_a_missing_file_is_still_an_error_and_not_a_dropped_extra(llm: InstallResponses) -> None:
+    """Выбрасывается лишнее при полном наборе; неполный набор остаётся ошибкой."""
+    llm([ok('<file path="outputs/issues.md">\n# Только проза\n</file>')] * 2)
+
+    with pytest.raises(StageError, match="expected outputs/issues.json"):
+        run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
