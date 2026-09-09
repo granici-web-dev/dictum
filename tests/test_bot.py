@@ -512,6 +512,7 @@ class TextChat(QuietChat):
         self.edits: list[str] = []
         self.keyboards: list[object] = []
         self.documents: list[Path] = []
+        self.document_fails = False
 
     async def edit_text(self, text: str, reply_markup: object = None) -> Message:
         self.edits.append(text)
@@ -519,6 +520,8 @@ class TextChat(QuietChat):
         return cast(Message, self)
 
     async def reply_document(self, document: Path) -> Message:
+        if self.document_fails:
+            raise TelegramError("файл не ушёл")
         self.documents.append(document)
         return cast(Message, self)
 
@@ -1369,3 +1372,21 @@ async def test_the_button_carries_the_gate_it_grew_on(
         f"gate:{run_id}:brief:edit",
         f"gate:{run_id}:brief:stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_gate_whose_file_did_not_go_still_shows_its_buttons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Строка уже в `awaiting_gate`: без кнопок человек остаётся с галочками и без выхода."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_at_a_gate("brief", BRIEF, {BRIEF: REAL_BRIEF}))
+    chat = TextChat("Идея")
+    chat.document_fails = True
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1].startswith("Бриф готов")
+    assert isinstance(chat.keyboards[-1], InlineKeyboardMarkup)
+    assert chat.documents == []

@@ -517,11 +517,15 @@ async def follow(
         with suppress(TelegramError):
             await asyncio.wrap_future(edit)
     if ending.stop and ending.stop.kind == "gate":
-        # Артефакт целиком уходит файлом: подтвердить то, чего не видел, — не ворота, а кнопка.
-        await note.reply_document(run.root / ending.stop.artifact)
         await note.edit_text(
             ending.text, reply_markup=gate_keyboard(run.run_id, ending.stop.stage)
         )
+        # Артефакт целиком уходит файлом: подтвердить то, чего не видел, — не ворота, а кнопка.
+        # Но после кнопок и под тем же прикрытием, что и правки прогресса: строка уже стоит в
+        # `awaiting_gate`, и сорванная отправка файла оставляла человека с одними галочками —
+        # без содержания, без кнопок и без единого способа понять, чего от него ждут.
+        with suppress(TelegramError):
+            await note.reply_document(run.root / ending.stop.artifact)
     else:
         await note.edit_text(ending.text)
     # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
