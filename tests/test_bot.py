@@ -1,7 +1,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -272,13 +273,25 @@ def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> No
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
 
 
+@contextmanager
+def database_of_nobody() -> Iterator[bool]:
+    yield True
+
+
 def ready_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Всё, без чего бот не поднимется. Каждый тест старта ломает ровно одно."""
+    """Всё, без чего бот не поднимется. Каждый тест старта ломает ровно одно.
+
+    База здесь подменена: тест про однопрогонность спрашивает у `main` про очередь апдейтов, а
+    добирался до настоящего Postgres и падал на его блокировке, стоило поднять бота рядом.
+    Настоящую базу трогают только тесты `app/store.py`, помеченные `db` (TESTING.md).
+    """
     monkeypatch.setattr(settings, "telegram_bot_token", "1:token")
     monkeypatch.setattr(settings, "allow_live_api", True)
     monkeypatch.setattr(settings, "openai_api_key", "test")
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "ffmpeg_installed", lambda: True)
+    monkeypatch.setattr(bot, "ensure_schema", lambda: None)
+    monkeypatch.setattr(bot, "one_bot_per_database", database_of_nobody)
 
 
 def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
