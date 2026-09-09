@@ -1410,3 +1410,11 @@ async def test_start_from_a_stranger_gets_silence_like_every_other_message(
 
     assert chat.replies == []
     assert "refusal=stranger chat=12" in caplog.text
+
+
+def test_a_gate_that_no_digest_knows_about_falls_instead_of_lying(tmp_path: Path) -> None:
+    """Ворота объявляет список стадий, содержание пишет код: третьи ворота обязаны упереться."""
+    run = Run(root=tmp_path, run_id="прогон", lang="ru")
+
+    with pytest.raises(ValueError, match="у ворот после prd"):
+        bot.gate_text(run, Pause(stage="prd", artifact=BRIEF, kind="gate"))

@@ -39,19 +39,16 @@ from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
 from app.models import IssuesFile
-from app.pipeline import ISSUES_JSON, ISSUES_MD, NAMES, Stage, after, stages_between
+from app.pipeline import BRIEF, ISSUES_JSON, NAMES, Stage, after, stages_between
 from app.publish import journal_of
 from app.render import backlog_digest, brief_digest
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
-    AWAITING_CHOICE,
-    AWAITING_GATE,
     FAILED,
     NO_TASK,
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
-    STATUS_OF_STOP,
     Stopped,
     drop_stop,
     fail_orphans,
@@ -163,15 +160,15 @@ running = asyncio.Lock()
 
 
 class Ending(BaseModel):
-    """Чем кончился прогон: что сказать человеку и каким статусом закрыть строку.
+    """Чем кончился прогон: что сказать человеку и чем закрыть строку.
 
     `stop` заполнен, когда прогон ждёт ответа: на выборе, на воротах и когда повтор сорвался,
-    а ответить ещё раз есть смысл. Статус при этом всегда один из статусов остановки — строка
-    и есть остановка, второго места для неё нет (§4.1).
+    а ответить ещё раз есть смысл. Статус остановки тогда не пишут: его называет род (§4),
+    и второе его написание разошлось бы с первым. `status` — только для концовок без остановки.
     """
 
     text: str
-    status: str
+    status: str = ""
     stop: Pause | None = None
 
 
@@ -436,7 +433,8 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info("gate=%s run=%s chat=%s", decision, run_id, message.chat_id)
         if decision != EDIT:
             # «Править» кнопки не снимает: человек может передумать и подтвердить как есть.
-            # Сбой самой правки решению не помеха, она косметическая.
+            # Не снявшаяся клавиатура прогон никуда не двинет: кнопка называет свои ворота, и
+            # на следующих она уже не пройдёт проверку.
             with suppress(TelegramError):
                 await query.edit_message_reply_markup(reply_markup=None)
         if decision == STOP:
@@ -509,7 +507,7 @@ async def follow(
     except SQLAlchemyError:
         # Результат человеку важнее строки: карточки стоят на доске, и молчание вместо ссылки
         # он прочтёт как сорванный прогон. Строку закроет уборка следующего старта.
-        logger.exception("Прогон %s не закрыл строку статусом %s", run.run_id, ending.status)
+        logger.exception("Прогон %s не закрыл строку", run.run_id)
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -586,12 +584,25 @@ def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
     )
 
 
+def backlog_of(run: Run) -> str:
+    return backlog_digest(IssuesFile.model_validate_json(read_artifact(run.root, ISSUES_JSON)))
+
+
+# Ворота объявляет список стадий (`gate_after`), а короткое содержание пишет код: третьи
+# ворота, заведённые данными, обязаны упереться здесь, а не показать человеку «Бриф готов.»
+# над чужим артефактом.
+GATE_DIGESTS: dict[str, Callable[[Run], str]] = {
+    "brief": lambda run: brief_digest(read_artifact(run.root, BRIEF)),
+    "decompose": backlog_of,
+}
+
+
 def gate_text(run: Run, stop: Pause) -> str:
     """Что сказать о готовом артефакте: числа из него самого, а он уходит следом файлом."""
-    if stop.artifact == ISSUES_MD:
-        backlog = IssuesFile.model_validate_json(read_artifact(run.root, ISSUES_JSON))
-        return f"{backlog_digest(backlog)}\n\n{GATE_TAIL}"
-    return f"{brief_digest(read_artifact(run.root, stop.artifact))}\n\n{GATE_TAIL}"
+    digest = GATE_DIGESTS.get(stop.stage)
+    if digest is None:
+        raise ValueError(f"у ворот после {stop.stage} нет краткого содержания")
+    return f"{digest(run)}\n\n{GATE_TAIL}"
 
 
 def decision_of(query: CallbackQuery) -> tuple[str, str, str]:
@@ -607,7 +618,7 @@ def choice_ending(run: Run, stop: Pause) -> Ending:
     # ничего, и следующее сообщение — новый прогон, а не правка к пустому.
     if found.outcome != "multiple":
         return Ending(text=choice_text(found), status=NO_TASK)
-    return Ending(text=choice_text(found), status=AWAITING_CHOICE, stop=stop)
+    return Ending(text=choice_text(found), stop=stop)
 
 
 async def outcome(
@@ -627,7 +638,7 @@ async def outcome(
             return choice_ending(run, waiting)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
-            return Ending(text=gate_text(run, waiting), status=AWAITING_GATE, stop=waiting)
+            return Ending(text=gate_text(run, waiting), stop=waiting)
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)
@@ -653,7 +664,6 @@ async def outcome(
             # раз, а не диктует идею заново.
             return Ending(
                 text=BROKEN_REDO[redo.kind].format(run_id=run.run_id),
-                status=STATUS_OF_STOP[redo.kind],
                 stop=Pause(stage=start, artifact=redo.artifact, kind=redo.kind),
             )
         return Ending(text=BROKEN.format(run_id=run.run_id), status=FAILED)
