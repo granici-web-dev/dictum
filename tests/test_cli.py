@@ -38,20 +38,20 @@ def transcript_of_an_earlier_run(root: Path) -> Path:
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n---\nsource: text\nlang: ru\nconfidence: high\n---\n\n'
-    "# Напоминания о дедлайнах\n\n## Суть\nБот присылает список карточек.\n</file>"
+    "# Напоминания о дедлайнах\n\n## Summary\nБот присылает список карточек.\n</file>"
 )
 CANDIDATES_BLOCK = (
     '<file path="outputs/candidates.md">\n---\noutcome: multiple\n---\n\n'
-    "# В записи найдено 2 идеи\n\n"
+    "# Ideas found: 2\n\n"
     "1. **Напоминания** — бот шлёт список.\n2. **Отчёты** — сводка за неделю.\n</file>"
 )
 BRIEF_BLOCK = (
     '<file path="outputs/brief.md">\n---\nname: Напоминания\nkind: product\nlang: ru\n'
-    "open_questions: 2\n---\n\n# Бриф\n\n## 1. Пользователи\n[уточнить: размер команды]\n</file>"
+    "open_questions: 2\n---\n\n# Brief\n\n## 1. Users\n[уточнить: размер команды]\n</file>"
 )
 PRD_BLOCK = (
-    '<file path="outputs/prd.md">\n# PRD: Напоминания\n\n## Скоп MVP\n'
-    "| ID | Сценарий | Приоритет | Зависит от | Критерий готовности |\n"
+    '<file path="outputs/prd.md">\n# PRD: Напоминания\n\n## MVP scope\n'
+    "| ID | Scenario / screen | Priority | Depends on | Done when |\n"
     "|---|---|---|---|---|\n| S1 | Утренний список | Must | — | Список пришёл в 9:00 |\n</file>"
 )
 ISSUES_BLOCKS = decompose_answer()
@@ -133,7 +133,7 @@ def test_run_text_feeds_prd_the_brief_research_and_template(
     prd_message = request_body(requests[2])["messages"][0]["content"]
     assert '<file path="outputs/brief.md">' in prd_message
     assert "Ресёрч не запускался" in prd_message
-    assert "Скоп MVP" in prd_message
+    assert "MVP scope" in prd_message
 
 
 def test_run_text_stops_when_intake_returns_candidates(
@@ -272,6 +272,9 @@ def test_run_from_prd_uses_the_artifacts_already_on_disk(
 
     assert len(requests) == 2
     assert "# Бриф с прошлого прогона" in request_body(requests[0])["messages"][0]["content"]
+    # Заголовок русский: фикстура — записанный PRD прогона, который прошёл до правила о
+    # заголовках (CLAUDE.md §4), и переписать его значило бы выдать выдуманный артефакт
+    # за настоящий. Проверяется здесь запись файла, а не форма заголовков.
     assert "Скоп MVP" in (tmp_path / PRD).read_text(encoding="utf-8")
     assert transcript.read_text(encoding="utf-8") == was
 

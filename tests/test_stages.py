@@ -28,11 +28,11 @@ from tests.helpers import (
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'
-    "## Суть\nБот присылает список.\n</file>"
+    "## Summary\nБот присылает список.\n</file>"
 )
 BRIEF_BLOCK = (
     '<file path="outputs/brief.md">\n# Бриф: напоминания\n\n'
-    "## 1. Пользователи\nКоманда из пяти человек.\n</file>"
+    "## 1. Users\nКоманда из пяти человек.\n</file>"
 )
 RUN = "прогон-для-теста"
 

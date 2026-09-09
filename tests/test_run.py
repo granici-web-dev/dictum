@@ -255,7 +255,7 @@ def test_an_edit_at_a_gate_runs_the_same_stage_again_and_stops_there_again(
     llm: InstallResponses, tmp_path: Path
 ) -> None:
     """Правка возвращается в стадию ворот: человек читает переделанное и решает заново."""
-    edited = BRIEF_BLOCK.replace("# Бриф", "# Бриф без пятого раздела")
+    edited = BRIEF_BLOCK.replace("# Brief", "# Brief без пятого раздела")
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(edited)])
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
@@ -269,7 +269,7 @@ def test_an_edit_at_a_gate_runs_the_same_stage_again_and_stops_there_again(
     asked = request_body(requests[2])["messages"]
     assert asked[0]["role"] == "assistant"
     assert "<user_edit>\nУбери пятый раздел\n</user_edit>" in asked[-1]["content"]
-    assert "# Бриф без пятого раздела" in read_artifact(tmp_path, BRIEF)
+    assert "# Brief без пятого раздела" in read_artifact(tmp_path, BRIEF)
 
 
 def test_a_gate_after_brief_stops_a_run_that_was_not_auto_approved(
