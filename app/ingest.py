@@ -25,7 +25,10 @@ def build_transcript(
     text: str, lang: str, run_id: str, source: Source, duration: int | None
 ) -> str:
     seconds = "null" if duration is None else str(duration)
-    header = f"run_id: {run_id}\nsource: {source}\nduration: {seconds}\nlang: {lang}"
+    # run_id в кавычках: из шестнадцати шестнадцатеричных знаков примерно один идентификатор
+    # из тысячи восьмисот состоит из одних цифр, и YAML читает такой как число. `run_id_of`
+    # тогда не находит строки, и `--from` отказывается продолжать прогон, у которого id есть.
+    header = f'run_id: "{run_id}"\nsource: {source}\nduration: {seconds}\nlang: {lang}'
     return f"---\n{header}\n---\n\n{text.strip()}\n"
 
 
