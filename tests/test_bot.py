@@ -12,7 +12,9 @@ from telegram.ext import Application, ContextTypes
 
 from app import bot
 from app.bot import (
+    BROKEN_REDO,
     BUSY,
+    EMPTY,
     GREETING,
     HEARD,
     LABEL,
@@ -399,10 +401,11 @@ NO_CONTEXT = cast(ContextTypes.DEFAULT_TYPE, None)
 
 
 def a_stopped_choice(root: Path, candidates: str = MULTIPLE) -> Waiting:
-    (root / "outputs").mkdir(parents=True, exist_ok=True)
-    (root / CANDIDATES).write_text(candidates, encoding="utf-8")
+    """Остановка без файла на диске: список она несёт с собой, читать его заново некому."""
     run = Run(root=root, run_id="прогон", lang="ru", auto_approve=True)
-    return Waiting(run=run, stage="intake", artifact=CANDIDATES)
+    return Waiting(
+        run=run, stage="intake", artifact=CANDIDATES, found=parse_candidates(candidates)
+    )
 
 
 def walk_recording(seen: list[tuple[str, str, Redo | None]]) -> Callable[..., Pause | None]:
@@ -434,6 +437,7 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
             "прогон",
             "intake",
             Redo(
+                kind="choice",
                 user_edit="Выбрана идея 2: Утренняя сводка по просроченным дедлайнам",
                 artifact=CANDIDATES,
             ),
@@ -459,6 +463,94 @@ async def test_a_number_outside_the_list_keeps_the_run_waiting(
     assert chat.replies == [out_of_range(parse_candidates(MULTIPLE))]
     assert bot.paused[12] == stopped
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_the_list_lives_in_the_stop_so_a_lost_file_cannot_swallow_the_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ответ разбирался повторным чтением candidates.md, и стёртый файл ронял обработчик молча."""
+    listed(monkeypatch, "12")
+    bot.paused[12] = a_stopped_choice(tmp_path)
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_text(an_update(TextChat("2")), NO_CONTEXT)
+
+    assert not (tmp_path / CANDIDATES).exists()
+    assert [start for _, start, _ in seen] == ["intake"]
+
+
+@pytest.mark.asyncio
+async def test_a_digit_that_is_no_number_goes_to_the_stage_instead_of_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """У «²» isdigit истинен, а int падает: обработчик срывался, и человек не получал ничего."""
+    listed(monkeypatch, "12")
+    bot.paused[12] = a_stopped_choice(tmp_path)
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_text(an_update(TextChat("²")), NO_CONTEXT)
+
+    assert [redo.user_edit for _, _, redo in seen if redo] == ["²"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_message_is_refused_and_the_stop_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пробел снимал остановку и уходил в стадию правкой без единого слова."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_choice(tmp_path)
+    bot.paused[12] = stopped
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = TextChat("   ")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [EMPTY]
+    assert bot.paused[12] == stopped
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_broken_redo_keeps_the_recording_and_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Иначе сорванная стадия теряет расшифровку — та самая потеря, ради которой был P3-04."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_choice(tmp_path)
+    bot.paused[12] = stopped
+
+    def walk_failing(*args: object, **kwargs: object) -> Pause | None:
+        raise RuntimeError("стадия не ответила")
+
+    monkeypatch.setattr(bot, "walk", walk_failing)
+    chat = TextChat("2")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == BROKEN_REDO.format(run_id="прогон")
+    assert bot.paused[12] == stopped
+
+
+@pytest.mark.asyncio
+async def test_start_waits_for_the_run_so_its_reset_is_not_written_over(tmp_path: Path) -> None:
+    """`/start` во время прогона снимал пустоту: остановку прогон записывал уже после него."""
+    bot.paused[12] = a_stopped_choice(tmp_path)
+    chat = TextChat("/start")
+    await bot.running.acquire()
+    started = asyncio.create_task(on_start(an_update(chat), NO_CONTEXT))
+    await asyncio.sleep(0.01)
+    waited = chat.replies == [] and 12 in bot.paused
+    bot.running.release()
+    await started
+
+    assert waited
+    assert 12 not in bot.paused
+    assert chat.replies == [GREETING]
 
 
 async def saved_empty(voice: Voice, target: Path) -> None:

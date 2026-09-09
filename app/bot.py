@@ -65,6 +65,8 @@ GREETING = (
 
 BUSY = "Прогон уже идёт, дождитесь его конца."
 
+EMPTY = "Пустое сообщение. Пришлите идею словами или номер из списка."
+
 TOO_LONG = (
     f"Голосовое длиннее {MAX_VOICE_MINUTES} минут я пока не расшифровываю. "
     "Наговорите покороче или пришлите текстом."
@@ -87,22 +89,34 @@ DISCUSSED = "Вот о чём в ней говорили:"
 
 ASK_AGAIN = "Пришлите идею одним сообщением и чуть подробнее: что нужно сделать и для кого."
 
+BROKEN = "Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
+
+BROKEN_REDO = (
+    "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})"
+)
+
 running = asyncio.Lock()
 
 
 class Waiting(BaseModel):
-    """Прогон, вставший на выборе и ждущий ответа из этого чата: куда возвращаться и с чем."""
+    """Прогон, вставший на выборе и ждущий ответа из этого чата: куда возвращаться и с чем.
+
+    Список несёт разобранным, а не путём к файлу: по нему уже составлено сообщение человеку, и
+    второе чтение того же файла могло разойтись с тем, что человек видит перед собой.
+    """
 
     run: Run
     stage: str
     artifact: str
+    found: Candidates
 
 
 class Ending(BaseModel):
-    """Чем кончился прогон: что сказать человеку и ждать ли от него ответа."""
+    """Чем кончился прогон: что сказать человеку, ждать ли от него ответа и дошёл ли обход."""
 
     text: str
     waiting: Waiting | None = None
+    broke: bool = False
 
 
 # Остановка живёт в памяти процесса, как и сам прогон: строкой в runs она станет в P2-02.
@@ -203,14 +217,21 @@ async def save_voice(voice: Voice, target: Path) -> None:
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
+    if update.message is None:
+        return
+    # Замок берётся ради остановки, а не ради приветствия: без него `/start`, посланный во время
+    # прогона, снимал пустоту, а прогон в конце записывал остановку обратно.
+    async with running:
         paused.pop(update.message.chat_id, None)
-        await update.message.reply_text(GREETING)
+    await update.message.reply_text(GREETING)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not message.text or not permitted(message):
+        return
+    if not message.text.strip():
+        await refuse(message, "empty", EMPTY)
         return
     if running.locked():
         await refuse(message, "busy", BUSY)
@@ -221,14 +242,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if stopped is None:
             run, start, redo = demo_run(new_run_id(), text=message.text), FIRST_STAGE, None
         else:
-            found = parse_candidates(read_artifact(stopped.run.root, stopped.artifact))
-            edit = chosen_edit(message.text, found)
+            edit = chosen_edit(message.text, stopped.found)
             if edit is None:
-                await refuse(message, "unknown_number", out_of_range(found))
+                await refuse(message, "unknown_number", out_of_range(stopped.found))
                 return
-            del paused[message.chat_id]
             run, start = stopped.run, stopped.stage
-            redo = Redo(user_edit=edit, artifact=stopped.artifact)
+            redo = Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
         note = await message.reply_text(progress_text(run, done_before(start)))
         await follow(note, run, message.date, start, redo)
 
@@ -281,8 +300,10 @@ async def follow(
 ) -> None:
     """Гонит прогон в потоке, правит одно сообщение до конца и помнит остановку.
 
-    Остановку записывает сюда, а не обработчик: `on_voice` её однажды не записал, и выбор
-    после голосового ушёл новым прогоном (живой прогон 664534620c9a1c10). Чат берётся у
+    Остановку и записывает, и снимает сюда, а не обработчик: `on_voice` её однажды не записал,
+    и выбор после голосового ушёл новым прогоном (живой прогон 664534620c9a1c10). Снимается она
+    только после удачного повтора: сорвись он раньше, человек остался бы без остановки и без
+    расшифровки, то есть ровно с той потерей, ради которой затевался P3-04. Чат берётся у
     сообщения о ходе — оно в том же чате, что и вопрос.
     """
     done = done_before(start)
@@ -301,6 +322,8 @@ async def follow(
     ending = await outcome(run, report, start, redo)
     if ending.waiting:
         paused[note.chat_id] = ending.waiting
+    elif redo and not ending.broke:
+        del paused[note.chat_id]
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -323,7 +346,9 @@ def done_before(start: str) -> list[str]:
 def chosen_edit(text: str, found: Candidates) -> str | None:
     """Ответ человека как правка для стадии. None — прислали номер, которого в списке нет."""
     written = text.strip()
-    if not written.isdigit():
+    # `isdigit` пускает в `int` то, чего тот не берёт: у «²» он True, а `int("²")` падает, и
+    # человек вместо ответа получал тишину.
+    if not written.isdecimal():
         return written
     picked = next((idea for idea in found.ideas if idea.number == int(written)), None)
     return f"Выбрана идея {picked.number}: {picked.title}" if picked else None
@@ -369,7 +394,9 @@ async def outcome(
             keep = found.outcome == "multiple"
             return Ending(
                 text=choice_text(found),
-                waiting=Waiting(run=run, stage=waiting.stage, artifact=waiting.artifact)
+                waiting=Waiting(
+                    run=run, stage=waiting.stage, artifact=waiting.artifact, found=found
+                )
                 if keep
                 else None,
             )
@@ -385,11 +412,12 @@ async def outcome(
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        return Ending(text=str(error))
+        return Ending(text=str(error), broke=True)
     except Exception:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
-        return Ending(text=f"Прогон {run.run_id} сорвался. Подробности в логе, попробуйте ещё раз.")
+        broken = BROKEN_REDO if redo else BROKEN
+        return Ending(text=broken.format(run_id=run.run_id), broke=True)
 
 
 def main() -> None:
