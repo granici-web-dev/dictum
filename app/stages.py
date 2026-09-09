@@ -154,7 +154,9 @@ def parse_file_blocks(text: str) -> dict[str, str]:
     return files
 
 
-def ask_model(stage: str, model: str, messages: list[MessageParam]) -> tuple[Message, int]:
+def ask_model(
+    stage: str, run_id: str, model: str, messages: list[MessageParam]
+) -> tuple[Message, int]:
     started = time.perf_counter()
     try:
         response = anthropic_client().messages.create(
@@ -165,8 +167,9 @@ def ask_model(stage: str, model: str, messages: list[MessageParam]) -> tuple[Mes
         )
     except anthropic.APIError as error:
         logger.warning(
-            "stage=%s model=%s duration_ms=%d error=%s",
+            "stage=%s run=%s model=%s duration_ms=%d error=%s",
             stage,
+            run_id,
             model,
             int((time.perf_counter() - started) * 1000),
             type(error).__name__,
@@ -174,8 +177,9 @@ def ask_model(stage: str, model: str, messages: list[MessageParam]) -> tuple[Mes
         raise
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
-        "stage=%s model=%s input_tokens=%d output_tokens=%d duration_ms=%d",
+        "stage=%s run=%s model=%s input_tokens=%d output_tokens=%d duration_ms=%d",
         stage,
+        run_id,
         response.model,
         response.usage.input_tokens,
         response.usage.output_tokens,
@@ -214,7 +218,7 @@ def run_stage(
         *(history or []),
         {"role": "user", "content": build_user_message(inputs, user_edit, params)},
     ]
-    response, duration_ms = ask_model(stage, model, messages)
+    response, duration_ms = ask_model(stage, run_id, model, messages)
     raw = answer_text(stage, response)
     files = parse_file_blocks(raw)
     input_tokens = response.usage.input_tokens
@@ -224,9 +228,12 @@ def run_stage(
     if problems:
         # Удачный ремонт стирал причину: прогон выглядел как два вызова без объяснения,
         # а претензии оставались только у провалившихся.
-        logger.warning("stage=%s repair=1 problems=%s", stage, "; ".join(problems))
+        logger.warning(
+            "stage=%s run=%s repair=1 problems=%s", stage, run_id, "; ".join(problems)
+        )
         repair, repair_ms = ask_model(
             stage,
+            run_id,
             model,
             [
                 *messages,

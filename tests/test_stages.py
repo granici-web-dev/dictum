@@ -166,7 +166,7 @@ def test_run_stage_raises_after_third_server_error(
     with pytest.raises(anthropic.InternalServerError):
         run_stage("intake", INPUTS, RUN)
     assert len(requests) == 3
-    assert "stage=intake" in caplog.text
+    assert f"stage=intake run={RUN}" in caplog.text
     assert "error=InternalServerError" in caplog.text
 
 
@@ -293,3 +293,15 @@ def test_run_stage_gives_up_after_one_repair_attempt(llm: InstallResponses) -> N
 
     assert len(requests) == 2
     assert exc_info.value.raw == "Снова без тегов."
+
+
+def test_every_call_of_the_model_names_the_run_it_was_paid_for(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """CONVENTIONS требует run_id в каждой записи вызова: без него строки стадий ничьи."""
+    llm([ok(IDEA_BLOCK)])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("intake", INPUTS, RUN)
+
+    assert f"stage=intake run={RUN} model=" in caplog.text
