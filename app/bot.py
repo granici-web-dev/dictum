@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from telegram import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -35,7 +35,7 @@ from telegram.ext import (
     filters,
 )
 
-from app.candidates import Candidates, parse_candidates
+from app.candidates import Candidates, Idea, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
 from app.models import IssuesFile
@@ -127,7 +127,9 @@ VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram
 
 HEARD = "Вот что я услышал:"
 
-PICK_ONE = "Пришлите номер или саму идею словами — я продолжу этот же прогон."
+PICK_ONE = (
+    "Выберите кнопкой. Можно и словами: напишите, что именно нужно, — я продолжу этот же прогон."
+)
 
 NOTHING_HEARD = "Задания в записи я не нашёл."
 
@@ -138,7 +140,8 @@ ASK_AGAIN = "Пришлите идею одним сообщением и чут
 BROKEN = "Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
 
 BROKEN_REDO: dict[StopKind, str] = {
-    "choice": "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})",
+    "choice": "Не получилось продолжить, но запись цела. Ответьте ещё раз — кнопкой или номером."
+    " (прогон {run_id})",
     "gate": "Не получилось переделать, но прогон цел. Пришлите правку ещё раз. (прогон {run_id})",
 }
 
@@ -188,11 +191,16 @@ class Ending(BaseModel):
     `stop` заполнен, когда прогон ждёт ответа: на выборе, на воротах и когда повтор сорвался,
     а ответить ещё раз есть смысл. Статус остановки тогда не пишут: его называет род (§4),
     и второе его написание разошлось бы с первым. `status` — только для концовок без остановки.
+    `keyboard` собирает тот, кто читал артефакт: списку кнопок нужны сами идеи, и второе
+    чтение файла ради них завело бы второе место, где список живёт.
     """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     text: str
     status: str = ""
     stop: Pause | None = None
+    keyboard: InlineKeyboardMarkup | None = None
 
 
 def allowed_chats() -> frozenset[int]:
@@ -374,29 +382,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             redo = Redo(kind="gate", user_edit=message.text.strip(), artifact=stopped.artifact)
         else:
             run, voice = continued(stopped), stopped.voice
-            try:
-                found = await asyncio.to_thread(read_candidates, run, stopped.artifact)
-            except OSError:
-                # Файлы прогона мог унести `make clean-runs`: отвечать человеку нечем, и
-                # остановка после этого копила бы один и тот же отказ на каждый ответ.
-                logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
-                await asyncio.to_thread(finish_run, run.run_id, FAILED)
-                await message.reply_text(LOST.format(run_id=run.run_id))
+            redo = await choice_answer(message, run, stopped, message.text, "text")
+            if redo is None:
                 return
-            edit = chosen_edit(message.text, found)
-            if edit is None:
-                await refuse(message, "unknown_number", out_of_range(found), run=run.run_id)
-                return
-            # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него
-            # нет, и «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
-            logger.info(
-                "answer=%s run=%s chat=%s",
-                "choice" if message.text.strip().isdecimal() else "edit",
-                run.run_id,
-                message.chat_id,
-            )
             start = stopped.stage
-            redo = Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
         note = await message.reply_text(progress_text(run, done_before(start), voice))
         await follow(note, run, message.date, start, redo, voice)
 
@@ -501,6 +490,45 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await follow(note, run, datetime.now(timezone.utc), start, voice=voice)
 
 
+async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выбор идеи кнопкой: тот же ответ, что человек набрал бы номером сообщением (SPEC §7.3)."""
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("choice=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    picked = choice_of(query)
+    if picked is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    run_id, number = picked
+    if running.locked():
+        await refuse(message, "busy", BUSY, run=run_id)
+        return
+
+    async with running:
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is None or stopped.kind != "choice" or stopped.run_id != run_id:
+            # Место остановки здесь не сверяют, в отличие от ворот: выбор у прогона один, и
+            # повтор по нему сужает выход intake до `inputs/idea.md` (§7) — вторым списком тот
+            # же прогон встать уже не может.
+            await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
+            return
+        run, voice = continued(stopped), stopped.voice
+        redo = await choice_answer(message, run, stopped, number, "button")
+        if redo is None:
+            return
+        # Клавиатуру не снимаем, как и «Править» на воротах: сорвавшийся повтор возвращает
+        # остановку и просит ответить ещё раз, а снятая отняла бы у человека этот способ.
+        note = await message.reply_text(progress_text(run, done_before(stopped.stage), voice))
+        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo, voice)
+
+
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not permitted(message):
@@ -564,18 +592,14 @@ async def follow(
     for edit in progress:
         with suppress(TelegramError):
             await asyncio.wrap_future(edit)
+    await note.edit_text(ending.text, reply_markup=ending.keyboard)
     if ending.stop and ending.stop.kind == "gate":
-        await note.edit_text(
-            ending.text, reply_markup=gate_keyboard(run.run_id, ending.stop.stage)
-        )
         # Артефакт целиком уходит файлом: подтвердить то, чего не видел, — не ворота, а кнопка.
         # Но после кнопок и под тем же прикрытием, что и правки прогресса: строка уже стоит в
         # `awaiting_gate`, и сорванная отправка файла оставляла человека с одними галочками —
         # без содержания, без кнопок и без единого способа понять, чего от него ждут.
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
-    else:
-        await note.edit_text(ending.text)
     # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
     # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
     waited = datetime.now(timezone.utc) - asked_at
@@ -598,6 +622,40 @@ def chosen_edit(text: str, found: Candidates) -> str | None:
     return f"Выбрана идея {picked.number}: {picked.title}" if picked else None
 
 
+async def choice_answer(
+    message: Message, run: Run, stopped: Stopped, written: str, by: str
+) -> Redo | None:
+    """Ответ на выбор как повтор стадии. None — повторять нечего, человеку уже сказано.
+
+    Один уговор на два входа: номер кнопкой и то же самое сообщением — один ответ, и
+    расходиться им нечем. `by` идёт в лог: кнопку затевали ради того, чтобы у стенда не
+    набирали текст, и ответ на «пользовались ли ею» берётся из лога, а не из памяти.
+    """
+    try:
+        found = await asyncio.to_thread(read_candidates, run, stopped.artifact)
+    except OSError:
+        # Файлы прогона мог унести `make clean-runs`: отвечать человеку нечем, и остановка
+        # после этого копила бы один и тот же отказ на каждый ответ.
+        logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
+        await asyncio.to_thread(finish_run, run.run_id, FAILED)
+        await message.reply_text(LOST.format(run_id=run.run_id))
+        return None
+    edit = chosen_edit(written, found)
+    if edit is None:
+        await refuse(message, "unknown_number", out_of_range(found), run=run.run_id)
+        return None
+    # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него нет, и
+    # «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
+    logger.info(
+        "answer=%s by=%s run=%s chat=%s",
+        "choice" if written.strip().isdecimal() else "edit",
+        by,
+        run.run_id,
+        message.chat_id,
+    )
+    return Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
+
+
 def out_of_range(found: Candidates) -> str:
     return (
         f"Идей всего {len(found.ideas)}. Пришлите номер от 1 до {len(found.ideas)} "
@@ -608,7 +666,8 @@ def out_of_range(found: Candidates) -> str:
 def choice_text(found: Candidates) -> str:
     """Что показать, когда одной идеи не вышло: список из candidates.md.
 
-    Кнопки — P3-07; до них человек присылает номер или идею обычным сообщением.
+    Номера в списке и на кнопках под ним — одни и те же: кнопка отвечает за человека ровно то,
+    что он набрал бы сам. Словами ответить по-прежнему можно, и это уже не номер, а правка.
     """
     listed = [f"{idea.number}. {idea.title}" for idea in found.ideas]
     if found.outcome == "multiple":
@@ -628,6 +687,20 @@ def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(title, callback_data=f"gate:{run_id}:{stage}:{decision}")
                 for decision, title in GATE_BUTTONS
+            ]
+        ]
+    )
+
+
+def choice_keyboard(run_id: str, ideas: list[Idea]) -> InlineKeyboardMarkup:
+    # На кнопке только номер: название стоит строкой выше в том же сообщении, а на кнопке его
+    # обрезала бы ширина экрана неизвестно где. Ворота своим кнопкам называют ещё и стадию,
+    # выбору называть нечего: он у прогона один.
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(str(idea.number), callback_data=f"pick:{run_id}:{idea.number}")
+                for idea in ideas
             ]
         ]
     )
@@ -668,6 +741,19 @@ def decision_of(query: CallbackQuery) -> tuple[str, str, str] | None:
     return run_id, stage, decision
 
 
+def choice_of(query: CallbackQuery) -> tuple[str, str] | None:
+    """Прогон и номер идеи из данных кнопки. None — кнопка не той формы.
+
+    Номер проверяется, хотя данные писал сам бот: нечисловой ушёл бы в стадию правкой из
+    мусора, а сообщения переживают выкладку, и формат кнопки уже менялся однажды.
+    """
+    parts = (query.data or "").split(":")
+    if len(parts) != 3 or not parts[2].isdecimal():
+        return None
+    _, run_id, number = parts
+    return run_id, number
+
+
 def choice_ending(run: Run, stop: Pause) -> Ending:
     """Остановка на выборе, разобранная для человека: список ему и статус строке."""
     found = read_candidates(run, stop.artifact)
@@ -675,7 +761,9 @@ def choice_ending(run: Run, stop: Pause) -> Ending:
     # ничего, и следующее сообщение — новый прогон, а не правка к пустому.
     if found.outcome != "multiple":
         return Ending(text=choice_text(found), status=NO_TASK)
-    return Ending(text=choice_text(found), stop=stop)
+    return Ending(
+        text=choice_text(found), stop=stop, keyboard=choice_keyboard(run.run_id, found.ideas)
+    )
 
 
 async def outcome(
@@ -695,7 +783,11 @@ async def outcome(
             return choice_ending(run, waiting)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
-            return Ending(text=gate_text(run, waiting), stop=waiting)
+            return Ending(
+                text=gate_text(run, waiting),
+                stop=waiting,
+                keyboard=gate_keyboard(run.run_id, waiting.stage),
+            )
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)
@@ -779,6 +871,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
     application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
+    application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не

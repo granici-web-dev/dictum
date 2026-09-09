@@ -40,6 +40,7 @@ from app.bot import (
     finished_text,
     follow,
     main,
+    on_choice_button,
     on_gate_button,
     on_start,
     on_text,
@@ -748,7 +749,7 @@ async def test_the_answer_to_a_choice_leaves_a_line_to_count(
     with caplog.at_level(logging.INFO, logger="app.bot"):
         await on_text(an_update(TextChat("1")), NO_CONTEXT)
 
-    assert "answer=choice run=прогон chat=12" in caplog.text
+    assert "answer=choice by=text run=прогон chat=12" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -950,12 +951,49 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
     assert store.status[store.started[0][0]] == NO_TASK
 
 
+@pytest.mark.asyncio
+async def test_the_choice_message_carries_a_button_per_idea(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Номер на кнопке — тот же, что в списке: она отвечает ровно то, что человек набрал бы сам."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_with(MULTIPLE))
+    chat = TextChat("Две идеи разом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    keyboard = chat.keyboards[-1]
+    assert isinstance(keyboard, InlineKeyboardMarkup)
+    run_id = store.started[0][0]
+    assert [(button.text, button.callback_data) for button in keyboard.inline_keyboard[0]] == [
+        ("1", f"pick:{run_id}:1"),
+        ("2", f"pick:{run_id}:2"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_list_with_nothing_to_choose_from_carries_no_buttons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """При `none` список — темы разговора, а не идеи, и отвечать нажатием не на что."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_with(NONE))
+    chat = TextChat("Поговорили ни о чём")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1].startswith(NOTHING_HEARD)
+    assert chat.keyboards[-1] is None
+
+
 class ButtonChat(TextChat):
     """Нажатая кнопка: сам callback и сообщение, на котором она висела."""
 
-    def __init__(self, run_id: str, decision: str, stage: str = "brief") -> None:
+    def __init__(self, data: str) -> None:
         super().__init__("")
-        self.data = f"gate:{run_id}:{stage}:{decision}"
+        self.data = data
         self.answered = 0
         self.markups: list[object] = []
 
@@ -966,6 +1004,14 @@ class ButtonChat(TextChat):
     async def edit_message_reply_markup(self, reply_markup: object = None) -> Message:
         self.markups.append(reply_markup)
         return cast(Message, self)
+
+
+def a_gate_button(run_id: str, decision: str, stage: str = "brief") -> ButtonChat:
+    return ButtonChat(f"gate:{run_id}:{stage}:{decision}")
+
+
+def a_choice_button(run_id: str, number: str) -> ButtonChat:
+    return ButtonChat(f"pick:{run_id}:{number}")
 
 
 def a_press(chat: ButtonChat) -> Update:
@@ -1062,7 +1108,7 @@ async def test_next_at_a_gate_continues_from_the_stage_after_it(
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
-    chat = ButtonChat("прогон", "next")
+    chat = a_gate_button("прогон", "next")
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
@@ -1081,7 +1127,7 @@ async def test_the_edit_button_asks_for_text_and_leaves_the_gate_open(
     store.stop(12, stopped)
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
-    chat = ButtonChat("прогон", "edit")
+    chat = a_gate_button("прогон", "edit")
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
@@ -1117,7 +1163,7 @@ async def test_stop_at_a_gate_ends_the_run_and_says_so(
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
-    chat = ButtonChat("прогон", "stop")
+    chat = a_gate_button("прогон", "stop")
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
@@ -1136,7 +1182,7 @@ async def test_a_button_of_a_run_that_no_longer_waits_moves_nothing(
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
-    chat = ButtonChat("вчерашний", "next")
+    chat = a_gate_button("вчерашний", "next")
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
@@ -1153,7 +1199,7 @@ async def test_a_button_pressed_during_a_run_is_refused_like_a_message(
     """Отказ на кнопке называет прогон: он лежит в самой кнопке, а по логу считают воронку."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
-    chat = ButtonChat("прогон", "next")
+    chat = a_gate_button("прогон", "next")
     await bot.running.acquire()
     try:
         with caplog.at_level(logging.INFO, logger="app.bot"):
@@ -1217,7 +1263,7 @@ async def test_the_decision_on_a_gate_leaves_a_line_to_count(
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
 
     with caplog.at_level(logging.INFO, logger="app.bot"):
-        await on_gate_button(a_press(ButtonChat("прогон", "stop")), NO_CONTEXT)
+        await on_gate_button(a_press(a_gate_button("прогон", "stop")), NO_CONTEXT)
 
     assert "gate=stop run=прогон chat=12" in caplog.text
 
@@ -1305,7 +1351,7 @@ async def test_a_button_whose_message_is_gone_still_leaves_a_line(
     caplog: pytest.LogCaptureFixture, store: FakeStore
 ) -> None:
     """Единственный молчаливый выход обработчика: отвечать некуда, но нажатие было."""
-    chat = ButtonChat("прогон", "next")
+    chat = a_gate_button("прогон", "next")
     press = cast(Update, SimpleNamespace(callback_query=chat, effective_message=None))
 
     with caplog.at_level(logging.INFO, logger="app.bot"):
@@ -1313,6 +1359,139 @@ async def test_a_button_whose_message_is_gone_still_leaves_a_line(
 
     assert "gate=lost" in caplog.text
     assert chat.answered == 1
+
+
+@pytest.mark.asyncio
+async def test_a_pressed_number_answers_the_choice_the_way_a_typed_one_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Кнопка и набранный номер — один ответ: та же стадия, тот же повтор, та же строка в логе.
+
+    `by=button` в ней и есть ответ на вопрос, ради которого кнопку заводили: у стенда перестали
+    набирать текст или всё-таки набирают.
+    """
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = a_choice_button("прогон", "1")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_choice_button(a_press(chat), NO_CONTEXT)
+
+    assert seen == [
+        (
+            "прогон",
+            "intake",
+            Redo(
+                kind="choice",
+                user_edit="Выбрана идея 1: Бот для онбординга новичков",
+                artifact=CANDIDATES,
+            ),
+        )
+    ]
+    assert chat.answered == 1
+    assert "answer=choice by=button run=прогон chat=12" in caplog.text
+    assert store.status["прогон"] == PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_the_choice_buttons_stay_so_a_broken_redo_can_be_answered_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Сорвавшийся повтор возвращает остановку: снятая клавиатура отняла бы способ ответить."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_choice(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    chat = a_choice_button("прогон", "1")
+
+    await on_choice_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.markups == []
+    assert chat.edits[-1] == BROKEN_REDO["choice"].format(run_id="прогон")
+    assert store.stops[12] == stopped
+
+
+@pytest.mark.asyncio
+async def test_a_choice_button_of_a_run_that_no_longer_waits_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = a_choice_button("вчерашний", "1")
+
+    await on_choice_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert seen == []
+    assert store.stops[12].run_id == "прогон"
+
+
+@pytest.mark.asyncio
+async def test_a_choice_button_pressed_when_the_run_stands_at_a_gate_moves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Список с кнопками живёт в чате вечно, а прогон за это время ушёл к воротам.
+
+    Нажатое на нём «1» вернуло бы обход в intake, то есть выбросило бы бриф, которого человек
+    ждал: род остановки сверяется до того, как ответ куда-то поедет.
+    """
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = a_choice_button("прогон", "1")
+
+    await on_choice_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert seen == []
+    assert store.stops[12].kind == "gate"
+
+
+@pytest.mark.asyncio
+async def test_a_choice_button_pressed_during_a_run_is_refused_like_a_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    chat = a_choice_button("прогон", "1")
+    await bot.running.acquire()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_choice_button(a_press(chat), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert chat.replies == [BUSY]
+    assert chat.answered == 1
+    assert "refusal=busy chat=12 run=прогон" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_choice_button_whose_number_is_not_a_number_is_refused_like_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Данные писал бот, но сообщения переживают выкладку: мусор ушёл бы в стадию правкой."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = a_choice_button("прогон", "первую")
+
+    await on_choice_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert seen == []
 
 
 def walk_stopping_in_turn(stops: list[Pause], files: dict[str, str]) -> Walking:
@@ -1353,13 +1532,13 @@ async def test_a_button_of_the_gate_the_run_has_already_left_publishes_nothing(
     at_decompose = Pause(stage="decompose", artifact=ISSUES_MD, kind="gate")
     monkeypatch.setattr(bot, "walk", walk_stopping_in_turn([at_brief, at_decompose], artifacts))
 
-    await on_gate_button(a_press(ButtonChat("прогон", "edit")), NO_CONTEXT)
+    await on_gate_button(a_press(a_gate_button("прогон", "edit")), NO_CONTEXT)
     await on_text(an_update(TextChat("Убери пятый раздел")), NO_CONTEXT)
-    await on_gate_button(a_press(ButtonChat("прогон", "next")), NO_CONTEXT)
+    await on_gate_button(a_press(a_gate_button("прогон", "next")), NO_CONTEXT)
 
     assert store.stops[12].stage == "decompose"
 
-    stale = ButtonChat("прогон", "next", stage="brief")
+    stale = a_gate_button("прогон", "next", stage="brief")
     await on_gate_button(a_press(stale), NO_CONTEXT)
 
     assert stale.replies == [STALE_BUTTON]
@@ -1448,7 +1627,7 @@ async def test_a_continued_run_stops_at_the_next_gate_and_shows_its_own_voice_la
             [at_decompose], {ISSUES_JSON: REAL_ISSUES, ISSUES_MD: "# Backlog\n"}
         ),
     )
-    chat = ButtonChat("прогон", "next")
+    chat = a_gate_button("прогон", "next")
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
@@ -1465,7 +1644,7 @@ async def test_a_button_from_before_the_format_changed_is_refused_like_a_stale_o
     """Сообщения переживают выкладку: кнопка прошлой формы роняла обработчик молчанием."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
-    chat = ButtonChat("прогон", "next")
+    chat = a_gate_button("прогон", "next")
     chat.data = "gate:прогон:next"
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
