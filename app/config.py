@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     keep_audio: bool = False
     # Ворота — норма, а не опция (CLAUDE.md §1): снимает их стенд своим .env, а не умолчание.
     auto_approve: bool = False
+    # Сколько вопросов брифу позволено задать за прогон. Каждый — отдельный вызов модели и
+    # отдельное ожидание человека, поэтому на стенде число меньше, чем в спокойной работе.
+    max_brief_questions: int = 5
 
 
 class ConfigError(RuntimeError):

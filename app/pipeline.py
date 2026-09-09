@@ -9,14 +9,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Род остановки обхода (SPEC §3.2). Объявлен здесь, потому что читают его с двух сторон:
+# Род остановки обхода (SPEC §3.2, §3.3). Объявлен здесь, потому что читают его с двух сторон:
 # `Pause` и `Redo` в app/run.py и `Stopped` в app/store.py, а общий у них только этот модуль.
-StopKind = Literal["choice", "gate"]
+StopKind = Literal["choice", "gate", "answer"]
 
 TRANSCRIPT = "inputs/transcript.md"
 IDEA = "inputs/idea.md"
 CANDIDATES = "outputs/candidates.md"
 BRIEF = "outputs/brief.md"
+BRIEF_QUESTION = "outputs/brief_question.md"
 RESEARCH = "outputs/research.md"
 PRD = "outputs/prd.md"
 ISSUES_JSON = "outputs/issues.json"
@@ -38,6 +39,9 @@ class Stage(BaseModel):
     # Язык — свойство прогона, а не стадии, поэтому подмешивается на ходу. Сегодня его получает
     # только brief: остальным промптам его не показывали, и менять их вход — отдельное решение.
     needs_lang: bool = False
+    # То же и с `interactive`: есть ли кому отвечать, знает прогон, а не запись стадии. Пока
+    # диалога не было, флаг стоял здесь константой (SPEC §3.2); с P2-04 его называет вход.
+    needs_interactive: bool = False
     # Артефакт, который человек читает на воротах после стадии (SPEC §3.2); None — ворот нет.
     # Из outputs его не вывести: у decompose на воротах читают issues.md, а он там не объявлен.
     gate_after: str | None = None
@@ -55,13 +59,16 @@ STAGES: tuple[Stage, ...] = (
         inputs=(TRANSCRIPT,),
         outputs=(frozenset({IDEA}), frozenset({CANDIDATES})),
     ),
+    # Две ветки выхода, как у intake: бриф или очередной вопрос человеку (SPEC §3.3). Вопрос
+    # останавливает обход и приходит правкой обратно в эту же стадию.
     Stage(
         name="brief",
         runs="llm",
         inputs=(IDEA,),
-        outputs=(frozenset({BRIEF}),),
-        params={"mode": "batch", "interactive": "false"},
+        outputs=(frozenset({BRIEF}), frozenset({BRIEF_QUESTION})),
+        params={"mode": "batch"},
         needs_lang=True,
+        needs_interactive=True,
         gate_after=BRIEF,
     ),
     # Пока ресёрча нет, стадия исполняется кодом и кладёт фиксированную строку: /prd просит файл на

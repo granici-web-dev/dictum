@@ -3,8 +3,11 @@ from pathlib import Path
 
 import pytest
 
+from app.dialog import Turn
+from app.ingest import run_id_of
 from app.pipeline import (
     BRIEF,
+    BRIEF_QUESTION,
     CANDIDATES,
     IDEA,
     ISSUES_JSON,
@@ -34,6 +37,7 @@ from tests.test_cli import (
     IDEA_BLOCK,
     ISSUES_BLOCKS,
     PRD_BLOCK,
+    QUESTION_BLOCK,
     TEXT,
 )
 
@@ -63,6 +67,28 @@ def a_demo_run(root: Path, text: str = TEXT) -> Run:
     return a_run(root, text, auto_approve=True)
 
 
+def an_asking_run(root: Path) -> Run:
+    """Прогон, у которого есть кому отвечать: только такому стадия задаёт вопросы (SPEC §3.3)."""
+    return Run(root=root, run_id=RUN_ID, lang="ru", text=TEXT, interactive=True)
+
+
+def an_answer(written: str, turns: tuple[Turn, ...] = (), closing: bool = False) -> Redo:
+    return Redo(
+        kind="answer",
+        user_edit=written,
+        artifact=BRIEF_QUESTION,
+        turns=turns,
+        closes_branch=BRIEF_QUESTION if closing else None,
+    )
+
+
+def a_choice(written: str) -> Redo:
+    """Ответ на выбор идеи: список стадия отдать уже не вправе, его и закрывает повтор."""
+    return Redo(
+        kind="choice", user_edit=written, artifact=CANDIDATES, closes_branch=CANDIDATES
+    )
+
+
 def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -> Run:
     """Прогон с голосовым. Расшифровка подменена: её собственные тесты — в test_transcribe."""
     monkeypatch.setattr(
@@ -84,7 +110,8 @@ def test_a_voice_run_writes_a_transcript_that_names_the_source_and_the_seconds(
 ) -> None:
     transcript = ingest_body(a_voice_run(tmp_path, monkeypatch))[TRANSCRIPT]
 
-    assert f"run_id: {RUN_ID}\nsource: voice\nduration: 47\nlang: ru\n" in transcript
+    assert run_id_of(transcript) == RUN_ID
+    assert "source: voice\nduration: 47\nlang: ru\n" in transcript
     assert TEXT in transcript
 
 
@@ -124,7 +151,7 @@ def test_the_walk_stamps_the_run_id_it_was_given_into_the_issues(
 
     issues = json.loads((tmp_path / ISSUES_JSON).read_text(encoding="utf-8"))
     assert issues["run_id"] == RUN_ID
-    assert f"run_id: {RUN_ID}" in (tmp_path / TRANSCRIPT).read_text(encoding="utf-8")
+    assert run_id_of((tmp_path / TRANSCRIPT).read_text(encoding="utf-8")) == RUN_ID
 
 
 def test_every_stage_reports_itself_once_and_in_order(
@@ -215,7 +242,7 @@ def test_a_second_list_after_a_choice_is_repaired_into_the_chosen_idea(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
-    picked = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
+    picked = a_choice("Первую")
 
     assert walk(run, "intake", "intake", redo=picked) is None
 
@@ -232,16 +259,14 @@ def test_a_stage_that_asks_again_after_a_choice_falls_instead_of_stopping_twice(
     run = a_run(tmp_path)
     walk(run, "ingest", "decompose")
 
-    picked = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
+    picked = a_choice("Первую")
 
     with pytest.raises(StageError, match="expected inputs/idea.md, got outputs/candidates.md"):
         walk(run, "intake", "intake", redo=picked)
 
 
 def test_a_choice_redo_may_not_ask_the_same_question_again() -> None:
-    choice = Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES)
-
-    assert outputs_after(stage_named("intake"), choice) == (frozenset({IDEA}),)
+    assert outputs_after(stage_named("intake"), a_choice("Первую")) == (frozenset({IDEA}),)
 
 
 def test_a_gate_redo_hands_back_the_same_artifact_because_that_is_the_point() -> None:
@@ -377,3 +402,86 @@ def test_publish_declares_no_artifact_because_it_writes_its_own_journal() -> Non
 
     assert publish_stage.outputs == (frozenset(),)
     assert publish_stage.inputs == (ISSUES_JSON,)
+
+
+def test_a_question_from_brief_stops_the_walk_and_names_the_file_that_needs_a_person(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK)])
+
+    waiting = walk(an_asking_run(tmp_path), "ingest", "decompose")
+
+    assert waiting == Pause(stage="brief", artifact=BRIEF_QUESTION, kind="answer")
+    assert (tmp_path / BRIEF_QUESTION).is_file()
+    assert not (tmp_path / BRIEF).exists()
+    assert len(requests) == 2
+
+
+def test_brief_hears_whether_anyone_will_answer_its_questions(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Флаг — свойство прогона, а не записи стадии: у локального отвечать некому (CLAUDE.md §1)."""
+    requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
+
+    walk(an_asking_run(tmp_path), "ingest", "brief")
+    walk(a_run(tmp_path), "ingest", "brief")
+
+    assert "interactive: true" in request_body(requests[1])["messages"][-1]["content"]
+    assert "interactive: false" in request_body(requests[3])["messages"][-1]["content"]
+
+
+def test_an_answer_returns_to_brief_and_the_walk_goes_on_to_the_gate(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
+    run = an_asking_run(tmp_path)
+    walk(run, "ingest", "decompose")
+
+    waiting = walk(run, "brief", "decompose", redo=an_answer("Пятеро, смотрят каждый день"))
+
+    assert waiting == Pause(stage="brief", artifact=BRIEF, kind="gate")
+    assert (tmp_path / BRIEF).is_file()
+
+
+def test_an_answer_carries_every_earlier_turn_of_the_dialog(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Без прежних ходов стадия спросит то же самое ещё раз, а ответы человека пропадут."""
+    requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
+    run = an_asking_run(tmp_path)
+    walk(run, "ingest", "decompose")
+
+    first = Turn(question="Кто пользователь?\n", answer="Наша же команда")
+    walk(run, "brief", "brief", redo=an_answer("Пятеро", turns=(first,)))
+
+    said = request_body(requests[2])["messages"]
+    assert [turn["role"] for turn in said] == ["assistant", "user", "assistant", "user"]
+    assert first.question in said[0]["content"]
+    assert said[1]["content"] == "<user_edit>\nНаша же команда\n</user_edit>"
+    assert read_artifact(tmp_path, BRIEF_QUESTION) in said[2]["content"]
+    assert "<user_edit>\nПятеро\n</user_edit>" in said[3]["content"]
+
+
+def test_a_dialog_that_is_over_leaves_the_stage_only_the_brief() -> None:
+    assert outputs_after(stage_named("brief"), an_answer("Пятеро", closing=True)) == (
+        frozenset({BRIEF}),
+    )
+
+
+def test_an_answer_that_is_not_the_last_one_lets_the_stage_ask_again() -> None:
+    assert outputs_after(stage_named("brief"), an_answer("Пятеро")) == stage_named("brief").outputs
+
+
+def test_a_question_asked_after_the_dialog_is_over_is_repaired_into_the_brief(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Человек нажал «Собирай»: ещё один вопрос оставил бы его там же, где он был."""
+    requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
+    run = an_asking_run(tmp_path)
+    walk(run, "ingest", "decompose")
+
+    assert walk(run, "brief", "brief", redo=an_answer("Хватит", closing=True)) is None
+
+    claim = request_body(requests[3])["messages"][-1]["content"]
+    assert "допустим только outputs/brief.md" in claim
+    assert (tmp_path / BRIEF).is_file()

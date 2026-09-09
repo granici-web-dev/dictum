@@ -49,6 +49,10 @@ BRIEF_BLOCK = (
     '<file path="outputs/brief.md">\n---\nname: Напоминания\nkind: product\nlang: ru\n'
     "open_questions: 2\n---\n\n# Brief\n\n## 1. Users\n[уточнить: размер команды]\n</file>"
 )
+QUESTION_BLOCK = (
+    '<file path="outputs/brief_question.md">\n'
+    "Сколько человек в команде и как часто они смотрят в Trello?\n</file>"
+)
 PRD_BLOCK = (
     '<file path="outputs/prd.md">\n# PRD: Напоминания\n\n## MVP scope\n'
     "| ID | Scenario / screen | Priority | Depends on | Done when |\n"
@@ -119,7 +123,7 @@ def test_run_text_tells_brief_that_nobody_will_answer(
     # Только блок <params>: «lang: ru» стоит ещё и во frontmatter самого idea.md, который едет
     # тем же сообщением, и проверка по всему тексту проходила бы с пустыми параметрами.
     params = brief_message.split("<params>\n", 1)[1].split("\n</params>", 1)[0]
-    assert params.splitlines() == ["mode: batch", "interactive: false", "lang: ru"]
+    assert params.splitlines() == ["mode: batch", "lang: ru", "interactive: false"]
 
 
 def test_run_text_feeds_prd_the_brief_research_and_template(

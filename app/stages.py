@@ -17,8 +17,9 @@ from pydantic import BaseModel
 
 from app.candidates import check_candidates
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
+from app.dialog import Turn, check_question
 from app.models import IssuesFile
-from app.pipeline import CANDIDATES, ISSUES_JSON, ISSUES_MD, stage_named
+from app.pipeline import BRIEF_QUESTION, CANDIDATES, ISSUES_JSON, ISSUES_MD, stage_named
 from app.render import issues_markdown
 from app.validate import check_issues
 
@@ -64,6 +65,8 @@ def repairable_problems(
         return check_issues(files[ISSUES_JSON])
     if CANDIDATES in files:
         return check_candidates(files[CANDIDATES])
+    if BRIEF_QUESTION in files:
+        return check_question(files[BRIEF_QUESTION])
     return []
 
 
@@ -94,6 +97,19 @@ def previous_answer(path: str, content: str) -> list[MessageParam]:
     именно он: без своего прошлого ответа она соберёт артефакт заново.
     """
     return [{"role": "assistant", "content": f'<file path="{path}">\n{content}</file>'}]
+
+
+def dialog_history(turns: tuple[Turn, ...]) -> list[MessageParam]:
+    """Прежние ходы диалога брифа: вопрос стадии, ответ человека, и так по кругу (SPEC §3.3).
+
+    Вопрос, на который отвечают сейчас, сюда не входит: он лежит артефактом на диске, и историю
+    замыкает `previous_answer` — тем же способом, что и у любого другого повтора.
+    """
+    messages: list[MessageParam] = []
+    for turn in turns:
+        messages += previous_answer(BRIEF_QUESTION, turn.question)
+        messages.append({"role": "user", "content": f"<user_edit>\n{turn.answer}\n</user_edit>"})
+    return messages
 
 
 def repair_request(problems: list[str]) -> str:

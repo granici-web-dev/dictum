@@ -8,22 +8,31 @@
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel
 
+from app.dialog import Turn
 from app.ingest import build_transcript
 from app.pipeline import (
+    BRIEF_QUESTION,
     CANDIDATES,
     ISSUES_JSON,
     RESEARCH,
     RESEARCH_SKIPPED,
     TRANSCRIPT,
     Stage,
+    StopKind,
     stages_between,
 )
 from app.publish import publish
-from app.stages import StageError, StageResult, load_template, previous_answer, run_stage
+from app.stages import (
+    StageError,
+    StageResult,
+    dialog_history,
+    load_template,
+    previous_answer,
+    run_stage,
+)
 from app.transcribe import transcribe
 
 logger = logging.getLogger(__name__)
@@ -39,6 +48,9 @@ class Run(BaseModel):
     # Ворота — норма, а демо — исключение (CLAUDE.md §1), поэтому снимает их тот, кто заводит
     # прогон, и делает это явно.
     auto_approve: bool = False
+    # Есть ли кому отвечать на вопросы стадии (SPEC §3.3). Умолчание — «некому»: у локального
+    # прогона интерфейса ответов нет вовсе, и вопрос там встал бы навсегда (CLAUDE.md §1).
+    interactive: bool = False
 
 
 class Pause(BaseModel):
@@ -46,23 +58,32 @@ class Pause(BaseModel):
 
     `choice` — человек выбирает одну идею из нескольких, подтверждать там нечего.
     `gate` — человек подтверждает готовый артефакт; `auto_approve` снимает только эти остановки.
+    `answer` — человек отвечает на вопрос брифа (§3.3); подтверждать там тоже нечего, но и
+    случиться она может только у прогона, которому есть кому отвечать (`Run.interactive`).
     """
 
     stage: str
     artifact: str
-    kind: Literal["choice", "gate"]
+    kind: StopKind
 
 
 class Redo(BaseModel):
-    """Повтор стадии с правкой человека: чем править и что стадия отдала в прошлый раз.
+    """Повтор стадии с ответом человека: чем править и что стадия отдала в прошлый раз.
 
-    Зеркало `Pause`: остановка выходит из обхода, `Redo` заходит обратно в него, и род у него
-    тот же — от него зависит, что стадии позволено отдать (`outputs_after`).
+    Зеркало `Pause`: остановка выходит из обхода, `Redo` заходит обратно в него, и род у них
+    общий — на сорвавшемся повторе он восстанавливает ту же остановку.
+
+    `turns` — прежние ходы диалога брифа; текущий вопрос в них не входит, он лежит артефактом.
+    `closes_branch` — ветка выхода, которую этот повтор стадии больше не позволяет
+    (`outputs_after`): род остановки на неё не отвечает, потому что один и тот же ответ на
+    вопрос брифа то кончает диалог, то нет.
     """
 
-    kind: Literal["choice", "gate"]
+    kind: StopKind
     user_edit: str
     artifact: str
+    turns: tuple[Turn, ...] = ()
+    closes_branch: str | None = None
 
 
 def ingest_body(run: Run) -> dict[str, str]:
@@ -129,15 +150,16 @@ def missing_before(root: Path, start: str, stop: str) -> list[str]:
 
 
 def outputs_after(stage: Stage, redo: Redo | None) -> tuple[frozenset[str], ...]:
-    """Что стадии позволено отдать. Повтор по выбору снимает ветку, которая остановила обход.
+    """Что стадии позволено отдать: повтор вправе закрыть ветку, которая его и вызвала.
 
     Человек выбрал одну идею — значит, отдать список снова стадия не вправе: прогон встал бы на
-    том же месте с тем же вопросом, а ответ человека пропал бы. На воротах наоборот: там правят
-    сам артефакт, и отдать его заново — это и есть работа стадии.
+    том же месте с тем же вопросом, а ответ человека пропал бы. Тем же запретом кончается диалог
+    брифа: после «Собирай» и после последнего вопроса из бюджета стадия обязана собрать бриф.
+    На воротах и на обычном ответе закрывать нечего: там правят и спрашивают дальше.
     """
-    if redo is None or redo.kind == "gate":
+    if redo is None or redo.closes_branch is None:
         return stage.outputs
-    return tuple(paths for paths in stage.outputs if redo.artifact not in paths)
+    return tuple(paths for paths in stage.outputs if redo.closes_branch not in paths)
 
 
 def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResult:
@@ -147,8 +169,13 @@ def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResu
     params = dict(stage.params)
     if stage.needs_lang:
         params["lang"] = run.lang
+    if stage.needs_interactive:
+        params["interactive"] = "true" if run.interactive else "false"
     history = (
-        previous_answer(redo.artifact, read_artifact(run.root, redo.artifact)) if redo else None
+        dialog_history(redo.turns)
+        + previous_answer(redo.artifact, read_artifact(run.root, redo.artifact))
+        if redo
+        else None
     )
     try:
         return run_stage(
@@ -188,6 +215,8 @@ def walk(
         on_done(stage)
         if CANDIDATES in files:
             return Pause(stage=stage.name, artifact=CANDIDATES, kind="choice")
+        if BRIEF_QUESTION in files:
+            return Pause(stage=stage.name, artifact=BRIEF_QUESTION, kind="answer")
         # Ворота останавливают прогон перед следующей стадией, а после stop останавливать нечего:
         # обход и так закончился, и «ждёт человека» вместо «дошёл до конца» соврало бы.
         if stage.gate_after and not run.auto_approve and stage.name != stop:
