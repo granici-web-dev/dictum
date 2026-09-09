@@ -1142,19 +1142,23 @@ async def test_a_button_of_a_run_that_no_longer_waits_moves_nothing(
 
 @pytest.mark.asyncio
 async def test_a_button_pressed_during_a_run_is_refused_like_a_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Отказ на кнопке называет прогон: он лежит в самой кнопке, а по логу считают воронку."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
     chat = ButtonChat("прогон", "next")
     await bot.running.acquire()
     try:
-        await on_gate_button(a_press(chat), NO_CONTEXT)
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_gate_button(a_press(chat), NO_CONTEXT)
     finally:
         bot.running.release()
 
     assert chat.replies == [BUSY]
     assert chat.answered == 1
+    assert "refusal=busy chat=12 run=прогон" in caplog.text
 
 
 @pytest.mark.asyncio

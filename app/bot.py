@@ -39,7 +39,7 @@ from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
 from app.models import IssuesFile
-from app.pipeline import BRIEF, ISSUES_JSON, NAMES, Stage, after, stages_between
+from app.pipeline import BRIEF, ISSUES_JSON, NAMES, Stage, StopKind, after, stages_between
 from app.publish import journal_of
 from app.render import backlog_digest, brief_digest
 from app.run import Pause, Redo, Run, read_artifact, walk
@@ -124,7 +124,7 @@ ASK_AGAIN = "Пришлите идею одним сообщением и чут
 
 BROKEN = "Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
 
-BROKEN_REDO = {
+BROKEN_REDO: dict[StopKind, str] = {
     "choice": "Не получилось продолжить, но запись цела. Пришлите номер ещё раз. (прогон {run_id})",
     "gate": "Не получилось переделать, но прогон цел. Пришлите правку ещё раз. (прогон {run_id})",
 }
@@ -141,9 +141,9 @@ STALE_BUTTON = "Эти кнопки от прогона, который уже �
 
 NEXT, EDIT, STOP = "next", "edit", "stop"
 
-# Чего в строке лога нет: прогона не было, остановку не снимали. Пустое место читается как
-# оборванная строка, а прочерк — как ответ.
-NOTHING = "-"
+# Прогона в строке лога нет: остановку не снимали. Пустое место читается как оборванная
+# строка, а прочерк — как ответ.
+NO_RUN = "-"
 
 GATE_BUTTONS = ((NEXT, "Дальше"), (EDIT, "Править"), (STOP, "Стоп"))
 
@@ -296,7 +296,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # прогона, снимал пустоту, а прогон в конце записывал остановку обратно.
     async with running:
         dropped = await asyncio.to_thread(drop_stop, message.chat_id)
-    logger.info("command=start chat=%s dropped=%s", message.chat_id, dropped or NOTHING)
+    logger.info("command=start chat=%s dropped=%s", message.chat_id, dropped or NO_RUN)
     await message.reply_text(GREETING)
 
 
@@ -323,12 +323,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif stopped.kind == "gate":
             # Текст на воротах и есть правка: тот же уговор, что и на выборе, и второго
             # состояния ожидания («нажал Править, теперь жду текст») он не заводит.
-            run, voice = continued(stopped), stopped.source == "voice"
+            run, voice = continued(stopped), stopped.voice
             logger.info("answer=edit run=%s chat=%s", run.run_id, message.chat_id)
             start = stopped.stage
             redo = Redo(kind="gate", user_edit=message.text.strip(), artifact=stopped.artifact)
         else:
-            run, voice = continued(stopped), stopped.source == "voice"
+            run, voice = continued(stopped), stopped.voice
             try:
                 found = await asyncio.to_thread(read_candidates, run, stopped.artifact)
             except OSError:
@@ -380,7 +380,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
         )
         logger.info(
-            "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NOTHING
+            "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN
         )
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
@@ -412,12 +412,12 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     # Часы на кнопке крутятся, пока Telegram не получит ответ: снимаем их до всего остального.
     await query.answer()
+    run_id, stage, decision = decision_of(query)
     if running.locked():
-        await refuse(message, "busy", BUSY)
+        await refuse(message, "busy", BUSY, run=run_id)
         return
 
     async with running:
-        run_id, stage, decision = decision_of(query)
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if (
             stopped is None
@@ -444,7 +444,7 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if decision == EDIT:
             await message.reply_text(GATE_EDIT_ASKED)
             return
-        run, voice = continued(stopped), stopped.source == "voice"
+        run, voice = continued(stopped), stopped.voice
         # Со следующей стадии, а не с той, что встала на воротах: подтверждённую переигрывать
         # значит оплатить её второй раз и получить другой артефакт вместо принятого.
         start = after(stopped.stage).name

@@ -105,6 +105,10 @@ class Stopped(BaseModel):
     stage: str
     artifact: str
 
+    @property
+    def voice(self) -> bool:
+        return self.source == "voice"
+
 
 class Orphan(BaseModel):
     """Прогон, переживший свой процесс: человеку о нём скажут, а сам он уже никуда не пойдёт."""
