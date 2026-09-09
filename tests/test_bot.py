@@ -461,6 +461,11 @@ async def test_a_number_outside_the_list_keeps_the_run_waiting(
     assert seen == []
 
 
+async def saved_empty(voice: Voice, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"")
+
+
 @pytest.mark.asyncio
 async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -469,12 +474,7 @@ async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
     listed(monkeypatch, "12")
     bot.paused[12] = a_stopped_choice(tmp_path)
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-
-    async def saved(voice: Voice, target: Path) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(b"")
-
-    monkeypatch.setattr(bot, "save_voice", saved)
+    monkeypatch.setattr(bot, "save_voice", saved_empty)
     seen: list[tuple[str, str, Redo | None]] = []
     monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
@@ -482,6 +482,26 @@ async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
 
     assert 12 not in bot.paused
     assert [(start, redo) for _, start, redo in seen] == [("ingest", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_choice_after_a_voice_is_remembered_as_after_a_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Живой прогон 664534620c9a1c10: остановку записывал только on_text, а голос её терял.
+
+    На стенде идею наговаривают, поэтому «1» после голосового уходило новым прогоном —
+    из одного слова, на чужом языке и без идеи внутри.
+    """
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "save_voice", saved_empty)
+    monkeypatch.setattr(bot, "walk", walk_stopping_with(MULTIPLE))
+
+    await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
+
+    assert bot.paused[12].stage == "intake"
+    assert bot.paused[12].artifact == CANDIDATES
 
 
 @pytest.mark.asyncio

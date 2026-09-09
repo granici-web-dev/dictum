@@ -230,9 +230,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             run, start = stopped.run, stopped.stage
             redo = Redo(user_edit=edit, artifact=stopped.artifact)
         note = await message.reply_text(progress_text(run, done_before(start)))
-        keep = await follow(note, run, message.date, start, redo)
-        if keep:
-            paused[message.chat_id] = keep
+        await follow(note, run, message.date, start, redo)
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -280,8 +278,13 @@ async def follow(
     asked_at: datetime,
     start: str = FIRST_STAGE,
     redo: Redo | None = None,
-) -> Waiting | None:
-    """Гонит прогон в потоке и правит одно сообщение до самого конца."""
+) -> None:
+    """Гонит прогон в потоке, правит одно сообщение до конца и помнит остановку.
+
+    Остановку записывает сюда, а не обработчик: `on_voice` её однажды не записал, и выбор
+    после голосового ушёл новым прогоном (живой прогон 664534620c9a1c10). Чат берётся у
+    сообщения о ходе — оно в том же чате, что и вопрос.
+    """
     done = done_before(start)
     loop = asyncio.get_running_loop()
     progress: list[Future[Message | bool]] = []
@@ -296,6 +299,8 @@ async def follow(
         )
 
     ending = await outcome(run, report, start, redo)
+    if ending.waiting:
+        paused[note.chat_id] = ending.waiting
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -308,7 +313,6 @@ async def follow(
     # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
     waited = datetime.now(timezone.utc) - asked_at
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
-    return ending.waiting
 
 
 def done_before(start: str) -> list[str]:
