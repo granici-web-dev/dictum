@@ -47,6 +47,11 @@ from app.bot import (
     outcome,
     progress_text,
     refuse,
+    GATES_FROM_NEXT_RUN,
+    GATES_STATE,
+    GATES_UNKNOWN,
+    auto_approve_for,
+    on_gates,
     started_run,
     too_long,
 )
@@ -254,11 +259,11 @@ def test_a_new_run_takes_the_gates_from_the_settings_and_not_from_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ворота — норма (CLAUDE.md §1), а стенд снимает их своим .env, а не умолчанием кода."""
-    assert not started_run("прогон", text="Идея").auto_approve
+    assert not started_run("прогон", 12, text="Идея").auto_approve
 
     monkeypatch.setattr(settings, "auto_approve", True)
 
-    assert started_run("прогон", text="Идея").auto_approve
+    assert started_run("прогон", 12, text="Идея").auto_approve
 
 
 def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
@@ -1467,3 +1472,127 @@ async def test_a_button_from_before_the_format_changed_is_refused_like_a_stale_o
 
     assert chat.replies == [STALE_BUTTON]
     assert store.stops[12].stage == "brief"
+
+
+@pytest.fixture(autouse=True)
+def forgotten_gates() -> Iterator[None]:
+    """Режим чата живёт в памяти процесса, а тесты идут в одном: чужой выбор не наследуется."""
+    yield
+    bot.AUTO_APPROVE_BY_CHAT.clear()
+
+
+@pytest.mark.asyncio
+async def test_gates_on_makes_the_next_run_stop_and_gates_off_makes_it_run_through(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Ведущий переключает ворота, не гася бота: это второй акт показа."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(settings, "auto_approve", True)
+
+    await on_gates(an_update(TextChat("/gates on")), NO_CONTEXT)
+
+    assert not started_run("прогон", 12).auto_approve
+
+    await on_gates(an_update(TextChat("/gates off")), NO_CONTEXT)
+
+    assert started_run("прогон", 12).auto_approve
+
+
+@pytest.mark.asyncio
+async def test_gates_without_a_word_says_how_it_is_and_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    chat = TextChat("/gates")
+
+    await on_gates(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [GATES_STATE[False]]
+    assert bot.AUTO_APPROVE_BY_CHAT == {}
+
+
+@pytest.mark.asyncio
+async def test_gates_with_a_word_it_does_not_know_keeps_the_mode(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    await on_gates(an_update(TextChat("/gates on")), NO_CONTEXT)
+    chat = TextChat("/gates maybe")
+
+    await on_gates(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [GATES_UNKNOWN]
+    assert not auto_approve_for(12)
+
+
+@pytest.mark.asyncio
+async def test_the_answer_says_the_switch_takes_the_next_run_not_this_one(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Режим идущего прогона записан в его строке, и менять его на ходу значило бы соврать."""
+    listed(monkeypatch, "12")
+    chat = TextChat("/gates on")
+
+    await on_gates(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [GATES_STATE[False] + GATES_FROM_NEXT_RUN]
+
+
+def test_a_chat_that_never_asked_takes_the_mode_from_the_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "auto_approve", True)
+
+    assert auto_approve_for(777)
+
+
+@pytest.mark.asyncio
+async def test_one_chat_switching_gates_leaves_the_other_alone(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Белый список держит несколько чатов: переключение из одного — не решение за другой."""
+    listed(monkeypatch, "12, 13")
+    monkeypatch.setattr(settings, "auto_approve", True)
+
+    await on_gates(an_update(TextChat("/gates on")), NO_CONTEXT)
+
+    assert not auto_approve_for(12)
+    assert auto_approve_for(13)
+
+
+@pytest.mark.asyncio
+async def test_gates_from_a_stranger_gets_silence(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "-100500")
+    chat = TextChat("/gates off")
+
+    await on_gates(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == []
+    assert bot.AUTO_APPROVE_BY_CHAT == {}
+
+
+@pytest.mark.asyncio
+async def test_switching_gates_leaves_a_line_to_count(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    listed(monkeypatch, "12")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_gates(an_update(TextChat("/gates on")), NO_CONTEXT)
+
+    assert "command=gates chat=12 gates=on" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_run_keeps_its_own_gates_after_the_chat_switched_them_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Режим прогона записан в его строке: команда меняет умолчание чата, а не прогон."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_gate(tmp_path, monkeypatch, auto_approve=False)
+
+    await on_gates(an_update(TextChat("/gates off")), NO_CONTEXT)
+
+    assert not bot.continued(stopped).auto_approve

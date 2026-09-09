@@ -91,6 +91,19 @@ LABEL = {
 # сообщении и с «▸», и с «✓»: отглагольное существительное читается верно в обоих.
 VOICE_INGEST_LABEL = "расшифровка голосового"
 
+GATES_ON, GATES_OFF = "on", "off"
+
+GATES_STATE = {
+    False: "Ворота включены: прогон встанет после брифа и после разбора на задачи.",
+    True: "Ворота выключены: прогон идёт до карточек без подтверждений.",
+}
+
+GATES_FROM_NEXT_RUN = " Это со следующего прогона, идущий доходит со своим режимом."
+
+GATES_UNKNOWN = (
+    "Не понял. /gates on включает ворота, /gates off выключает, /gates показывает, как сейчас."
+)
+
 GREETING = (
     "Пришлите идею голосовым или текстом, одну за раз. Я доведу её до карточек в Trello и дам "
     "ссылку.\nЭто займёт несколько минут — я буду писать после каждого шага."
@@ -158,6 +171,16 @@ BotApplication = Application[Any, Any, Any, Any, Any, Any]
 
 running = asyncio.Lock()
 
+# Умолчание чата поверх флага из .env: его меняет /gates, а режим идущего прогона живёт в его
+# строке (§4.1) и командой не двигается. Память процесса, а не колонка: перезапуск возвращает
+# умолчание к флагу, который бот печатает на старте, и терять тут нечего. Заведёт колонку
+# P4-03, когда webhook и исполнитель разъедутся по процессам и словарь перестанет быть правдой.
+AUTO_APPROVE_BY_CHAT: dict[int, bool] = {}
+
+
+def auto_approve_for(chat_id: int) -> bool:
+    return AUTO_APPROVE_BY_CHAT.get(chat_id, settings.auto_approve)
+
 
 class Ending(BaseModel):
     """Чем кончился прогон: что сказать человеку и чем закрыть строку.
@@ -219,10 +242,13 @@ def finished_text(root: Path) -> str:
     )
 
 
-def started_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
-    """Новый прогон из чата. Ворота снимает флаг настроек (SPEC §3.2), а не отсутствие кнопок.
+def started_run(
+    run_id: str, chat_id: int, text: str = "", audio: Path | None = None
+) -> Run:
+    """Новый прогон из чата. Ворота снимает режим чата (SPEC §3.2), а не отсутствие кнопок.
 
-    Умолчание у флага — «ворота есть» (`CLAUDE.md` §1); стенд снимает их своим `.env`.
+    Режим чата — флаг из `.env`, пока `/gates` не сказал иначе; умолчание флага — «ворота
+    есть» (`CLAUDE.md` §1), и снимает их стенд своим файлом.
     """
     return Run(
         root=RUNS / run_id,
@@ -230,7 +256,7 @@ def started_run(run_id: str, text: str = "", audio: Path | None = None) -> Run:
         lang=settings.default_lang,
         text=text,
         audio=audio,
-        auto_approve=settings.auto_approve,
+        auto_approve=auto_approve_for(chat_id),
     )
 
 
@@ -300,6 +326,24 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(GREETING)
 
 
+async def on_gates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ворота включает и выключает ведущий, не гася бота. Идущий прогон это не трогает."""
+    message = update.message
+    if message is None or not permitted(message):
+        return
+    asked = (message.text or "").split()[1:]
+    if asked and asked[0] not in (GATES_ON, GATES_OFF):
+        await refuse(message, "unknown_gates_mode", GATES_UNKNOWN)
+        return
+    if asked:
+        AUTO_APPROVE_BY_CHAT[message.chat_id] = asked[0] == GATES_OFF
+    approved = auto_approve_for(message.chat_id)
+    logger.info(
+        "command=gates chat=%s gates=%s", message.chat_id, GATES_OFF if approved else GATES_ON
+    )
+    await message.reply_text(GATES_STATE[approved] + (GATES_FROM_NEXT_RUN if asked else ""))
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not message.text or not permitted(message):
@@ -314,7 +358,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
-            run, start, redo = started_run(new_run_id(), text=message.text), FIRST_STAGE, None
+            run = started_run(new_run_id(), message.chat_id, text=message.text)
+            start, redo = FIRST_STAGE, None
             voice = False
             await asyncio.to_thread(
                 start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
@@ -375,7 +420,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         dropped = await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
-        run = started_run(run_id, audio=audio)
+        run = started_run(run_id, message.chat_id, audio=audio)
         await asyncio.to_thread(
             start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
         )
@@ -730,6 +775,7 @@ def main() -> None:
         .build()
     )
     application.add_handler(CommandHandler("start", on_start))
+    application.add_handler(CommandHandler("gates", on_gates))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
     application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
