@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -16,6 +16,9 @@ from telegram.ext import Application, ContextTypes
 
 from app import bot
 from app.bot import (
+    ASSEMBLE,
+    ASSEMBLE_ASKED,
+    ASSEMBLE_BUTTON,
     BROKEN_REDO,
     BUSY,
     EMPTY,
@@ -31,6 +34,7 @@ from app.bot import (
     ASK_AGAIN,
     NOTHING_HEARD,
     PICK_ONE,
+    QUESTION_TAIL,
     STALE_BUTTON,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
@@ -40,6 +44,7 @@ from app.bot import (
     finished_text,
     follow,
     main,
+    on_assemble_button,
     on_choice_button,
     on_gate_button,
     on_start,
@@ -60,6 +65,7 @@ from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import (
     BRIEF,
+    BRIEF_QUESTION,
     CANDIDATES,
     ISSUES_JSON,
     ISSUES_MD,
@@ -69,7 +75,9 @@ from app.pipeline import (
     stages_between,
 )
 from app.run import Pause, Redo, Run, walk
+from app.dialog import Turn
 from app.store import (
+    AWAITING_ANSWER,
     AWAITING_GATE,
     DROPPED,
     FAILED,
@@ -96,6 +104,7 @@ class FakeStore:
         self.sources: dict[str, str] = {}
         self.approved: dict[str, bool] = {}
         self.started: list[tuple[str, int, str]] = []
+        self.turns: dict[str, list[Turn]] = {}
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
@@ -106,6 +115,9 @@ class FakeStore:
 
     def waiting_for(self, chat_id: int) -> Stopped | None:
         return self.stops.get(chat_id)
+
+    def add_turn(self, run_id: str, question: str, answer: str) -> None:
+        self.turns.setdefault(run_id, []).append(Turn(question=question, answer=answer))
 
     def start_run(
         self, run_id: str, chat_id: int, source: str, lang: str, auto_approve: bool
@@ -151,6 +163,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     fake = FakeStore()
     for name in (
         "waiting_for",
+        "add_turn",
         "start_run",
         "mark_stage",
         "stop_run",
@@ -1775,3 +1788,208 @@ async def test_a_stopped_run_keeps_its_own_gates_after_the_chat_switched_them_of
     await on_gates(an_update(TextChat("/gates off")), NO_CONTEXT)
 
     assert not bot.continued(stopped).auto_approve
+
+
+QUESTION_ASKED = "Сколько человек в команде и как часто они смотрят в Trello?\n"
+
+
+def a_stopped_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    turns: tuple[Turn, ...] = (),
+    source: str = "text",
+) -> Stopped:
+    """Прогон, ждущий ответа на вопрос брифа: вопрос лежит файлом, ходы помнит строка."""
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    root = tmp_path / "runs" / "прогон"
+    (root / "outputs").mkdir(parents=True, exist_ok=True)
+    (root / BRIEF_QUESTION).write_text(QUESTION_ASKED, encoding="utf-8")
+    return Stopped(
+        run_id="прогон",
+        lang="ru",
+        source=source,
+        auto_approve=False,
+        kind="answer",
+        stage="brief",
+        artifact=BRIEF_QUESTION,
+        turns=turns,
+    )
+
+
+def an_assemble_button(run_id: str) -> ButtonChat:
+    return ButtonChat(f"{ASSEMBLE}:{run_id}")
+
+
+def walk_asking(question: str) -> Walking:
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        (run.root / BRIEF_QUESTION).write_text(question, encoding="utf-8")
+        return Pause(stage="brief", artifact=BRIEF_QUESTION, kind="answer")
+
+    return walking
+
+
+@pytest.mark.asyncio
+async def test_a_question_reaches_the_person_as_it_was_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Вопрос идёт сообщением, а не файлом: он на строку, и отвечать на документ неудобно."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_asking(QUESTION_ASKED))
+    chat = TextChat("Идея")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert chat.edits[-1] == f"{QUESTION_ASKED.strip()}\n\n{QUESTION_TAIL}"
+    assert chat.documents == []
+    assert store.status[run_id] == AWAITING_ANSWER
+    assert store.stops[12].artifact == BRIEF_QUESTION
+
+
+@pytest.mark.asyncio
+async def test_the_question_carries_the_button_that_ends_the_dialog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Кнопка называет прогон, но не место остановки: вопрос у прогона один за раз."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_asking(QUESTION_ASKED))
+    chat = TextChat("Идея")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    keyboard = chat.keyboards[-1]
+    assert isinstance(keyboard, InlineKeyboardMarkup)
+    run_id = store.started[0][0]
+    assert [
+        (button.text, button.callback_data) for button in keyboard.inline_keyboard[0]
+    ] == [(ASSEMBLE_BUTTON, f"{ASSEMBLE}:{run_id}")]
+
+
+@pytest.mark.asyncio
+async def test_the_text_after_a_question_goes_back_into_brief_as_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Ответ возвращается в ту же стадию, а ход остаётся в строке: сообщение её не переживёт."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_question(tmp_path, monkeypatch))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_text(an_update(TextChat("Пятеро, смотрят каждый день")), NO_CONTEXT)
+
+    assert seen == [
+        (
+            "прогон",
+            "brief",
+            Redo(
+                kind="answer",
+                user_edit="Пятеро, смотрят каждый день",
+                artifact=BRIEF_QUESTION,
+            ),
+        )
+    ]
+    assert store.turns["прогон"] == [
+        Turn(question=QUESTION_ASKED, answer="Пятеро, смотрят каждый день")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_assemble_button_leaves_the_stage_nothing_but_the_brief(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Кнопка, которая кончает диалог, обязана его кончить: ещё один вопрос — тот же тупик."""
+    listed(monkeypatch, "12")
+    said = (Turn(question="Кто пользователь?\n", answer="Наша же команда"),)
+    store.stop(12, a_stopped_question(tmp_path, monkeypatch, turns=said))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_assemble_button(a_press(an_assemble_button("прогон")), NO_CONTEXT)
+
+    assert seen == [
+        (
+            "прогон",
+            "brief",
+            Redo(
+                kind="answer",
+                user_edit=ASSEMBLE_ASKED,
+                artifact=BRIEF_QUESTION,
+                turns=said,
+                closes_branch=BRIEF_QUESTION,
+            ),
+        )
+    ]
+    # Человек не ответил на вопрос, а прекратил разговор: ответ за него был бы выдуманным.
+    assert "прогон" not in store.turns
+
+
+@pytest.mark.asyncio
+async def test_the_last_answer_of_the_budget_ends_the_dialog_without_the_button(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Иначе спрашивать можно бесконечно, а каждый вопрос — вызов модели и круг ожидания."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(settings, "max_brief_questions", 2)
+    said = (Turn(question="Кто пользователь?\n", answer="Наша же команда"),)
+    store.stop(12, a_stopped_question(tmp_path, monkeypatch, turns=said))
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+
+    await on_text(an_update(TextChat("Пятеро")), NO_CONTEXT)
+
+    redo = seen[0][2]
+    assert redo is not None
+    assert redo.closes_branch == BRIEF_QUESTION
+    assert redo.user_edit == f"Пятеро\n\n{ASSEMBLE_ASKED}"
+    assert store.turns["прогон"] == [Turn(question=QUESTION_ASKED, answer="Пятеро")]
+
+
+@pytest.mark.asyncio
+async def test_the_assemble_button_of_a_run_that_moved_on_moves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Прогон дошёл до ворот: ответ вернул бы его в brief и выбросил бриф, которого он ждёт."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_gate(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = an_assemble_button("прогон")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_assemble_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert "refusal=stale_button" in caplog.text
+    assert seen == []
+    assert store.stops[12] == stopped
+
+
+@pytest.mark.asyncio
+async def test_a_broken_answer_keeps_the_question_so_it_can_be_answered_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Снять остановку до удачного повтора значило бы потерять весь разговор на первом сбое."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_question(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    chat = TextChat("Пятеро")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == BROKEN_REDO["answer"].format(run_id="прогон")
+    assert store.stops[12].kind == "answer"
+
+
+def test_every_kind_of_stop_has_something_to_say_when_the_redo_falls() -> None:
+    """Забытый род оставил бы человека без единого слова о сорвавшемся повторе."""
+    assert set(BROKEN_REDO) == set(get_args(StopKind))

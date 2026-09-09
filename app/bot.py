@@ -37,9 +37,19 @@ from telegram.ext import (
 
 from app.candidates import Candidates, Idea, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
+from app.dialog import budget_spent
 from app.ingest import new_run_id
 from app.models import IssuesFile
-from app.pipeline import BRIEF, ISSUES_JSON, NAMES, Stage, StopKind, after, stages_between
+from app.pipeline import (
+    BRIEF,
+    BRIEF_QUESTION,
+    ISSUES_JSON,
+    NAMES,
+    Stage,
+    StopKind,
+    after,
+    stages_between,
+)
 from app.publish import journal_of
 from app.render import backlog_digest, brief_digest
 from app.run import Pause, Redo, Run, read_artifact, walk
@@ -50,6 +60,7 @@ from app.store import (
     one_bot_per_database,
     PUBLISHED,
     Stopped,
+    add_turn,
     drop_stop,
     fail_orphans,
     finish_run,
@@ -143,6 +154,7 @@ BROKEN_REDO: dict[StopKind, str] = {
     "choice": "Не получилось продолжить, но запись цела. Ответьте ещё раз — кнопкой или номером."
     " (прогон {run_id})",
     "gate": "Не получилось переделать, но прогон цел. Пришлите правку ещё раз. (прогон {run_id})",
+    "answer": "Не получилось продолжить, но прогон цел. Ответьте ещё раз. (прогон {run_id})",
 }
 
 # Ворота (SPEC §3.2). Артефакт уходит человеку файлом, в сообщении — то, что о нём можно
@@ -162,6 +174,20 @@ NEXT, EDIT, STOP = "next", "edit", "stop"
 NO_RUN = "-"
 
 GATE_BUTTONS = ((NEXT, "Дальше"), (EDIT, "Править"), (STOP, "Стоп"))
+
+# brief-диалог (SPEC §3.3). Вопрос уходит человеку сообщением, а не файлом: он на одну строку,
+# и отвечать на приложенный документ неудобно.
+QUESTION_TAIL = "Ответьте сообщением. Или нажмите «Собирай» — соберу бриф из того, что есть."
+
+ASSEMBLE = "assemble"
+
+ASSEMBLE_BUTTON = "Собирай"
+
+# Правка, которой кончается диалог. Уходит стадии словами, а не одним запретом ветки: запрет
+# она узнала бы отказом после лишнего вызова, а сказанное вслух стоит ноль.
+ASSEMBLE_ASKED = (
+    "Хватит вопросов: собери бриф из того, что уже есть, незакрытое пометь [уточнить: ...]."
+)
 
 LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
 
@@ -380,6 +406,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info("answer=edit run=%s chat=%s", run.run_id, message.chat_id)
             start = stopped.stage
             redo = Redo(kind="gate", user_edit=message.text.strip(), artifact=stopped.artifact)
+        elif stopped.kind == "answer":
+            run, voice = continued(stopped), stopped.voice
+            redo = await brief_answer(message, run, stopped, message.text.strip())
+            if redo is None:
+                return
+            start = stopped.stage
         else:
             run, voice = continued(stopped), stopped.voice
             redo = await choice_answer(message, run, stopped, message.text, "text")
@@ -533,6 +565,47 @@ async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo, voice)
 
 
+async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Собирай»: диалог брифа кончается, стадия собирает его из того, что уже сказано."""
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("brief=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    run_id = assembling_run(query)
+    if run_id is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    if running.locked():
+        await refuse(message, "busy", BUSY, run=run_id, brief=ASSEMBLE)
+        return
+
+    async with running:
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is None or stopped.kind != "answer" or stopped.run_id != run_id:
+            await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
+            return
+        logger.info("brief=%s run=%s chat=%s", ASSEMBLE, run_id, message.chat_id)
+        # Ход не записывается: человек не ответил на вопрос, а прекратил разговор, и
+        # придуманный за него ответ был бы выдуманными данными (CLAUDE.md §5).
+        redo = Redo(
+            kind="answer",
+            user_edit=ASSEMBLE_ASKED,
+            artifact=stopped.artifact,
+            turns=stopped.turns,
+            closes_branch=BRIEF_QUESTION,
+        )
+        run, voice = continued(stopped), stopped.voice
+        # Клавиатуру не снимаем, как и на «Править»: сорвавшийся повтор возвращает остановку.
+        note = await message.reply_text(progress_text(run, done_before(stopped.stage), voice))
+        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo, voice)
+
+
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or not permitted(message):
@@ -660,6 +733,48 @@ async def choice_answer(
     return Redo(kind="choice", user_edit=edit, artifact=stopped.artifact)
 
 
+async def brief_answer(
+    message: Message, run: Run, stopped: Stopped, written: str
+) -> Redo | None:
+    """Ответ на вопрос брифа как повтор стадии. None — повторять нечего, человеку уже сказано.
+
+    Ход записывается до повтора: сообщение в чате прогон не переживёт, а строка переживёт, и
+    следующий вопрос стадия задаёт, видя весь разговор. Последний по бюджету ответ кончает
+    диалог тем же способом, что и кнопка: спрашивать дальше уже нечего.
+    """
+    try:
+        question = await asyncio.to_thread(read_artifact, run.root, stopped.artifact)
+    except OSError:
+        # Файлы прогона мог унести `make clean-runs`: отвечать человеку нечем, и остановка
+        # после этого копила бы один и тот же отказ на каждый ответ.
+        logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
+        await asyncio.to_thread(finish_run, run.run_id, FAILED)
+        await message.reply_text(LOST.format(run_id=run.run_id))
+        return None
+    try:
+        await asyncio.to_thread(add_turn, run.run_id, question, written)
+    except SQLAlchemyError:
+        # Потерянный ход стоит повторённого вопроса, а поднятое исключение — всего прогона,
+        # за который человек уже заплатил четырьмя стадиями.
+        logger.exception("Прогон %s не записал ход диалога", run.run_id)
+    asked = len(stopped.turns) + 1
+    over = budget_spent(asked)
+    logger.info(
+        "brief=%s asked=%d run=%s chat=%s",
+        ASSEMBLE if over else "answer",
+        asked,
+        run.run_id,
+        message.chat_id,
+    )
+    return Redo(
+        kind="answer",
+        user_edit=f"{written}\n\n{ASSEMBLE_ASKED}" if over else written,
+        artifact=stopped.artifact,
+        turns=stopped.turns,
+        closes_branch=BRIEF_QUESTION if over else None,
+    )
+
+
 def out_of_range(found: Candidates) -> str:
     return (
         f"Идей всего {len(found.ideas)}. Пришлите номер от 1 до {len(found.ideas)} "
@@ -679,6 +794,15 @@ def choice_text(found: Candidates) -> str:
     if not listed:
         return "\n".join([NOTHING_HEARD, "", ASK_AGAIN])
     return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
+
+
+def assemble_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    # Кнопка называет прогон, но не место остановки, в отличие от воротной: вопрос у прогона
+    # один за раз, и повтор по нему сужает выход стадии до брифа — вторым вопросом тот же
+    # прогон встать уже не может.
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(ASSEMBLE_BUTTON, callback_data=f"{ASSEMBLE}:{run_id}")]]
+    )
 
 
 def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
@@ -742,6 +866,11 @@ def button_of(query: CallbackQuery, fields: int) -> list[str] | None:
     return parts if len(parts) == fields else None
 
 
+def question_text(run: Run, stop: Pause) -> str:
+    """Вопрос стадии как он есть плюс просьба ответить: пересказывать его нечем."""
+    return f"{read_artifact(run.root, stop.artifact).strip()}\n\n{QUESTION_TAIL}"
+
+
 def decision_of(query: CallbackQuery) -> tuple[str, str, str] | None:
     """Прогон, ворота и решение из данных кнопки."""
     parts = button_of(query, 4)
@@ -752,6 +881,12 @@ def choice_of(query: CallbackQuery) -> tuple[str, str] | None:
     """Прогон и номер идеи из данных кнопки. Нечисловой номер ушёл бы в стадию правкой из мусора."""
     parts = button_of(query, 3)
     return (parts[1], parts[2]) if parts and parts[2].isdecimal() else None
+
+
+def assembling_run(query: CallbackQuery) -> str | None:
+    """Прогон, которому сказали кончать спрашивать."""
+    parts = button_of(query, 2)
+    return parts[1] if parts else None
 
 
 def choice_ending(run: Run, stop: Pause) -> Ending:
@@ -781,6 +916,13 @@ async def outcome(
         if waiting and waiting.kind == "choice":
             logger.info("stop=choice run=%s", run.run_id)
             return choice_ending(run, waiting)
+        if waiting and waiting.kind == "answer":
+            logger.info("stop=answer run=%s", run.run_id)
+            return Ending(
+                text=question_text(run, waiting),
+                stop=waiting,
+                keyboard=assemble_keyboard(run.run_id),
+            )
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return Ending(
@@ -872,6 +1014,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
     application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
     application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
+    application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не
