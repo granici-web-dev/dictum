@@ -144,6 +144,10 @@ STALE_BUTTON = "Эти кнопки от прогона, который уже �
 
 NEXT, EDIT, STOP = "next", "edit", "stop"
 
+# Чего в строке лога нет: прогона не было, остановку не снимали. Пустое место читается как
+# оборванная строка, а прочерк — как ответ.
+NOTHING = "-"
+
 GATE_BUTTONS = ((NEXT, "Дальше"), (EDIT, "Править"), (STOP, "Стоп"))
 
 LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
@@ -293,7 +297,8 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Замок берётся ради остановки, а не ради приветствия: без него `/start`, посланный во время
     # прогона, снимал пустоту, а прогон в конце записывал остановку обратно.
     async with running:
-        await asyncio.to_thread(drop_stop, update.message.chat_id)
+        dropped = await asyncio.to_thread(drop_stop, update.message.chat_id)
+    logger.info("command=start chat=%s dropped=%s", update.message.chat_id, dropped or NOTHING)
     await update.message.reply_text(GREETING)
 
 
@@ -316,6 +321,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.to_thread(
                 start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
             )
+            logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
             # Текст на воротах и есть правка: тот же уговор, что и на выборе, и второго
             # состояния ожидания («нажал Править, теперь жду текст») он не заводит.
@@ -336,7 +342,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             edit = chosen_edit(message.text, found)
             if edit is None:
-                await refuse(message, "unknown_number", out_of_range(found))
+                await refuse(message, "unknown_number", out_of_range(found), run=run.run_id)
                 return
             # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него
             # нет, и «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
@@ -368,12 +374,15 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         # Голосовое всегда начинает новый прогон и снимает остановку: на стенде следующий
         # человек говорит голосом, и его запись не должна стать правкой к чужому выбору.
-        await asyncio.to_thread(drop_stop, message.chat_id)
+        dropped = await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
         run = started_run(run_id, audio=audio)
         await asyncio.to_thread(
             start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
+        )
+        logger.info(
+            "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NOTHING
         )
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
@@ -393,7 +402,15 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Решение человека на воротах. «Править» только просит текст: правку принимает `on_text`."""
     query, message = update.callback_query, update.effective_message
-    if query is None or message is None or not permitted(message):
+    if query is None:
+        return
+    if message is None:
+        # Сообщение с кнопкой Telegram отдал недоступным: отвечать человеку некуда, и молчание
+        # здесь — единственное место, где нажатие не оставляло бы следа вовсе.
+        logger.warning("gate=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
         return
     # Часы на кнопке крутятся, пока Telegram не получит ответ: снимаем их до всего остального.
     await query.answer()

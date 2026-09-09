@@ -215,14 +215,19 @@ def finish_run(run_id: str, status: str) -> None:
         )
 
 
-def drop_stop(chat_id: int) -> None:
-    """Человек ушёл от остановки сам: заговорил голосом, послал `/start` или нажал «Стоп»."""
+def drop_stop(chat_id: int) -> str | None:
+    """Человек ушёл от остановки сам: заговорил голосом, послал `/start` или нажал «Стоп».
+
+    Отдаёт брошенный прогон, чтобы бот назвал его в логе: без имени запись «остановку сняли»
+    не отличить от «остановки не было», а в чате это два разных события.
+    """
     with session() as opened:
-        opened.execute(
+        return opened.scalars(
             update(RunRow)
             .where(RunRow.chat_id == chat_id, RunRow.status.in_(STOP_STATUSES))
             .values(status=DROPPED, stopped_stage=None, stopped_artifact=None)
-        )
+            .returning(RunRow.id)
+        ).one_or_none()
 
 
 def waiting_for(chat_id: int) -> Stopped | None:

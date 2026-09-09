@@ -194,9 +194,14 @@ def test_a_gate_stop_collides_with_a_choice_stop_in_the_same_chat(db: None) -> N
 def test_leaving_the_choice_drops_the_stop_and_keeps_the_run(db: None) -> None:
     a_stopped_run()
 
-    drop_stop(12)
+    assert drop_stop(12) == "прогон"
 
     assert waiting_for(12) is None
+
+
+def test_dropping_a_stop_in_a_chat_that_has_none_names_no_run(db: None) -> None:
+    """Бот пишет это в лог: «остановку сняли» и «остановки не было» — два разных события."""
+    assert drop_stop(12) is None
 
 
 def test_a_gate_stop_is_found_with_its_kind_and_the_source_of_the_run(db: None) -> None:

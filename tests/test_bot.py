@@ -131,10 +131,12 @@ class FakeStore:
         self.status[run_id] = status
         self.stops.pop(self.chats.get(run_id, 0), None)
 
-    def drop_stop(self, chat_id: int) -> None:
+    def drop_stop(self, chat_id: int) -> str | None:
         left = self.stops.pop(chat_id, None)
-        if left:
-            self.status[left.run_id] = DROPPED
+        if left is None:
+            return None
+        self.status[left.run_id] = DROPPED
+        return left.run_id
 
 
 @pytest.fixture(autouse=True)
@@ -1191,3 +1193,93 @@ async def test_the_decision_on_a_gate_leaves_a_line_to_count(
         await on_gate_button(a_press(ButtonChat("прогон", "stop")), NO_CONTEXT)
 
     assert "gate=stop run=прогон chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_leaves_a_line_naming_the_run_it_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`/start` не оставлял в логе ничего: по нему нельзя было сказать, чей прогон оборвался."""
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_start(an_update(TextChat("/start")), NO_CONTEXT)
+
+    assert "command=start chat=12 dropped=прогон" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_without_a_stop_says_so_with_a_dash(
+    caplog: pytest.LogCaptureFixture, store: FakeStore
+) -> None:
+    """Пустое место читалось бы как оборванная строка, а прочерк — как ответ."""
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_start(an_update(TextChat("/start")), NO_CONTEXT)
+
+    assert "command=start chat=12 dropped=-" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_new_text_run_names_itself_in_the_log_before_it_starts_spending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Первой записью прогона была стадия, а она не знает ни чата, ни номера прогона."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_recording([]))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(TextChat("Идея")), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert f"start=text run={run_id} chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_voice_names_the_stop_it_took_away_from_the_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """На стенде следующий человек говорит голосом: чей выбор при этом пропал — вопрос к логу."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "save_voice", saved_empty)
+    monkeypatch.setattr(bot, "walk", walk_recording([]))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
+
+    started = store.started[0][0]
+    assert f"start=voice run={started} chat=12 dropped=прогон" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_number_outside_the_list_names_the_run_it_was_meant_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отказ без прогона не сложить с остановкой, которую человек не смог пройти."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(TextChat("7")), NO_CONTEXT)
+
+    assert "refusal=unknown_number chat=12 run=прогон" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_button_whose_message_is_gone_still_leaves_a_line(
+    caplog: pytest.LogCaptureFixture, store: FakeStore
+) -> None:
+    """Единственный молчаливый выход обработчика: отвечать некуда, но нажатие было."""
+    chat = ButtonChat("прогон", "next")
+    press = cast(Update, SimpleNamespace(callback_query=chat, effective_message=None))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_gate_button(press, NO_CONTEXT)
+
+    assert "gate=lost" in caplog.text
+    assert chat.answered == 1
