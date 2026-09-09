@@ -109,13 +109,6 @@ def produced_by(path: str) -> str | None:
     return None
 
 
-def after(name: str) -> str | None:
-    """Стадия следом за названной; None у последней. Статус прогона — стадия, в которой он
-    сейчас, а обход докладывает о законченных, и следующая за ней и есть текущая."""
-    following = NAMES.index(stage_named(name).name) + 1
-    return NAMES[following] if following < len(NAMES) else None
-
-
 def stages_between(start: str, stop: str) -> tuple[Stage, ...]:
     first = NAMES.index(stage_named(start).name)
     last = NAMES.index(stage_named(stop).name)

@@ -24,9 +24,10 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from app.config import settings
+from app.config import ConfigError, settings
 from app.pipeline import NAMES
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,29 @@ class Orphan(BaseModel):
 
 @cache
 def engine() -> Engine:
-    return create_engine(settings.database_url)
+    # Соединение из пула переживает и сон ноутбука, и перезапуск Postgres — но только на бумаге:
+    # первый же запрос по протухшему валится, а если это `mark_stage` посреди обхода, прогон
+    # умирает из-за икоты базы. Проверка соединения стоит один лишний round-trip.
+    return create_engine(settings.database_url, pool_pre_ping=True)
+
+
+def ensure_schema() -> None:
+    """Схема на месте? Забытый `make db` иначе вылезает сырой трассировкой из бота.
+
+    Проверяется рядом с ключами и ffmpeg (SPEC §7.3) и по той же причине: узнавать о настройке
+    на первом сообщении со стенда поздно, человек прочтёт это как поломку бота.
+    """
+    try:
+        with engine().connect() as connection:
+            connection.execute(select(RunRow.id).limit(1))
+    except OperationalError as error:
+        raise ConfigError(
+            f"База недоступна по {settings.database_url}. Поднимите её: make up."
+        ) from error
+    except ProgrammingError as error:
+        raise ConfigError(
+            "В базе нет таблицы runs. Накатите миграции: make db."
+        ) from error
 
 
 @contextmanager
@@ -122,13 +145,19 @@ def start_run(run_id: str, chat_id: int, source: str, lang: str, auto_approve: b
 
 
 def mark_stage(run_id: str, status: str, lang: str) -> None:
-    """Прогон дошёл до стадии `status`.
+    """Прогон закончил стадию `status` и дальше неё не ушёл.
 
-    Язык пишется тем же ходом: его называет Whisper в ingest, и до записи в строку он живёт
-    только в памяти обхода, а владеет им строка (§4.1).
+    Не следующую: обход докладывает о законченной, а пойдёт ли он дальше, ещё неизвестно —
+    на выборе он тут же встаёт, и строка со стадией, которая не начиналась, врала бы про место
+    остановки. Язык пишется тем же ходом: его называет Whisper в ingest, и до записи в строку
+    он живёт только в памяти обхода, а владеет им строка (§4.1).
     """
     with session() as opened:
-        opened.execute(update(RunRow).where(RunRow.id == run_id).values(status=status, lang=lang))
+        opened.execute(
+            update(RunRow)
+            .where(RunRow.id == run_id)
+            .values(status=status, lang=lang, stopped_stage=None, stopped_artifact=None)
+        )
 
 
 def stop_on_choice(run_id: str, stage: str, artifact: str) -> None:
@@ -187,5 +216,5 @@ def fail_orphans() -> list[Orphan]:
         rows = opened.scalars(select(RunRow).where(RunRow.status.in_(WORKING))).all()
         orphans = [Orphan(run_id=row.id, chat_id=row.chat_id, stage=row.status) for row in rows]
         for row in rows:
-            row.status = FAILED
+            row.status, row.stopped_stage, row.stopped_artifact = FAILED, None, None
         return orphans

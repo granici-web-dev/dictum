@@ -23,6 +23,7 @@
 
 ## Команды
 - `make up` — postgres в docker
+- `make db` — миграции (`alembic upgrade head`), после `make up` и после каждого `git pull`
 - `make bot` — бот в polling-режиме
 - `make test` — ruff + mypy + pytest
 - `make run-text TEXT="текст идеи"` — прогон пайплайна без Telegram (для отладки стадий)

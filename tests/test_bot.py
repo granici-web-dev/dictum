@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 from telegram import Message, Update, Voice
+from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
 from app import bot
@@ -26,6 +27,7 @@ from app.bot import (
     NOTHING_HEARD,
     PICK_ONE,
     VOICE_INGEST_LABEL,
+    VOICE_NOT_TAKEN,
     allowed_chats,
     cards_published,
     chosen_edit,
@@ -45,7 +47,7 @@ from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
 from app.pipeline import CANDIDATES, NAMES, Stage, stages_between
 from app.run import Pause, Redo, Run, walk
-from app.store import AWAITING_CHOICE, Stopped
+from app.store import AWAITING_CHOICE, DROPPED, FAILED, NO_TASK, PUBLISHED, Stopped
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
@@ -93,7 +95,9 @@ class FakeStore:
         self.stops.pop(self.chats.get(run_id, 0), None)
 
     def drop_stop(self, chat_id: int) -> None:
-        self.stops.pop(chat_id, None)
+        left = self.stops.pop(chat_id, None)
+        if left:
+            self.status[left.run_id] = DROPPED
 
 
 @pytest.fixture(autouse=True)
@@ -285,7 +289,7 @@ def walk_reporting_every_stage(
 
 @pytest.mark.asyncio
 async def test_the_link_is_the_last_thing_the_message_shows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
     """Правки прогресса не ждут ответа Telegram и однажды затёрли ссылку списком галочек."""
     journal = tmp_path / "outputs/publish.json"
@@ -303,6 +307,7 @@ async def test_the_link_is_the_last_thing_the_message_shows(
 
     assert note.edits[-1] == finished_text(tmp_path)
     assert len(note.edits) == len(NAMES) + 1
+    assert store.status["прогон"] == PUBLISHED
 
 
 def walk_breaking(
@@ -538,9 +543,10 @@ async def test_a_number_outside_the_list_keeps_the_run_waiting(
 
 
 @pytest.mark.asyncio
-async def test_the_list_lives_in_the_stop_so_a_lost_file_cannot_swallow_the_answer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
-    """Ответ разбирался повторным чтением candidates.md, и стёртый файл ронял обработчик молча."""
+async def test_the_stop_is_answered_from_the_file_the_run_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Список живёт файлом в прогоне: строка помнит только место, куда возвращаться."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
@@ -548,8 +554,27 @@ async def test_the_list_lives_in_the_stop_so_a_lost_file_cannot_swallow_the_answ
 
     await on_text(an_update(TextChat("2")), NO_CONTEXT)
 
-    assert not (tmp_path / CANDIDATES).exists()
     assert [start for _, start, _ in seen] == ["intake"]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_whose_file_is_gone_says_so_and_closes_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """`make clean-runs` между репетициями уносит расшифровку: повторять нечего, ждать тоже."""
+    listed(monkeypatch, "12")
+    stopped = a_stopped_choice(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    (tmp_path / "runs" / "прогон" / CANDIDATES).unlink()
+    seen: list[tuple[str, str, Redo | None]] = []
+    monkeypatch.setattr(bot, "walk", walk_recording(seen))
+    chat = TextChat("2")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [LOST.format(run_id="прогон")]
+    assert store.status["прогон"] == FAILED
+    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -682,7 +707,29 @@ async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
     await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
 
     assert 12 not in store.stops
+    assert store.status["прогон"] == DROPPED
     assert [(start, redo) for _, start, redo in seen] == [("ingest", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_voice_that_never_arrives_closes_its_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Незакрытая строка осталась бы в рабочем статусе, и следующий старт сказал бы человеку,
+    что прерван прогон, которого не было."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+
+    async def not_downloaded(voice: Voice, target: Path) -> None:
+        raise TelegramError("сеть отвалилась")
+
+    monkeypatch.setattr(bot, "save_voice", not_downloaded)
+    chat = VoiceChat(a_voice(3))
+
+    await on_voice(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == VOICE_NOT_TAKEN
+    assert store.status[store.started[0][0]] == FAILED
 
 
 @pytest.mark.asyncio
@@ -774,3 +821,4 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
 
     assert store.stops == {}
     assert chat.edits[-1].startswith(NOTHING_HEARD)
+    assert store.status[store.started[0][0]] == NO_TASK

@@ -23,13 +23,14 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from app.candidates import Candidates, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.ingest import new_run_id
-from app.pipeline import ISSUES_JSON, NAMES, Stage, after, stages_between
+from app.pipeline import ISSUES_JSON, NAMES, Stage, stages_between
 from app.publish import journal_of
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
     AWAITING_CHOICE,
     FAILED,
     NO_TASK,
+    ensure_schema,
     PUBLISHED,
     Stopped,
     drop_stop,
@@ -40,7 +41,7 @@ from app.store import (
     stop_on_choice,
     waiting_for,
 )
-from app.transcribe import FFMPEG_MISSING, TranscriptionError, ffmpeg_installed
+from app.transcribe import FFMPEG_MISSING, NothingHeard, TranscriptionError, ffmpeg_installed
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
 # "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
@@ -329,6 +330,9 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await save_voice(message.voice, audio)
         except TelegramError:
             logger.exception("Прогон %s не забрал голосовое", run_id)
+            # Строку закрываем здесь же: незакрытая осталась бы в рабочем статусе навсегда, и
+            # следующий старт сказал бы человеку, что прерван прогон, которого не было.
+            await asyncio.to_thread(finish_run, run_id, FAILED)
             await note.edit_text(VOICE_NOT_TAKEN)
             return
         await follow(note, run, message.date)
@@ -364,9 +368,7 @@ async def follow(
         # прямо отсюда: этот поток и так не цикл событий, а язык прогона после ingest назвал
         # Whisper, и до записи он живёт только в памяти обхода (§4.1).
         done.append(stage.name)
-        following = after(stage.name)
-        if following:
-            mark_stage(run.run_id, following, run.lang)
+        mark_stage(run.run_id, stage.name, run.lang)
         progress.append(
             asyncio.run_coroutine_threadsafe(
                 note.edit_text(progress_text(run, done)), loop
@@ -465,10 +467,15 @@ async def outcome(
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)
-    except TranscriptionError as error:
-        # Текст такой ошибки написан человеку, а не в лог: показываем как есть.
-        logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
+    except NothingHeard as error:
+        logger.warning("Прогон %s не услышал в записи ничего: %s", run.run_id, error)
         return Ending(text=str(error), status=NO_TASK)
+    except TranscriptionError as error:
+        # Текст такой ошибки написан человеку, а не в лог: показываем как есть. Статус `failed`,
+        # а не `no_task`: сломанный ffmpeg — это поломка стенда, и отчёт репетиции не должен
+        # считать её записью без задания.
+        logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
+        return Ending(text=str(error), status=FAILED)
     except OSError:
         # Файлы прогона мог унести `make clean-runs` между репетициями. Повторять нечего:
         # остановка после этого копила бы один и тот же отказ на каждый ответ человека.
@@ -520,6 +527,7 @@ def main() -> None:
         )
     if not ffmpeg_installed():
         raise ConfigError(FFMPEG_MISSING)
+    ensure_schema()
 
     # Без concurrent_updates бот разбирает обновления по одному и второе сообщение достаёт из
     # очереди только после того, как вернётся обработчик первого, то есть через весь прогон.

@@ -54,6 +54,13 @@ class TranscriptionError(RuntimeError):
     """Сообщение пишется человеку: бот показывает его как есть, не пряча в лог."""
 
 
+
+
+class NothingHeard(TranscriptionError):
+    """Расшифровка удалась, а говорить было нечего: пустая запись, не поломка.
+
+    Разные вещи и по строке в `runs`: сломанный ffmpeg — `failed`, тишина — `no_task`.
+    """
 def ffmpeg_installed() -> bool:
     # OSError, а не только FileNotFoundError: файл бывает на месте, но без права на запуск, и
     # тогда старт должен назвать причину, а не упасть трассировкой.
@@ -131,7 +138,7 @@ def transcribe(audio: Path) -> Transcription:
     )
     text = answer.text.strip()
     if not text:
-        raise TranscriptionError(NOTHING_HEARD)
+        raise NothingHeard(NOTHING_HEARD)
     if not settings.keep_audio:
         audio.unlink()
         mp3.unlink()

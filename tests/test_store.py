@@ -2,6 +2,10 @@
 
 SQLite подменил бы диалект и спрятал ровно то, ради чего таблица заводится: частичный уникальный
 индекс и `timestamptz`. Базы нет — тесты пропускаются, а не падают: `make up` не у всех поднят.
+
+Работают тесты в отдельной базе `dictum_test`. Раньше они чистили ту, на которую смотрит
+`DATABASE_URL`, а это база стенда: `make test` после живого прогона стёр его строки, и разбирать
+пропажу пришлось глазами.
 """
 
 from collections.abc import Iterator
@@ -12,7 +16,8 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import delete
+from sqlalchemy import delete, text
+from sqlalchemy.engine import make_url
 
 from app.config import settings
 from app.store import (
@@ -36,38 +41,65 @@ from app.store import (
 pytestmark = [pytest.mark.db, pytest.mark.timeout(30)]
 
 CANDIDATES = "outputs/candidates.md"
+TEST_DATABASE = "dictum_test"
 
 
-def unreachable() -> bool:
-    probe = sqlalchemy.create_engine(
-        settings.database_url, connect_args={"connect_timeout": 2}
+def address_of_test_database() -> str:
+    # render_as_string, а не str(): у SQLAlchemy `str(URL)` прячет пароль звёздочками, и
+    # подключение уходит с паролем «***», а отвечает на это сервер отказом в аутентификации.
+    return make_url(settings.database_url).set(database=TEST_DATABASE).render_as_string(
+        hide_password=False
+    )
+
+
+def created_test_database() -> bool:
+    """Заводит `dictum_test` рядом со стендовой базой. False — сервера нет, тестам нечего ждать.
+
+    Подключается к стендовой базе, а не к служебной `postgres`: `CREATE DATABASE` можно послать
+    из любой, а на этой машине служебная отвечает отказом в аутентификации.
+    """
+    server = sqlalchemy.create_engine(
+        settings.database_url,
+        connect_args={"connect_timeout": 2},
+        isolation_level="AUTOCOMMIT",
     )
     try:
-        with probe.connect():
-            return False
-    except sqlalchemy.exc.OperationalError:
+        with server.connect() as connection:
+            known = connection.scalar(
+                text("select 1 from pg_database where datname = :name"),
+                {"name": TEST_DATABASE},
+            )
+            if not known:
+                connection.execute(text(f'create database "{TEST_DATABASE}"'))
         return True
+    except sqlalchemy.exc.OperationalError:
+        return False
     finally:
-        probe.dispose()
+        server.dispose()
 
 
 @pytest.fixture(scope="session")
 def migrated() -> Iterator[None]:
-    if unreachable():
+    if not created_test_database():
         pytest.skip(f"Postgres недоступен на {settings.database_url}: сделайте make up")
+    stand = settings.database_url
+    settings.database_url = address_of_test_database()
+    engine.cache_clear()
     command.upgrade(Config("alembic.ini"), "head")
     yield
+    engine().dispose()
+    engine.cache_clear()
+    settings.database_url = stand
 
 
 @pytest.fixture
 def db(migrated: None) -> Iterator[None]:
-    # Прибираем и после себя: та же база стоит на стенде, и строка «прогон» из теста однажды
-    # попала в выдачу живого прогона, где её пришлось объяснять.
+    # Проверка не церемония: строку `delete` без `where` отделяет от базы стенда одна настройка,
+    # и однажды она уже смотрела не туда.
+    assert settings.database_url.endswith(TEST_DATABASE)
     with session() as opened:
         opened.execute(delete(RunRow))
     yield
-    with session() as opened:
-        opened.execute(delete(RunRow))
 
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
@@ -76,7 +108,12 @@ def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
 
 
 def test_the_migration_is_what_the_models_say(db: None) -> None:
-    """Индекс и типы объявлены дважды: в модели и в миграции, и разойтись им нечем помешать."""
+    """Колонки, их типы, длины и nullability в миграции и в модели совпадают.
+
+    Чего эта сверка не видит: предиката частичного индекса и server default — `compare_metadata`
+    их не сравнивает (проверено подменой предиката на выдуманный, расхождений ноль). За тем, что
+    индекс уникален именно на `awaiting_choice`, следит тест про две остановки в одном чате.
+    """
     with engine().connect() as connection:
         context = MigrationContext.configure(connection)
 
@@ -143,6 +180,19 @@ def test_orphans_are_named_and_closed_but_finished_runs_are_left_alone(db: None)
     with session() as opened:
         assert opened.get(RunRow, "живой").status == FAILED  # type: ignore[union-attr]
         assert opened.get(RunRow, "готовый").status == PUBLISHED  # type: ignore[union-attr]
+
+
+def test_moving_on_forgets_where_the_run_had_stopped(db: None) -> None:
+    """Иначе строка в рабочем статусе носит место старой остановки, и §4 про неё врёт."""
+    a_stopped_run()
+
+    mark_stage("прогон", "brief", "ru")
+
+    with session() as opened:
+        row = opened.get(RunRow, "прогон")
+
+        assert row is not None
+        assert (row.stopped_stage, row.stopped_artifact) == (None, None)
 
 
 def test_a_stopped_run_keeps_where_it_stopped(db: None) -> None:
