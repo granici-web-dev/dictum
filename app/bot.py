@@ -419,12 +419,18 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     async with running:
-        run_id, decision = decision_of(query)
+        run_id, stage, decision = decision_of(query)
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
-        if stopped is None or stopped.kind != "gate" or stopped.run_id != run_id:
-            # Сообщение с воротами остаётся в чате навсегда, а остановку снимают голосовое,
-            # `/start` и «Стоп»: нажатая назавтра кнопка не должна двигать чужой прогон.
-            await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
+        if (
+            stopped is None
+            or stopped.kind != "gate"
+            or stopped.run_id != run_id
+            or stopped.stage != stage
+        ):
+            # Решение принимают на конкретных воротах, а не «где-то в этом прогоне». Сообщения
+            # с воротами живут в чате вечно, остановку снимают голосовое, `/start` и «Стоп», а
+            # прогон за это время уходит к следующим воротам: сверяем и то, и другое.
+            await refuse(message, "stale_button", STALE_BUTTON, run=run_id, gate=stage)
             return
         logger.info("gate=%s run=%s chat=%s", decision, run_id, message.chat_id)
         if decision != EDIT:
@@ -513,7 +519,9 @@ async def follow(
     if ending.stop and ending.stop.kind == "gate":
         # Артефакт целиком уходит файлом: подтвердить то, чего не видел, — не ворота, а кнопка.
         await note.reply_document(run.root / ending.stop.artifact)
-        await note.edit_text(ending.text, reply_markup=gate_keyboard(run.run_id))
+        await note.edit_text(
+            ending.text, reply_markup=gate_keyboard(run.run_id, ending.stop.stage)
+        )
     else:
         await note.edit_text(ending.text)
     # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
@@ -558,13 +566,15 @@ def choice_text(found: Candidates) -> str:
     return "\n".join([f"{NOTHING_HEARD} {DISCUSSED}", "", *listed, "", ASK_AGAIN])
 
 
-def gate_keyboard(run_id: str) -> InlineKeyboardMarkup:
-    # Прогон назван в самой кнопке: сообщения с воротами остаются в чате навсегда, и нажатую
-    # вчера надо отличить от сегодняшней раньше, чем она продолжит чужой прогон.
+def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
+    # Кнопка называет и прогон, и ворота, на которых она выросла. Одного прогона мало: «Править»
+    # кнопок не снимает, поэтому у прогона в чате остаётся живое сообщение прошлых ворот, и
+    # нажатое на нём «Дальше» уводило обход со стадии, где прогон стоит сейчас, — то есть
+    # публиковало бэклог, которого никто не подтверждал.
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(title, callback_data=f"gate:{run_id}:{decision}")
+                InlineKeyboardButton(title, callback_data=f"gate:{run_id}:{stage}:{decision}")
                 for decision, title in GATE_BUTTONS
             ]
         ]
@@ -579,10 +589,10 @@ def gate_text(run: Run, stop: Pause) -> str:
     return f"{brief_digest(read_artifact(run.root, stop.artifact))}\n\n{GATE_TAIL}"
 
 
-def decision_of(query: CallbackQuery) -> tuple[str, str]:
-    """Прогон и решение из данных кнопки. Их писал сам бот, разбирать их как чужой ввод незачем."""
-    _, run_id, decision = (query.data or "").split(":")
-    return run_id, decision
+def decision_of(query: CallbackQuery) -> tuple[str, str, str]:
+    """Прогон, ворота и решение из данных кнопки. Их писал сам бот, разбирать как ввод незачем."""
+    _, run_id, stage, decision = (query.data or "").split(":")
+    return run_id, stage, decision
 
 
 def choice_ending(run: Run, stop: Pause) -> Ending:

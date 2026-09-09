@@ -943,9 +943,9 @@ async def test_a_recording_with_nothing_in_it_is_not_worth_waiting_on(
 class ButtonChat(TextChat):
     """Нажатая кнопка: сам callback и сообщение, на котором она висела."""
 
-    def __init__(self, run_id: str, decision: str) -> None:
+    def __init__(self, run_id: str, decision: str, stage: str = "brief") -> None:
         super().__init__("")
-        self.data = f"gate:{run_id}:{decision}"
+        self.data = f"gate:{run_id}:{stage}:{decision}"
         self.answered = 0
         self.markups: list[object] = []
 
@@ -1037,9 +1037,9 @@ async def test_the_gate_message_carries_the_three_buttons_of_the_run(
     pressed = [(button.text, button.callback_data) for button in keyboard.inline_keyboard[0]]
     run_id = store.started[0][0]
     assert pressed == [
-        ("Дальше", f"gate:{run_id}:next"),
-        ("Править", f"gate:{run_id}:edit"),
-        ("Стоп", f"gate:{run_id}:stop"),
+        ("Дальше", f"gate:{run_id}:brief:next"),
+        ("Править", f"gate:{run_id}:brief:edit"),
+        ("Стоп", f"gate:{run_id}:brief:stop"),
     ]
 
 
@@ -1296,3 +1296,76 @@ async def test_a_button_whose_message_is_gone_still_leaves_a_line(
 
     assert "gate=lost" in caplog.text
     assert chat.answered == 1
+
+
+def walk_stopping_in_turn(stops: list[Pause], files: dict[str, str]) -> Walking:
+    """Обход, встающий там, где сказано, по одной остановке за вызов.
+
+    Когда остановки кончились, доходит до конца и публикует: лишний вызов обхода обязан
+    выглядеть как то, чем он и был бы вживую, — карточки на доске.
+    """
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        for path, content in files.items():
+            (run.root / path).write_text(content, encoding="utf-8")
+        if stops:
+            return stops.pop(0)
+        (run.root / "outputs/publish.json").write_text('{"I-001": {}}', encoding="utf-8")
+        return None
+
+    return walking
+
+
+@pytest.mark.asyncio
+async def test_a_button_of_the_gate_the_run_has_already_left_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """«Править» кнопок не снимает, поэтому у прогона остаётся живое сообщение прошлых ворот.
+
+    Нажатое на нём «Дальше» уводило обход со стадии, где прогон стоит сейчас: после ворот
+    decompose оно означало `after("decompose")`, то есть публикацию бэклога, которого никто не
+    подтверждал. Решение принимают на конкретных воротах, а не «где-то в этом прогоне».
+    """
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    artifacts = {BRIEF: REAL_BRIEF, ISSUES_JSON: REAL_ISSUES, ISSUES_MD: "# Backlog\n"}
+    at_brief = Pause(stage="brief", artifact=BRIEF, kind="gate")
+    at_decompose = Pause(stage="decompose", artifact=ISSUES_MD, kind="gate")
+    monkeypatch.setattr(bot, "walk", walk_stopping_in_turn([at_brief, at_decompose], artifacts))
+
+    await on_gate_button(a_press(ButtonChat("прогон", "edit")), NO_CONTEXT)
+    await on_text(an_update(TextChat("Убери пятый раздел")), NO_CONTEXT)
+    await on_gate_button(a_press(ButtonChat("прогон", "next")), NO_CONTEXT)
+
+    assert store.stops[12].stage == "decompose"
+
+    stale = ButtonChat("прогон", "next", stage="brief")
+    await on_gate_button(a_press(stale), NO_CONTEXT)
+
+    assert stale.replies == [STALE_BUTTON]
+    assert store.stops[12].stage == "decompose"
+    assert store.status["прогон"] == AWAITING_GATE
+
+
+@pytest.mark.asyncio
+async def test_the_button_carries_the_gate_it_grew_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_stopping_at_a_gate("brief", BRIEF, {BRIEF: REAL_BRIEF}))
+    chat = TextChat("Идея")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    keyboard = chat.keyboards[-1]
+    assert isinstance(keyboard, InlineKeyboardMarkup)
+    run_id = store.started[0][0]
+    assert [button.callback_data for button in keyboard.inline_keyboard[0]] == [
+        f"gate:{run_id}:brief:next",
+        f"gate:{run_id}:brief:edit",
+        f"gate:{run_id}:brief:stop",
+    ]
