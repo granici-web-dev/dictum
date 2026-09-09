@@ -11,7 +11,10 @@ from app.store import Base
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
 if config.config_file_name:
-    fileConfig(config.config_file_name)
+    # Без disable_existing_loggers=False fileConfig гасит все уже созданные логгеры, включая
+    # app.*: после миграции в одном процессе с приложением его записи молча исчезают. Нашлось
+    # тестом, который перестал видеть строку стадии, стоило прогнать его после тестов store.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
