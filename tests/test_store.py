@@ -31,6 +31,7 @@ from app.store import (
     fail_orphans,
     finish_run,
     mark_stage,
+    one_bot_per_database,
     session,
     start_run,
     stop_on_choice,
@@ -118,6 +119,22 @@ def test_the_migration_is_what_the_models_say(db: None) -> None:
         context = MigrationContext.configure(connection)
 
         assert compare_metadata(context, Base.metadata) == []
+
+
+def test_a_second_bot_does_not_get_the_database(db: None) -> None:
+    """Второй бот метит живой прогон первого сорванным и пишет об этом человеку."""
+    with one_bot_per_database() as first, one_bot_per_database() as second:
+        assert first
+        assert not second
+
+
+def test_the_lock_goes_away_with_the_bot_that_held_it(db: None) -> None:
+    """Убитый бот не оставляет базу занятой: блокировка живёт не дольше соединения."""
+    with one_bot_per_database() as first:
+        assert first
+
+    with one_bot_per_database() as next_one:
+        assert next_one
 
 
 def test_a_stop_is_found_by_the_chat_it_waits_on(db: None) -> None:

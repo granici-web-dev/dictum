@@ -17,6 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel
 from telegram import Message, Update, Voice
+from sqlalchemy.exc import SQLAlchemyError
 from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -31,6 +32,7 @@ from app.store import (
     FAILED,
     NO_TASK,
     ensure_schema,
+    one_bot_per_database,
     PUBLISHED,
     Stopped,
     drop_stop,
@@ -368,7 +370,13 @@ async def follow(
         # прямо отсюда: этот поток и так не цикл событий, а язык прогона после ingest назвал
         # Whisper, и до записи он живёт только в памяти обхода (§4.1).
         done.append(stage.name)
-        mark_stage(run.run_id, stage.name, run.lang)
+        try:
+            mark_stage(run.run_id, stage.name, run.lang)
+        except SQLAlchemyError:
+            # Отметка о стадии — не работа прогона: артефакты уже на диске, карточки будут
+            # опубликованы. Ронять из-за неё прогон, который человек оплатил, нельзя; строка
+            # останется на прошлой стадии, и её закроет уборка следующего старта.
+            logger.exception("Прогон %s не записал стадию %s", run.run_id, stage.name)
         progress.append(
             asyncio.run_coroutine_threadsafe(
                 note.edit_text(progress_text(run, done)), loop
@@ -376,12 +384,17 @@ async def follow(
         )
 
     ending = await outcome(run, report, start, redo)
-    if ending.stop:
-        await asyncio.to_thread(
-            stop_on_choice, run.run_id, ending.stop.stage, ending.stop.artifact
-        )
-    else:
-        await asyncio.to_thread(finish_run, run.run_id, ending.status)
+    try:
+        if ending.stop:
+            await asyncio.to_thread(
+                stop_on_choice, run.run_id, ending.stop.stage, ending.stop.artifact
+            )
+        else:
+            await asyncio.to_thread(finish_run, run.run_id, ending.status)
+    except SQLAlchemyError:
+        # Результат человеку важнее строки: карточки стоят на доске, и молчание вместо ссылки
+        # он прочтёт как сорванный прогон. Строку закроет уборка следующего старта.
+        logger.exception("Прогон %s не закрыл строку статусом %s", run.run_id, ending.status)
     # Правки прогресса ответа Telegram не ждут, поэтому финальная обязана уйти после них: на
     # прогоне 0ac7bdffe0e0ba58 ответ на последнюю правку пришёл вторым и затёр ссылку списком
     # галочек. Прогон выглядел законченным, в логе было чисто, а результата человек не увидел.
@@ -548,7 +561,13 @@ def main() -> None:
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не
     # попадают — им никто ничего не присылал.
     application.add_handler(MessageHandler(~filters.StatusUpdate.ALL, on_anything_else))
-    application.run_polling()
+    with one_bot_per_database() as alone:
+        if not alone:
+            raise ConfigError(
+                "На этой базе уже работает бот. Погасите его или укажите другую DATABASE_URL: "
+                "два бота на одну базу считают прогоны друг друга брошенными."
+            )
+        application.run_polling()
 
 
 if __name__ == "__main__":

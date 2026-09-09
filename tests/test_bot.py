@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from telegram import Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
@@ -709,6 +710,33 @@ async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
     assert 12 not in store.stops
     assert store.status["прогон"] == DROPPED
     assert [(start, redo) for _, start, redo in seen] == [("ingest", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_database_that_breaks_mid_run_does_not_take_the_cards_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Отметка о стадии — не работа прогона: артефакты на диске, карточки на доске."""
+    journal = tmp_path / "outputs/publish.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"I-001": {}}', encoding="utf-8")
+    monkeypatch.setattr(settings, "trello_board_id", "board1")
+    monkeypatch.setattr(bot, "walk", walk_reporting_every_stage)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise OperationalError("select 1", {}, Exception("база ушла"))
+
+    monkeypatch.setattr(bot, "mark_stage", broken)
+    monkeypatch.setattr(bot, "finish_run", broken)
+    chat = TextChat("Идея")
+
+    await follow(
+        cast(Message, chat),
+        Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+        datetime.now(timezone.utc),
+    )
+
+    assert chat.edits[-1] == finished_text(tmp_path)
 
 
 @pytest.mark.asyncio

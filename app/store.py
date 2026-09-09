@@ -32,6 +32,9 @@ from app.pipeline import NAMES
 
 logger = logging.getLogger(__name__)
 
+# Номер произвольный, но постоянный: по нему бот узнаёт, что база уже занята другим ботом.
+BOT_LOCK = 20260902
+
 AWAITING_CHOICE = "awaiting_choice"
 PUBLISHED = "published"
 NO_TASK = "no_task"
@@ -128,6 +131,24 @@ def ensure_schema() -> None:
 def session() -> Iterator[Session]:
     with Session(engine()) as opened, opened.begin():
         yield opened
+
+
+@contextmanager
+def one_bot_per_database() -> Iterator[bool]:
+    """Держит блокировку базы, пока бот жив. False — база уже занята другим ботом.
+
+    Второй бот на ту же базу не просто дублирует прогоны: его уборка на старте (`fail_orphans`)
+    метит живой прогон первого сорванным и пишет об этом человеку, пока тот прогон спокойно
+    доходит до карточек. Снимаем блокировку явно: соединение уходит в пул живым, и Postgres
+    держал бы её за уже вышедшим ботом. Убитый процесс роняет соединение, и база снимает её сама.
+    """
+    with engine().connect() as connection:
+        held = bool(connection.scalar(select(func.pg_try_advisory_lock(BOT_LOCK))))
+        try:
+            yield held
+        finally:
+            if held:
+                connection.scalar(select(func.pg_advisory_unlock(BOT_LOCK)))
 
 
 def start_run(run_id: str, chat_id: int, source: str, lang: str, auto_approve: bool) -> None:
