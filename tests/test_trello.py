@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -63,6 +63,19 @@ def test_card_fields_go_in_the_body_not_the_url(
     body = route.calls.last.request.content.decode()
     assert "idLabels=label-1%2Clabel-2" in body
     assert "desc=" not in str(route.calls.last.request.url)
+
+
+@pytest.mark.parametrize("position", ["top", "bottom"])
+def test_a_new_list_goes_where_it_was_asked(
+    client: Trello, respx_mock: respx.MockRouter, position: Literal["top", "bottom"]
+) -> None:
+    route = respx_mock.post("https://api.trello.com/1/lists").mock(
+        httpx.Response(200, json={"id": "list-1", "name": "Assignments"})
+    )
+
+    client.create_list("Assignments", position)
+
+    assert f"pos={position}" in route.calls.last.request.content.decode()
 
 
 def test_reading_cards_asks_for_checklists_attachments_and_archived_ones(

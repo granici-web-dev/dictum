@@ -5,7 +5,7 @@
 
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field
@@ -147,10 +147,11 @@ class Trello:
             TrelloList.model_validate(item) for item in self.get(f"/boards/{self.board_id}/lists")
         ]
 
-    def create_list(self, name: str) -> TrelloList:
-        # Без pos Trello кладёт новый список первым, и фазы выстраиваются справа налево.
+    def create_list(self, name: str, position: Literal["top", "bottom"]) -> TrelloList:
+        # Позиция всегда явная: без pos Trello кладёт новый список первым, и фазы выстроились бы
+        # справа налево.
         return TrelloList.model_validate(
-            self.post("/lists", name=name, idBoard=self.board_id, pos="bottom")
+            self.post("/lists", name=name, idBoard=self.board_id, pos=position)
         )
 
     def labels(self) -> list[TrelloLabel]:

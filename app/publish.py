@@ -98,9 +98,10 @@ class PlannedCard(BaseModel):
     phase: int | None
     list_id: str
     title: str
+    # Весь текст описания над строкой зависимостей и маркером: его форма у каждого пути своя.
     body: str
-    scope_id: str
     label_ids: list[str]
+    checklist_name: str
     checklist: list[str]
     depends_on: list[str]
     position: int
@@ -134,7 +135,7 @@ def card_name(key: str, title: str) -> str:
 def card_description(
     key: str, run_id: str, planned: PlannedCard, published: dict[str, PublishedCard]
 ) -> str:
-    lines = [planned.body, "", f"scope_id: {planned.scope_id}"]
+    lines = [planned.body]
     if planned.depends_on:
         lines.append(
             "Depends on: " + ", ".join(published[local].key for local in planned.depends_on)
@@ -188,7 +189,7 @@ def ensure_lists(board: Trello, phases: list[Phase]) -> dict[str, str]:
     wanted = [BACKLOG, *(phase_list_name(phase) for phase in sorted(phases, key=lambda p: p.n))]
     for name in wanted:
         if name not in by_name:
-            by_name[name] = board.create_list(name).id
+            by_name[name] = board.create_list(name, "bottom").id
     return by_name
 
 
@@ -213,9 +214,9 @@ def plan_cards(
             phase=issue.phase,
             list_id=list_of_phase[issue.phase],
             title=issue.title,
-            body=issue.description,
-            scope_id=issue.scope_id,
+            body=f"{issue.description}\n\nscope_id: {issue.scope_id}",
             label_ids=[labels[issue.area]],
+            checklist_name=DOD,
             checklist=issue.dod,
             depends_on=issue.depends_on,
             position=position_of[issue.id],
@@ -228,9 +229,9 @@ def plan_cards(
             phase=None,
             list_id=lists[BACKLOG],
             title=entry.title,
-            body=entry.reason,
-            scope_id=entry.scope_id,
+            body=f"{entry.reason}\n\nscope_id: {entry.scope_id}",
             label_ids=[labels[DEFERRED]],
+            checklist_name=DOD,
             checklist=[],
             depends_on=[],
             position=number,
@@ -250,14 +251,14 @@ def same_card(known: TrelloCard, name: str, description: str, planned: PlannedCa
 
 
 def fill_checklist(
-    board: Trello, card_id: str, wanted: list[str], existing: TrelloChecklist | None
+    board: Trello, card_id: str, planned: PlannedCard, existing: TrelloChecklist | None
 ) -> bool:
-    """Доводит чеклист DoD до полного набора пунктов, чем бы ни кончился прошлый прогон."""
-    if not wanted:
+    """Доводит чеклист карточки до полного набора пунктов, чем бы ни кончился прошлый прогон."""
+    if not planned.checklist:
         return False
-    checklist = existing or board.create_checklist(card_id, DOD)
+    checklist = existing or board.create_checklist(card_id, planned.checklist_name)
     present = {item.name for item in checklist.check_items}
-    missing = [item for item in wanted if item not in present]
+    missing = [item for item in planned.checklist if item not in present]
     for item in missing:
         board.add_check_item(checklist.id, item)
     return bool(missing)
@@ -267,8 +268,10 @@ def finish_card(
     board: Trello, known: TrelloCard, planned: PlannedCard, journal: dict[str, PublishedCard]
 ) -> bool:
     """Дособирает карточку, которую оборвавшийся прогон успел создать, но не успел наполнить."""
-    checklist = next((item for item in known.checklists if item.name == DOD), None)
-    finished = fill_checklist(board, known.id, planned.checklist, checklist)
+    checklist = next(
+        (item for item in known.checklists if item.name == planned.checklist_name), None
+    )
+    finished = fill_checklist(board, known.id, planned, checklist)
     attached = {item.name for item in known.attachments}
     for dependency in planned.depends_on:
         published = journal[dependency]
@@ -331,7 +334,7 @@ def make_card(
         planned.label_ids,
         planned.position,
     )
-    fill_checklist(board, card.id, planned.checklist, None)
+    fill_checklist(board, card.id, planned, None)
     for dependency in planned.depends_on:
         linked = published[dependency]
         board.attach_url(card.id, linked.url, linked.key)
