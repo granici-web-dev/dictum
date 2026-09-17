@@ -9,7 +9,9 @@ from anthropic import DefaultHttpxClient
 from app import stages
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.pipeline import STAGES
-from app.render import issues_markdown
+from app.render import issues_markdown, review_markdown
+from app.review import Review
+from app.review import fragments
 from app.stages import (
     StageError,
     load_prompt,
@@ -25,6 +27,7 @@ from tests.helpers import (
     request_body,
     server_error,
 )
+from tests.test_review import MEETING_DE, REVIEW_DE
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'
@@ -321,3 +324,96 @@ def test_a_missing_file_is_still_an_error_and_not_a_dropped_extra(llm: InstallRe
 
     with pytest.raises(StageError, match="expected outputs/issues.json"):
         run_stage("decompose", {"outputs/prd.md": "# PRD"}, RUN)
+
+
+REVIEW_INPUTS = {"inputs/transcript.md": MEETING_DE}
+OWNER_RU = {"owner_lang": "ru"}
+# В фикстуре одна цитата расходится с расшифровкой («Fehlermeldungen» против сказанного
+# «Fehlermeldung»): так выглядит причёсанный моделью текст распознавания.
+INVENTED_QUOTE = "Die Fehlermeldungen auf der Kontoseite sind noch auf Englisch."
+
+
+def review_answer(text: str = REVIEW_DE, model_says_found: bool = True) -> str:
+    """Ответ модели: разбор из фикстуры, где поля кода стоят так, как их прислала бы модель."""
+    data = json.loads(text)
+    del data["owner_lang"]
+    for task in data["tasks"]:
+        for fragment in [task["deadline"], *task["constraints"], *task["do_not"], *task["quotes"]]:
+            if fragment:
+                fragment["in_transcript"] = model_says_found
+    return f'<file path="outputs/review.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
+def said_verbatim() -> str:
+    said = INVENTED_QUOTE.replace("Fehlermeldungen", "Fehlermeldung")
+    return review_answer(REVIEW_DE.replace(INVENTED_QUOTE, said))
+
+
+def found_marks(result_json: str) -> dict[str, bool | None]:
+    review = Review.model_validate_json(result_json)
+    return {fragment.original: fragment.in_transcript for fragment in fragments(review)}
+
+
+def test_a_review_said_verbatim_is_stamped_and_drawn_without_a_repair(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(said_verbatim())])
+
+    result = run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+    assert len(requests) == 1
+    written = json.loads(result.files["outputs/review.json"])
+    assert written["owner_lang"] == "ru"
+    assert set(found_marks(result.files["outputs/review.json"]).values()) == {True}
+    assert result.files["outputs/review.md"] == review_markdown(
+        Review.model_validate_json(result.files["outputs/review.json"])
+    )
+
+
+def test_a_quote_nobody_said_gets_the_one_repair_and_is_named_in_it(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(review_answer()), ok(said_verbatim())])
+
+    result = run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+    assert len(requests) == 2
+    assert INVENTED_QUOTE in request_body(requests[1])["messages"][-1]["content"]
+    assert set(found_marks(result.files["outputs/review.json"]).values()) == {True}
+
+
+def test_review_marks_a_fragment_still_missing_after_the_repair_instead_of_failing(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Правило держит этот тест: пометка вместо отказа, и `true` модели ничего не стоит."""
+    requests = llm([ok(review_answer()), ok(review_answer())])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        result = run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+    assert len(requests) == 2
+    marks = found_marks(result.files["outputs/review.json"])
+    assert marks.pop(INVENTED_QUOTE) is False
+    assert set(marks.values()) == {True}
+    assert f"stage=review run={RUN} unverified=1" in caplog.text
+
+
+def test_a_repair_that_breaks_the_json_still_fails_the_review(llm: InstallResponses) -> None:
+    llm([ok(review_answer()), ok('<file path="outputs/review.json">\n{"tasks": [\n</file>')])
+
+    with pytest.raises(StageError, match="не разбирается как JSON"):
+        run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+
+def test_an_empty_translation_of_a_german_recording_fails_after_the_repair(
+    llm: InstallResponses,
+) -> None:
+    untranslated = said_verbatim().replace(
+        '"translation": "Во-первых, форма входа."', '"translation": ""'
+    )
+    requests = llm([ok(untranslated), ok(untranslated)])
+
+    with pytest.raises(StageError, match=r"tasks\.0\.quotes\.0\.translation: перевод пуст"):
+        run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+    assert len(requests) == 2

@@ -30,7 +30,9 @@ from app.store import (
     FAILED,
     PUBLISHED,
     REFUSED,
+    REVIEWED,
     STATUS_OF_STOP,
+    STOP_STATUSES,
     Base,
     RunRow,
     add_turn,
@@ -383,3 +385,20 @@ def test_check_rejects_consent_on_voice_run(db: None, consent: bool) -> None:
     """У голосового чужой записи нет: любое значение врало бы, что вопрос о согласии задавали."""
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
         start_run("голос", 12, "voice", "ru", True, consent)
+
+
+def test_a_reviewed_run_is_finished_and_waits_for_nothing(db: None) -> None:
+    """Разбор не остановка: он не занимает место остановки в чате и не считается брошенным."""
+    start_run("разбор", 12, "file", "de", False, True)
+    mark_stage("разбор", "review", "de")
+
+    finish_run("разбор", REVIEWED)
+
+    assert REVIEWED not in STOP_STATUSES
+    assert waiting_for(12) is None
+    assert fail_orphans() == []
+    with session() as opened:
+        row = opened.get(RunRow, "разбор")
+
+        assert row is not None
+        assert (row.status, row.stopped_stage, row.stopped_artifact) == (REVIEWED, None, None)

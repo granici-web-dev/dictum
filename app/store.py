@@ -43,6 +43,9 @@ AWAITING_CHOICE = "awaiting_choice"
 AWAITING_GATE = "awaiting_gate"
 AWAITING_ANSWER = "awaiting_answer"
 PUBLISHED = "published"
+# Разбор встречи отдан человеку, и прогон на этом закончен: это не остановка, путь до карточек
+# по поручению заводит уже другой прогон (P3-08).
+REVIEWED = "reviewed"
 NO_TASK = "no_task"
 # Запись отвергнута до расшифровки: её никто не слушал. `no_task` сказал бы о её содержимом, что
 # задания в ней нет, а этого никто не знает.

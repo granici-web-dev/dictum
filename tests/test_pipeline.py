@@ -64,6 +64,15 @@ def test_every_stage_belongs_to_exactly_one_route() -> None:
     assert covered == list(NAMES)
 
 
+def test_the_review_comes_right_after_the_transcript() -> None:
+    assert NAMES[:2] == ("ingest", "review")
+
+
+def test_a_recording_ends_with_its_review_and_an_assignment_with_its_cards() -> None:
+    assert route_end("ingest") == "review"
+    assert route_end("brief") == "publish"
+
+
 def test_a_walk_from_any_stage_ends_where_its_route_ends() -> None:
     for first, last in ROUTES:
         for stage in stages_between(first, last):

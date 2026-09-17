@@ -14,7 +14,7 @@ from app.cli import (
 from app import bot, cli, publish, stages
 from app.config import settings
 from app.ingest import build_transcript, run_id_of
-from app.pipeline import BRIEF, CANDIDATES, IDEA, PRD, RESEARCH, TRANSCRIPT
+from app.pipeline import BRIEF, CANDIDATES, IDEA, PRD, RESEARCH, REVIEW_JSON, REVIEW_MD, TRANSCRIPT
 from tests.helpers import (
     BROKEN_ISSUES,
     InstallResponses,
@@ -60,18 +60,62 @@ PRD_BLOCK = (
 )
 ISSUES_BLOCKS = decompose_answer()
 TEXT = "Хочу, чтобы бот напоминал о дедлайнах в Trello"
+# Разбор TEXT: цитата взята из него дословно, иначе сверка потребовала бы ремонтного повтора.
+REVIEW_BLOCK = (
+    '<file path="outputs/review.json">\n'
+    + json.dumps(
+        {
+            "tasks": [
+                {
+                    "title": "Сделать напоминания о дедлайнах",
+                    "summary": "Бот напоминает о дедлайнах карточек в Trello.",
+                    "assigned_by": "[уточнить: кто поручил]",
+                    "assignee": "[уточнить: кому]",
+                    "status": "decision",
+                    "deadline": None,
+                    "constraints": [],
+                    "do_not": [],
+                    "ask_back": [],
+                    "quotes": [{"original": TEXT, "translation": None}],
+                }
+            ],
+            "topics": [],
+        },
+        ensure_ascii=False,
+    )
+    + "\n</file>"
+)
 PRD_FROM_A_REAL_RUN = (Path(__file__).parent.parent / "fixtures/prd_real.md").read_text(
     encoding="utf-8"
 )
 
 
-def test_run_text_writes_the_artifact_of_every_stage(
+def test_run_text_ends_with_the_review_and_names_where_it_lies(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    requests = llm([ok(REVIEW_BLOCK)])
+
+    with caplog.at_level(logging.INFO, logger="app.cli"):
+        assert main([TEXT, "--lang", "ru"]) == EXIT_OK
+
+    written = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
+    assert written == [TRANSCRIPT, REVIEW_JSON, REVIEW_MD]
+    assert len(requests) == 1
+    assert REVIEW_MD in caplog.text
+
+
+def test_run_text_from_intake_writes_the_artifact_of_every_stage_up_to_the_backlog(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert main([TEXT, "--lang", "ru"]) == EXIT_OK
+    assert main(["--from", "intake"]) == EXIT_OK
 
     written = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
     assert written == [
@@ -85,11 +129,37 @@ def test_run_text_writes_the_artifact_of_every_stage(
     ]
 
 
+def test_run_from_review_repeats_the_review_over_the_transcript_on_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
+    answer = REVIEW_BLOCK.replace(TEXT, "Идея с прошлого прогона.")
+    requests = llm([ok(answer)])
+
+    assert main(["--from", "review"]) == EXIT_OK
+
+    assert len(requests) == 1
+    assert (tmp_path / REVIEW_MD).is_file()
+    assert not (tmp_path / IDEA).exists()
+
+
+def test_run_from_review_without_a_transcript_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "review"])
+
+    assert exit_info.value.code == EXIT_USAGE
+
+
 def test_run_text_writes_the_transcript_frontmatter(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    llm([ok(REVIEW_BLOCK)])
 
     main([TEXT, "--lang", "ru"])
 
@@ -105,7 +175,7 @@ def test_run_text_reads_the_input_from_a_file(
     monkeypatch.chdir(tmp_path)
     idea = tmp_path / "idea.txt"
     idea.write_text(TEXT, encoding="utf-8")
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    llm([ok(REVIEW_BLOCK)])
 
     assert main(["--file", str(idea), "--lang", "ru"]) == EXIT_OK
     assert TEXT in (tmp_path / "inputs/transcript.md").read_text(encoding="utf-8")
@@ -115,9 +185,10 @@ def test_run_text_tells_brief_that_nobody_will_answer(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    main([TEXT, "--lang", "ru"])
+    main(["--from", "intake"])
 
     brief_message = request_body(requests[1])["messages"][0]["content"]
     # Только блок <params>: «lang: ru» стоит ещё и во frontmatter самого idea.md, который едет
@@ -130,9 +201,10 @@ def test_run_text_feeds_prd_the_brief_research_and_template(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    main([TEXT, "--lang", "ru"])
+    main(["--from", "intake"])
 
     prd_message = request_body(requests[2])["messages"][0]["content"]
     assert '<file path="outputs/brief.md">' in prd_message
@@ -144,9 +216,10 @@ def test_run_text_stops_when_intake_returns_candidates(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(CANDIDATES_BLOCK)])
 
-    assert main([TEXT, "--lang", "ru"]) == EXIT_NEEDS_A_DECISION
+    assert main(["--from", "intake"]) == EXIT_NEEDS_A_DECISION
 
     assert len(requests) == 1
     assert (tmp_path / CANDIDATES).exists()
@@ -160,10 +233,11 @@ def test_gates_stop_the_local_run_after_brief_and_name_the_stage_to_resume_from(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    transcript_of_an_earlier_run(tmp_path)
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK)])
 
     with caplog.at_level(logging.INFO, logger="app.cli"):
-        assert main([TEXT, "--lang", "ru", "--gates"]) == EXIT_NEEDS_A_DECISION
+        assert main(["--from", "intake", "--gates"]) == EXIT_NEEDS_A_DECISION
 
     assert len(requests) == 2
     assert (tmp_path / BRIEF).is_file()
@@ -176,9 +250,10 @@ def test_run_text_saves_the_raw_answer_of_a_failed_stage(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     empty = '<file path="outputs/issues.json">\n{"issues": []}\n</file>'
+    transcript_of_an_earlier_run(tmp_path)
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(empty), ok(empty)])
 
-    assert main([TEXT, "--lang", "ru"]) == EXIT_STAGE_FAILED
+    assert main(["--from", "intake"]) == EXIT_STAGE_FAILED
 
     assert (tmp_path / "outputs/decompose.raw.md").read_text(encoding="utf-8") == empty
     assert not (tmp_path / "outputs/issues.json").exists()
@@ -239,7 +314,7 @@ def test_run_text_takes_the_language_from_the_input_file(
     monkeypatch.chdir(tmp_path)
     idea = tmp_path / "idea.md"
     idea.write_text(f"---\nsource: text\nlang: ru\n---\n\n{TEXT}\n", encoding="utf-8")
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    llm([ok(REVIEW_BLOCK)])
 
     assert main(["--file", str(idea)]) == EXIT_OK
 
@@ -253,7 +328,7 @@ def test_run_text_falls_back_to_the_configured_language(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    llm([ok(REVIEW_BLOCK)])
 
     main([TEXT])
 
@@ -342,10 +417,12 @@ def test_run_text_keeps_the_second_attempt_when_decompose_stays_invalid(
 def test_a_run_carries_one_id_from_the_transcript_into_the_issues(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Разбор и путь до карточек — два маршрута одного прогона, и номер у них один."""
     monkeypatch.chdir(tmp_path)
-    llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
+    llm([ok(REVIEW_BLOCK), ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
     assert main([TEXT, "--lang", "ru"]) == EXIT_OK
+    assert main(["--from", "intake"]) == EXIT_OK
 
     started = run_id_of((tmp_path / TRANSCRIPT).read_text(encoding="utf-8"))
     issues = json.loads((tmp_path / "outputs/issues.json").read_text(encoding="utf-8"))

@@ -14,6 +14,8 @@ from app.pipeline import (
     ISSUES_MD,
     PRD,
     RESEARCH,
+    REVIEW_JSON,
+    REVIEW_MD,
     TRANSCRIPT,
     stage_named,
 )
@@ -32,6 +34,8 @@ from app.run import (
 from app.stages import StageError
 from app.transcribe import Transcription
 from tests.helpers import FakeBoard, InstallResponses, ok, real_issues, request_body
+from tests.test_review import MEETING_DE
+from tests.test_stages import said_verbatim
 from tests.test_cli import (
     BRIEF_BLOCK,
     CANDIDATES_BLOCK,
@@ -90,6 +94,12 @@ def a_choice(written: str) -> Redo:
     return Redo(
         kind="choice", user_edit=written, artifact=CANDIDATES, closes_branch=CANDIDATES
     )
+
+
+def transcribed(run: Run) -> Run:
+    """Прогон с расшифровкой на диске: путь до карточек начинается с intake (SPEC §7.2)."""
+    walk(run, "ingest", "ingest")
+    return run
 
 
 def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -> Run:
@@ -175,7 +185,7 @@ def test_the_language_of_the_run_follows_the_voice_and_not_the_default(
     """DEFAULT_LANG у бота стоит до расшифровки; дальше язык артефактов называет Whisper."""
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
 
-    walk(a_voice_run(tmp_path, monkeypatch), "ingest", "brief")
+    walk(transcribed(a_voice_run(tmp_path, monkeypatch)), "intake", "brief")
 
     brief_message = request_body(requests[1])["messages"][0]["content"]
     params = brief_message.split("<params>\n", 1)[1].split("\n</params>", 1)[0]
@@ -188,7 +198,7 @@ def test_a_full_walk_writes_every_artifact_under_its_own_root(
     root = tmp_path / "runs" / RUN_ID
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert walk(an_auto_approved_run(root), "ingest", "decompose") is None
+    assert walk(transcribed(an_auto_approved_run(root)), "intake", "decompose") is None
 
     for path in (TRANSCRIPT, IDEA, BRIEF, RESEARCH, PRD, ISSUES_JSON):
         assert (root / path).is_file(), path
@@ -201,7 +211,7 @@ def test_the_walk_stamps_the_run_id_it_was_given_into_the_issues(
 ) -> None:
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    walk(an_auto_approved_run(tmp_path), "ingest", "decompose")
+    walk(transcribed(an_auto_approved_run(tmp_path)), "intake", "decompose")
 
     issues = json.loads((tmp_path / ISSUES_JSON).read_text(encoding="utf-8"))
     assert issues["run_id"] == RUN_ID
@@ -215,10 +225,13 @@ def test_every_stage_reports_itself_once_and_in_order(
     seen: list[str] = []
 
     walk(
-        an_auto_approved_run(tmp_path), "ingest", "decompose", lambda stage: seen.append(stage.name)
+        transcribed(an_auto_approved_run(tmp_path)),
+        "intake",
+        "decompose",
+        lambda stage: seen.append(stage.name),
     )
 
-    assert seen == ["ingest", "intake", "brief", "research", "prd", "decompose"]
+    assert seen == ["intake", "brief", "research", "prd", "decompose"]
 
 
 def test_a_walk_that_reaches_publish_puts_the_cards_on_the_board(
@@ -227,7 +240,7 @@ def test_a_walk_that_reaches_publish_puts_the_cards_on_the_board(
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     issues = real_issues()
 
-    assert walk(an_auto_approved_run(tmp_path), "ingest", "publish") is None
+    assert walk(transcribed(an_auto_approved_run(tmp_path)), "intake", "publish") is None
 
     made = board.posted("/1/cards")
     assert len(made) == len(issues.issues) + len(issues.deferred)
@@ -239,7 +252,7 @@ def test_a_walk_stops_at_the_stage_it_was_told_to_stop_at(
 ) -> None:
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
 
-    walk(a_run(tmp_path), "ingest", "brief")
+    walk(transcribed(a_run(tmp_path)), "intake", "brief")
 
     assert len(requests) == 2
     assert not (tmp_path / PRD).exists()
@@ -250,7 +263,7 @@ def test_candidates_stop_the_walk_and_name_the_file_that_needs_a_person(
 ) -> None:
     requests = llm([ok(CANDIDATES_BLOCK), ok(BRIEF_BLOCK)])
 
-    assert walk(a_run(tmp_path), "ingest", "decompose") == Pause(
+    assert walk(transcribed(a_run(tmp_path)), "intake", "decompose") == Pause(
         stage="intake", artifact=CANDIDATES, kind="choice"
     )
 
@@ -263,8 +276,8 @@ def test_a_redo_reaches_the_stage_it_was_meant_for_and_no_other(
 ) -> None:
     """Правка была про артефакт стартовой стадии: brief её получить не должен."""
     requests = llm([ok(CANDIDATES_BLOCK), ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
-    run = a_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(a_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     picked = Redo(kind="choice", user_edit="Выбрана идея 2: Отчёты", artifact=CANDIDATES)
     walk(run, "intake", "brief", redo=picked)
@@ -279,8 +292,8 @@ def test_a_redo_carries_the_previous_answer_so_the_stage_does_not_start_over(
 ) -> None:
     """Без своего прошлого ответа стадия соберёт артефакт заново (SPEC §3.2)."""
     requests = llm([ok(CANDIDATES_BLOCK), ok(IDEA_BLOCK)])
-    run = a_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(a_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     walk(run, "intake", "intake", redo=Redo(kind="choice", user_edit="Первую", artifact=CANDIDATES))
 
@@ -295,8 +308,8 @@ def test_a_second_list_after_a_choice_is_repaired_into_the_chosen_idea(
 ) -> None:
     """Выбор сделан: тот же список остановил бы прогон на том же месте, а ответ человека пропал."""
     requests = llm([ok(CANDIDATES_BLOCK), ok(CANDIDATES_BLOCK), ok(IDEA_BLOCK)])
-    run = a_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(a_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     picked = a_choice("Первую")
 
@@ -312,8 +325,8 @@ def test_a_stage_that_asks_again_after_a_choice_falls_instead_of_stopping_twice(
 ) -> None:
     """Единственный выход повтора — idea.md: не отдав её и после ремонта, стадия падает."""
     llm([ok(CANDIDATES_BLOCK), ok(CANDIDATES_BLOCK), ok(CANDIDATES_BLOCK)])
-    run = a_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(a_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     picked = a_choice("Первую")
 
@@ -338,8 +351,8 @@ def test_an_edit_at_a_gate_runs_the_same_stage_again_and_stops_there_again(
     """Правка возвращается в стадию ворот: человек читает переделанное и решает заново."""
     edited = BRIEF_BLOCK.replace("# Brief", "# Brief без пятого раздела")
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(edited)])
-    run = a_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(a_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     fixed = Redo(kind="gate", user_edit="Убери пятый раздел", artifact=BRIEF)
 
@@ -358,7 +371,7 @@ def test_a_gate_after_brief_stops_a_run_that_was_not_auto_approved(
 ) -> None:
     requests = llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK)])
 
-    assert walk(a_run(tmp_path), "ingest", "decompose") == Pause(
+    assert walk(transcribed(a_run(tmp_path)), "intake", "decompose") == Pause(
         stage="brief", artifact=BRIEF, kind="gate"
     )
 
@@ -373,7 +386,7 @@ def test_an_auto_approved_run_walks_past_every_gate(
     """До publish, а не до decompose: иначе последние ворота гасит конец обхода, а не флаг."""
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert walk(an_auto_approved_run(tmp_path), "ingest", "publish") is None
+    assert walk(transcribed(an_auto_approved_run(tmp_path)), "intake", "publish") is None
 
     assert (tmp_path / "outputs/publish.json").is_file()
 
@@ -399,7 +412,7 @@ def test_candidates_stop_even_an_auto_approved_run(
     """Выбор — не ворота: подтверждать нечего, идею из нескольких выбирает человек."""
     llm([ok(CANDIDATES_BLOCK), ok(BRIEF_BLOCK)])
 
-    waiting = walk(an_auto_approved_run(tmp_path), "ingest", "decompose")
+    waiting = walk(transcribed(an_auto_approved_run(tmp_path)), "intake", "decompose")
 
     assert waiting is not None and waiting.kind == "choice"
 
@@ -410,7 +423,7 @@ def test_a_gate_on_the_last_stage_of_the_walk_lets_the_run_finish(
     """Ворота останавливают перед следующей стадией; когда её нет, обход и так кончился."""
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
 
-    assert walk(a_run(tmp_path), "ingest", "brief") is None
+    assert walk(transcribed(a_run(tmp_path)), "intake", "brief") is None
 
     assert (tmp_path / BRIEF).is_file()
 
@@ -435,7 +448,7 @@ def test_a_failed_stage_leaves_its_raw_answer_under_the_run_root(
     llm([ok("Ответ без единого файла.")] * 2)
 
     with pytest.raises(Exception):
-        walk(a_run(root), "ingest", "intake")
+        walk(transcribed(a_run(root)), "intake", "intake")
 
     assert "Ответ без единого файла." in (root / "outputs/intake.raw.md").read_text("utf-8")
 
@@ -450,7 +463,7 @@ def test_missing_before_asks_only_for_what_the_walk_will_not_write(tmp_path: Pat
 
 
 def test_a_walk_from_the_first_stage_needs_nothing_on_disk(tmp_path: Path) -> None:
-    assert missing_before(tmp_path, "ingest", "publish") == []
+    assert missing_before(tmp_path, "ingest", "review") == []
 
 
 def test_publish_declares_no_artifact_because_it_writes_its_own_journal() -> None:
@@ -465,7 +478,7 @@ def test_a_question_from_brief_stops_the_walk_and_names_the_file_that_needs_a_pe
 ) -> None:
     requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK)])
 
-    waiting = walk(an_asking_run(tmp_path), "ingest", "decompose")
+    waiting = walk(transcribed(an_asking_run(tmp_path)), "intake", "decompose")
 
     assert waiting == Pause(stage="brief", artifact=BRIEF_QUESTION, kind="answer")
     assert (tmp_path / BRIEF_QUESTION).is_file()
@@ -479,8 +492,8 @@ def test_brief_hears_whether_anyone_will_answer_its_questions(
     """Флаг — свойство прогона, а не записи стадии: у локального отвечать некому (CLAUDE.md §1)."""
     requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(IDEA_BLOCK), ok(BRIEF_BLOCK)])
 
-    walk(an_asking_run(tmp_path), "ingest", "brief")
-    walk(a_run(tmp_path), "ingest", "brief")
+    walk(transcribed(an_asking_run(tmp_path)), "intake", "brief")
+    walk(transcribed(a_run(tmp_path)), "intake", "brief")
 
     assert "interactive: true" in request_body(requests[1])["messages"][-1]["content"]
     assert "interactive: false" in request_body(requests[3])["messages"][-1]["content"]
@@ -490,8 +503,8 @@ def test_an_answer_returns_to_brief_and_the_walk_goes_on_to_the_gate(
     llm: InstallResponses, tmp_path: Path
 ) -> None:
     llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
-    run = an_asking_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(an_asking_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     waiting = walk(run, "brief", "decompose", redo=an_answer("Пятеро, смотрят каждый день"))
 
@@ -504,8 +517,8 @@ def test_an_answer_carries_every_earlier_turn_of_the_dialog(
 ) -> None:
     """Без прежних ходов стадия спросит то же самое ещё раз, а ответы человека пропадут."""
     requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
-    run = an_asking_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(an_asking_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     first = Turn(question="Кто пользователь?\n", answer="Наша же команда")
     walk(run, "brief", "brief", redo=an_answer("Пятеро", turns=(first,)))
@@ -533,11 +546,30 @@ def test_a_question_asked_after_the_dialog_is_over_is_repaired_into_the_brief(
 ) -> None:
     """Человек нажал «Собирай»: ещё один вопрос оставил бы его там же, где он был."""
     requests = llm([ok(IDEA_BLOCK), ok(QUESTION_BLOCK), ok(QUESTION_BLOCK), ok(BRIEF_BLOCK)])
-    run = an_asking_run(tmp_path)
-    walk(run, "ingest", "decompose")
+    run = transcribed(an_asking_run(tmp_path))
+    walk(run, "intake", "decompose")
 
     assert walk(run, "brief", "brief", redo=an_answer("Хватит", closing=True)) is None
 
     claim = request_body(requests[3])["messages"][-1]["content"]
     assert "допустим только outputs/brief.md" in claim
     assert (tmp_path / BRIEF).is_file()
+
+
+def test_a_recording_walks_to_its_review_and_no_further(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Текст встречи тем же путём, что запись: стадии не знают, откуда пришли данные."""
+    spoken = MEETING_DE.split("---\n", 2)[2].strip()
+    requests = llm([ok(said_verbatim())])
+    run = Run(root=tmp_path, run_id=RUN_ID, lang="de", text=spoken, source="text")
+
+    assert walk(run, "ingest", "review") is None
+
+    for path in (TRANSCRIPT, REVIEW_JSON, REVIEW_MD):
+        assert (tmp_path / path).is_file(), path
+    assert not (tmp_path / IDEA).exists()
+    assert len(requests) == 1
+    asked = request_body(requests[0])
+    params = asked["messages"][0]["content"].split("<params>\n", 1)[1].split("\n</params>", 1)[0]
+    assert params.splitlines() == ["owner_lang: ru"]

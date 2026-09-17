@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.config import settings
 from app.dialog import Turn
 from app.ingest import Source, build_transcript
 from app.pipeline import (
@@ -194,6 +195,8 @@ def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResu
         params["lang"] = run.lang
     if stage.needs_interactive:
         params["interactive"] = "true" if run.interactive else "false"
+    if stage.needs_owner_lang:
+        params["owner_lang"] = settings.owner_lang
     history = (
         dialog_history(redo.turns)
         + previous_answer(redo.artifact, read_artifact(run.root, redo.artifact))

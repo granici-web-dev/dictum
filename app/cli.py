@@ -15,7 +15,7 @@ import frontmatter
 
 from app.config import ConfigError, settings
 from app.ingest import new_run_id, run_id_of
-from app.pipeline import NAMES, TRANSCRIPT, produced_by, stages_between
+from app.pipeline import NAMES, REVIEW_MD, TRANSCRIPT, produced_by, route_end, stages_between
 from app.run import Run, missing_before, read_artifact, walk
 from app.stages import StageError
 
@@ -46,6 +46,12 @@ def read_input(text: str) -> tuple[str, str | None]:
 LAST_STAGE_OF_A_LOCAL_RUN = "decompose"
 
 
+def local_stop(start: str) -> str:
+    """Где кончается локальный прогон: там же, где маршрут, только карточек он не публикует."""
+    end = route_end(start)
+    return LAST_STAGE_OF_A_LOCAL_RUN if end == "publish" else end
+
+
 def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: bool) -> int:
     run = Run(
         root=Path("."),
@@ -55,8 +61,9 @@ def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: 
         source="text",
         auto_approve=auto_approve,
     )
+    stop = local_stop(start)
     try:
-        waiting = walk(run, start, LAST_STAGE_OF_A_LOCAL_RUN)
+        waiting = walk(run, start, stop)
     except (StageError, ConfigError, anthropic.APIError) as error:
         logger.error("%s", error)
         return EXIT_STAGE_FAILED
@@ -71,7 +78,7 @@ def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: 
             # Следующая стадия берётся из этого же прогона, а не из полного списка: у ворот на
             # последней стадии обхода её нет, и подсказка предложила бы publish, которого --from
             # не принимает.
-            following = stages_between(waiting.stage, LAST_STAGE_OF_A_LOCAL_RUN)[1]
+            following = stages_between(waiting.stage, stop)[1]
             logger.info(
                 "Ворота после %s: прочитайте %s и продолжите прогон с --from %s.",
                 waiting.stage,
@@ -79,21 +86,26 @@ def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: 
                 following.name,
             )
         return EXIT_NEEDS_A_DECISION
+    if stop == "review":
+        logger.info("Разбор встречи готов: %s", REVIEW_MD)
     return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = CommandLineParser(
-        prog="app.cli", description="Прогон идеи через стадии без Telegram."
+        prog="app.cli", description="Разбор встречи или прогон по стадиям без Telegram."
     )
     source = parser.add_mutually_exclusive_group()
-    source.add_argument("text", nargs="?", help="Текст идеи.")
-    source.add_argument("--file", help="Файл с текстом идеи вместо аргумента.")
+    source.add_argument("text", nargs="?", help="Текст встречи или поручения.")
+    source.add_argument("--file", help="Файл с текстом вместо аргумента.")
     parser.add_argument(
         "--from",
         dest="start",
         choices=NAMES[1:-1],
-        help="Начать с этой стадии, взяв входные артефакты из outputs/.",
+        help=(
+            "Начать с этой стадии, взяв входные артефакты из outputs/. Без флага прогон "
+            "кончается разбором; путь до decompose начинается с --from intake."
+        ),
     )
     parser.add_argument(
         "--lang", help="Язык артефактов. По умолчанию из frontmatter входа, иначе DEFAULT_LANG."
@@ -110,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
         if not Path(TRANSCRIPT).exists():
             parser.error(f"для --from {args.start} нужен {TRANSCRIPT}: в нём run_id прогона")
-        for needed in missing_before(Path('.'), args.start, LAST_STAGE_OF_A_LOCAL_RUN):
+        for needed in missing_before(Path('.'), args.start, local_stop(args.start)):
             # Пропущенная стадия свой артефакт не пишет, поэтому вместо «нет файла» полезнее
             # сказать, какая стадия его делает: обычно ответ — начать прогон на шаг раньше.
             maker = produced_by(needed)

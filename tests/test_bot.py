@@ -83,6 +83,7 @@ from app.pipeline import (
     ISSUES_JSON,
     ISSUES_MD,
     NAMES,
+    REVIEW_JSON,
     Stage,
     StopKind,
     stages_between,
@@ -98,11 +99,19 @@ from app.store import (
     NO_TASK,
     PUBLISHED,
     REFUSED,
+    REVIEWED,
     STATUS_OF_STOP,
     Stopped,
 )
+from app.render import review_lead
+from app.review import Review
 from tests.helpers import REAL_BRIEF, REAL_ISSUES
+from tests.test_review import REVIEW_DE, REVIEW_NONE
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
+
+
+# Путь до карточек в фазе 1 начинается только с остановки, заведённой до выкладки (SPEC §7.2).
+CARDS_ROUTE_START = "intake"
 
 
 class FakeStore:
@@ -255,24 +264,32 @@ def test_something_that_is_not_an_id_is_named_in_the_refusal(
         allowed_chats()
 
 
-def test_the_progress_shows_every_stage_of_the_walk_in_its_order() -> None:
+def test_the_progress_of_a_new_run_shows_the_stages_up_to_the_review() -> None:
     text = progress_text(a_run(), [])
 
     printed = [line[2:] for line in text.splitlines()[2:]]
-    assert printed == [LABEL[name] for name in NAMES]
+    assert printed == [LABEL["ingest"], LABEL["review"]]
+
+
+def test_the_progress_of_a_continued_run_shows_its_own_route_to_the_cards() -> None:
+    """Остановка, заведённая до выкладки, идёт до карточек и показывает этот путь, а не разбор."""
+    text = progress_text(a_run(), [], CARDS_ROUTE_START)
+
+    printed = [line[2:] for line in text.splitlines()[2:]]
+    assert printed == [LABEL[stage.name] for stage in stages_between(CARDS_ROUTE_START, "publish")]
 
 
 def test_the_progress_marks_what_is_done_and_what_runs_now() -> None:
-    text = progress_text(a_run(), ["ingest", "intake"])
+    text = progress_text(a_run(), ["intake", "brief"], CARDS_ROUTE_START)
 
     marks = [line[0] for line in text.splitlines()[2:]]
-    assert marks == ["✓", "✓", "▸", "·", "·", "·", "·"]
+    assert marks == ["✓", "✓", "▸", "·", "·", "·"]
 
 
 def test_a_finished_walk_marks_everything_and_points_at_nothing() -> None:
-    text = progress_text(a_run(), list(NAMES))
+    text = progress_text(a_run(), ["ingest", "review"])
 
-    assert [line[0] for line in text.splitlines()[2:]] == ["✓"] * len(NAMES)
+    assert [line[0] for line in text.splitlines()[2:]] == ["✓", "✓"]
 
 
 def test_the_progress_carries_the_run_id_so_the_log_can_be_found() -> None:
@@ -324,8 +341,7 @@ def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
     printed = progress_text(a_run(source="voice"), []).splitlines()[2:]
 
-    assert printed[0] == f"▸ {VOICE_INGEST_LABEL}"
-    assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
+    assert printed == [f"▸ {VOICE_INGEST_LABEL}", f"· {LABEL['review']}"]
 
 
 @contextmanager
@@ -432,10 +448,11 @@ async def test_the_link_is_the_last_thing_the_message_shows(
             auto_approve=True,
         ),
         datetime.now(timezone.utc),
+        CARDS_ROUTE_START,
     )
 
     assert note.edits[-1] == finished_text(tmp_path)
-    assert len(note.edits) == len(NAMES) + 1
+    assert len(note.edits) == len(stages_between(CARDS_ROUTE_START, "publish")) + 1
     assert store.status["прогон"] == PUBLISHED
 
 
@@ -524,6 +541,7 @@ async def test_a_finished_run_reports_how_long_the_person_waited(
             auto_approve=True,
         ),
             datetime.now(timezone.utc) - timedelta(seconds=42),
+            CARDS_ROUTE_START,
         )
 
     assert "run=прогон finished cards=2" in caplog.text
@@ -680,7 +698,7 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
         )
     ]
     assert 12 not in store.stops
-    assert chat.replies[0].splitlines()[2] == f"✓ {VOICE_INGEST_LABEL}"
+    assert chat.replies[0].splitlines()[2] == f"▸ {LABEL['intake']}"
 
 
 @pytest.mark.asyncio
@@ -903,6 +921,7 @@ async def test_a_database_that_breaks_mid_run_does_not_take_the_cards_away(
             auto_approve=True,
         ),
         datetime.now(timezone.utc),
+        CARDS_ROUTE_START,
     )
 
     assert chat.edits[-1] == finished_text(tmp_path)
@@ -1710,13 +1729,14 @@ def test_a_gate_that_no_digest_knows_about_falls_instead_of_lying(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_a_continued_run_stops_at_the_next_gate_and_shows_its_own_voice_label(
+async def test_a_continued_run_stops_at_the_next_gate_and_shows_the_route_it_walks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
-    """План обещал обе проверки, а тест «Дальше» шёл через двойник, который не встаёт нигде.
+    """Тест «Дальше» шёл через двойник, который не встаёт нигде.
 
     Продолженный прогон обязан упереться в следующие ворота (иначе `auto_approve` из строки
-    ничего не значит) и остаться голосовым в подписи прогресса: записи на диске уже нет.
+    ничего не значит), а прогресс показывает путь до карточек, по которому он идёт: расшифровка
+    осталась на другом маршруте.
     """
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch, source="voice"))
@@ -1732,7 +1752,11 @@ async def test_a_continued_run_stops_at_the_next_gate_and_shows_its_own_voice_la
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
-    assert chat.replies[0].splitlines()[2] == f"✓ {VOICE_INGEST_LABEL}"
+    assert chat.replies[0].splitlines()[2:5] == [
+        f"✓ {LABEL['intake']}",
+        f"✓ {LABEL['brief']}",
+        f"▸ {LABEL['research']}",
+    ]
     assert chat.edits[-1].startswith("Бэклог готов")
     assert store.stops[12].stage == "decompose"
     assert store.status["прогон"] == AWAITING_GATE
@@ -2437,3 +2461,76 @@ async def test_consent_press_without_replied_message_is_stale(
     assert press.replies == [STALE_BUTTON]
     assert "refusal=stale_button chat=12" in caplog.text
     assert store.started == []
+
+
+def walk_reviewing(review_json: str, seen: list[tuple[str, str]] | None = None) -> Walking:
+    """Обход до разбора: кладёт review.json и помнит, откуда и докуда его просили идти."""
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        if seen is not None:
+            seen.append((start, stop))
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        (run.root / REVIEW_JSON).write_text(review_json, encoding="utf-8")
+        return None
+
+    return walking
+
+
+@pytest.mark.asyncio
+async def test_a_new_text_run_ends_with_the_contents_of_its_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE, seen))
+    chat = TextChat("Встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert seen == [("ingest", "review")]
+    assert chat.edits[-1] == review_lead(Review.model_validate_json(REVIEW_DE))
+    assert chat.edits[-1].startswith("Разбор встречи: 2 поручения")
+    assert store.status[store.started[0][0]] == REVIEWED
+    assert 12 not in store.stops
+
+
+@pytest.mark.asyncio
+async def test_a_review_without_tasks_closes_the_run_as_no_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_NONE))
+    chat = TextChat("Про отпуска и кофемашину")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == review_lead(Review.model_validate_json(REVIEW_NONE))
+    assert store.status[store.started[0][0]] == NO_TASK
+
+
+@pytest.mark.asyncio
+async def test_next_at_a_gate_left_from_before_the_review_still_walks_to_the_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Остановка, заведённая до выкладки, доходит до карточек, а не обрывается на разборе."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    seen: list[tuple[str, str]] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((start, stop))
+        (run.root / "outputs/publish.json").write_text('{"I-001": {}}', encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(bot, "walk", walking)
+
+    await on_gate_button(a_press(a_gate_button("прогон", "next")), NO_CONTEXT)
+
+    assert seen == [("research", "publish")]
+    assert store.status["прогон"] == PUBLISHED

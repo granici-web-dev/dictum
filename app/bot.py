@@ -1,4 +1,4 @@
-"""Telegram-бот: текст → весь пайплайн → карточки в Trello. См. SPEC.md §7.3.
+"""Telegram-бот: запись, голосовое или текст → разбор встречи. См. SPEC.md §7.3.
 
 Единственный асинхронный модуль (CONVENTIONS): пайплайн синхронный и уходит в поток, а обратно
 докладывает через цикл событий. Решения, которые можно принять без Telegram, вынесены функциями —
@@ -47,6 +47,7 @@ from app.pipeline import (
     BRIEF_QUESTION,
     ISSUES_JSON,
     NAMES,
+    REVIEW_JSON,
     Stage,
     StopKind,
     after,
@@ -55,7 +56,8 @@ from app.pipeline import (
     stages_between,
 )
 from app.publish import journal_of
-from app.render import backlog_digest, brief_digest
+from app.render import backlog_digest, brief_digest, review_lead
+from app.review import Review
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
     FAILED,
@@ -64,6 +66,7 @@ from app.store import (
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
+    REVIEWED,
     Stopped,
     add_turn,
     drop_stop,
@@ -106,6 +109,7 @@ MAX_FILE_BYTES = MAX_FILE_MEGABYTES * 1024 * 1024
 
 LABEL = {
     "ingest": "принял идею",
+    "review": "разбор встречи",
     "intake": "выделил суть",
     "brief": "собрал бриф",
     "research": "ресёрч пропущен",
@@ -134,8 +138,9 @@ GATES_UNKNOWN = (
 )
 
 GREETING = (
-    "Пришлите идею голосовым или текстом, одну за раз. Я доведу её до карточек в Trello и дам "
-    "ссылку.\nЭто займёт несколько минут — я буду писать после каждого шага."
+    "Пришлите запись встречи файлом, голосовое или текст. Я выпишу все поручения: кто поручил, "
+    "срок, что не надо и что переспросить, со сказанным в оригинале и переводом.\n"
+    "Это займёт пару минут — я буду писать после каждого шага."
 )
 
 BUSY = "Прогон уже идёт, дождитесь его конца."
@@ -1110,6 +1115,13 @@ def choice_ending(run: Run, stop: Pause) -> Ending:
     )
 
 
+def review_ending(run: Run) -> Ending:
+    """Разбор готов: оглавление встаёт в сообщение о ходе прогона, строка закрывается."""
+    review = Review.model_validate_json(read_artifact(run.root, REVIEW_JSON))
+    logger.info("run=%s reviewed tasks=%d", run.run_id, len(review.tasks))
+    return Ending(text=review_lead(review), status=REVIEWED if review.tasks else NO_TASK)
+
+
 async def outcome(
     run: Run,
     report: Callable[[Stage], None],
@@ -1139,6 +1151,8 @@ async def outcome(
                 stop=waiting,
                 keyboard=gate_keyboard(run.run_id, waiting.stage),
             )
+        if route_end(start) == "review":
+            return review_ending(run)
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)

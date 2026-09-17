@@ -13,14 +13,24 @@ from pathlib import Path
 import anthropic
 from anthropic import DefaultHttpxClient
 from anthropic.types import Message, MessageParam
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.candidates import check_candidates
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.dialog import Turn, check_question
 from app.models import IssuesFile
-from app.pipeline import BRIEF_QUESTION, CANDIDATES, ISSUES_JSON, ISSUES_MD, stage_named
-from app.render import issues_markdown
+from app.pipeline import (
+    BRIEF_QUESTION,
+    CANDIDATES,
+    ISSUES_JSON,
+    ISSUES_MD,
+    REVIEW_JSON,
+    REVIEW_MD,
+    TRANSCRIPT,
+    stage_named,
+)
+from app.render import issues_markdown, review_markdown
+from app.review import Review, check_review, fragments, stamp_review, unmatched_originals
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
@@ -48,7 +58,11 @@ def closed_branch(got: frozenset[str], allowed: tuple[frozenset[str], ...]) -> s
 
 
 def repairable_problems(
-    stage: str, files: dict[str, str], allowed: tuple[frozenset[str], ...]
+    stage: str,
+    files: dict[str, str],
+    allowed: tuple[frozenset[str], ...],
+    inputs: dict[str, str],
+    params: dict[str, str],
 ) -> list[str]:
     if not files:
         return [NO_FILE_BLOCKS]
@@ -63,11 +77,30 @@ def repairable_problems(
         return [closed_branch(given, allowed)]
     if stage == "decompose":
         return check_issues(files[ISSUES_JSON])
+    if stage == "review":
+        return check_review(files[REVIEW_JSON], inputs[TRANSCRIPT], params["owner_lang"])
     if CANDIDATES in files:
         return check_candidates(files[CANDIDATES])
     if BRIEF_QUESTION in files:
         return check_question(files[BRIEF_QUESTION])
     return []
+
+
+def unmatched_problems(files: dict[str, str], transcript: str) -> list[str]:
+    """Дословные фрагменты разбора, которых нет в расшифровке. Претензия только первого ответа.
+
+    После ремонта несошедшийся фрагмент стадию не роняет, а получает пометку (SPEC §7): на
+    встрече их десятки, и одно склеенное моделью составное слово отнимало бы весь разбор.
+    """
+    try:
+        review = Review.model_validate_json(files[REVIEW_JSON])
+    except ValidationError:
+        # Сломанную форму уже назвал check_review: сверять фрагменты не в чем.
+        return []
+    return [
+        f"в расшифровке дословно нет фрагмента «{original}»: скопируй его из расшифровки как есть"
+        for original in unmatched_originals(review, transcript)
+    ]
 
 
 def without_extras(stage: str, files: dict[str, str]) -> dict[str, str]:
@@ -249,6 +282,7 @@ def run_stage(
 ) -> StageResult:
     """`allowed` сужает выходы стадии: повтор по правке не принимает ветку, которая его вызвала."""
     outputs = allowed if allowed is not None else stage_named(stage).outputs
+    given_params = params or {}
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
     messages: list[MessageParam] = [
         *(history or []),
@@ -260,7 +294,9 @@ def run_stage(
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
 
-    problems = repairable_problems(stage, files, outputs)
+    problems = repairable_problems(stage, files, outputs, inputs, given_params)
+    if stage == "review" and frozenset(files) in outputs:
+        problems += unmatched_problems(files, inputs[TRANSCRIPT])
     if problems:
         # Удачный ремонт стирал причину: прогон выглядел как два вызова без объяснения,
         # а претензии оставались только у провалившихся.
@@ -283,7 +319,7 @@ def run_stage(
         response = repair
         raw = answer_text(stage, repair)
         files = without_extras(stage, parse_file_blocks(raw))
-        problems = repairable_problems(stage, files, outputs)
+        problems = repairable_problems(stage, files, outputs, inputs, given_params)
 
     if frozenset(files) not in outputs:
         expected = " or ".join(", ".join(sorted(paths)) for paths in outputs)
@@ -296,6 +332,14 @@ def run_stage(
         # В issues.json run_id вписывают здесь, чтобы publish его только читал.
         files[ISSUES_JSON] = with_run_id(files[ISSUES_JSON], run_id)
         files[ISSUES_MD] = issues_markdown(IssuesFile.model_validate_json(files[ISSUES_JSON]))
+    if stage == "review":
+        files[REVIEW_JSON] = stamp_review(
+            files[REVIEW_JSON], inputs[TRANSCRIPT], given_params["owner_lang"]
+        )
+        review = Review.model_validate_json(files[REVIEW_JSON])
+        unverified = sum(not fragment.in_transcript for fragment in fragments(review))
+        logger.info("stage=review run=%s unverified=%d", run_id, unverified)
+        files[REVIEW_MD] = review_markdown(review)
     return StageResult(
         files=files,
         model=response.model,

@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 StopKind = Literal["choice", "gate", "answer"]
 
 TRANSCRIPT = "inputs/transcript.md"
+REVIEW_JSON = "outputs/review.json"
+REVIEW_MD = "outputs/review.md"
 IDEA = "inputs/idea.md"
 CANDIDATES = "outputs/candidates.md"
 BRIEF = "outputs/brief.md"
@@ -32,8 +34,8 @@ class Stage(BaseModel):
     inputs: tuple[str, ...] = ()
     # Файл репозитория, а не артефакт прогона: его не читают из outputs/ и не версионируют.
     template: str | None = None
-    # Что отдаёт исполнитель стадии. issues.md сюда не входит: его дорисовывает код
-    # уже после проверок, и модель за него не отвечает.
+    # Что отдаёт исполнитель стадии. issues.md и review.md сюда не входят: их дорисовывает код
+    # уже после проверок, и модель за них не отвечает.
     outputs: tuple[frozenset[str], ...]
     params: dict[str, str] = Field(default_factory=dict)
     # Язык — свойство прогона, а не стадии, поэтому подмешивается на ходу. Сегодня его получает
@@ -42,6 +44,9 @@ class Stage(BaseModel):
     # То же и с `interactive`: есть ли кому отвечать, знает прогон, а не запись стадии. Пока
     # диалога не было, флаг стоял здесь константой (SPEC §3.2); с P2-04 его называет вход.
     needs_interactive: bool = False
+    # Язык владельца — свойство установки, а не прогона (P3-08): его читают из настроек в момент
+    # стадии, а дальше язык объявляет её артефакт.
+    needs_owner_lang: bool = False
     # Артефакт, который человек читает на воротах после стадии (SPEC §3.2); None — ворот нет.
     # Из outputs его не вывести: у decompose на воротах читают issues.md, а он там не объявлен.
     gate_after: str | None = None
@@ -52,6 +57,13 @@ STAGES: tuple[Stage, ...] = (
         name="ingest",
         runs="code",
         outputs=(frozenset({TRANSCRIPT}),),
+    ),
+    Stage(
+        name="review",
+        runs="llm",
+        inputs=(TRANSCRIPT,),
+        outputs=(frozenset({REVIEW_JSON}),),
+        needs_owner_lang=True,
     ),
     Stage(
         name="intake",
@@ -108,7 +120,9 @@ NAMES = tuple(stage.name for stage in STAGES)
 # Маршруты: отрезки списка от первой стадии до последней включительно, у каждого свой результат.
 # Обход идёт до конца маршрута, в котором стоит стартовая стадия: так продолженный прогон доходит
 # до того же результата, к которому шёл, а не до конца всего списка (P3-08).
-ROUTES: tuple[tuple[str, str], ...] = (("ingest", "publish"),)
+# Запись кончается разбором встречи; путь до карточек начинается с intake и в фазе 1 из бота не
+# заводится: его держат остановки, заведённые до выкладки, и `make run-text --from intake`.
+ROUTES: tuple[tuple[str, str], ...] = (("ingest", "review"), ("intake", "publish"))
 
 
 def stage_named(name: str) -> Stage:
