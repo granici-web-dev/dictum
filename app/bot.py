@@ -716,7 +716,9 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
         return
     if running.locked():
-        await refuse(message, "busy", BUSY, consent="yes", by=by)
+        # Нажатие называется `press`, а не `consent`: `grep "consent=yes"` считает данные согласия,
+        # а при занятом боте его никто не дал.
+        await refuse(message, "busy", BUSY, press="yes", by=by)
         return
     sent = message.reply_to_message
     recording = sent and (sent.audio or sent.document)
@@ -758,7 +760,9 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             # не должна лежать у нас дольше, чем нужна.
             audio.unlink()
             await asyncio.to_thread(finish_run, run_id, REFUSED)
-            await refuse(message, "file_too_long", FILE_TOO_LONG, note=note, seconds=seconds)
+            await refuse(
+                message, "file_too_long", FILE_TOO_LONG, note=note, run=run_id, seconds=seconds
+            )
             return
         # Остановку снимаем только теперь: отвергнутый файл не должен стоить человеку его
         # ответа на воротах.

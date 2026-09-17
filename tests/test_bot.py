@@ -2263,24 +2263,34 @@ async def test_file_over_20_minutes_refused_after_download(
     assert store.status[run_id] == REFUSED
     assert store.stops[12].run_id == "прогон"
     assert press.edits == [FILE_TOO_LONG]
-    assert f"refusal=file_too_long chat=12 seconds={MAX_FILE_SECONDS + 1}" in caplog.text
+    assert (
+        f"refusal=file_too_long chat=12 run={run_id} seconds={MAX_FILE_SECONDS + 1}"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
 async def test_consent_press_during_run_is_busy_and_keeps_keyboard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Отказ не должен читаться как данное согласие: журнал согласий считают по consent=yes."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     recording = SentRecording()
     press = ConsentPress(CONSENT_YES, recording)
     await bot.running.acquire()
     try:
-        await on_consent_button(a_press(press), NO_CONTEXT)
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_consent_button(a_press(press), NO_CONTEXT)
     finally:
         bot.running.release()
 
     assert press.replies == [BUSY]
+    assert "refusal=busy chat=12 press=yes by=99" in caplog.text
+    assert "consent=yes" not in caplog.text
     assert press.markups == []
     assert recording.fetched == 0
     assert store.started == []
