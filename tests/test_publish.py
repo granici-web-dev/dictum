@@ -24,6 +24,7 @@ from app.publish import (
     publish_task,
     report,
 )
+from app.review import Review
 from app.steps import Pair, Steps
 from app.trello import TrelloCard, TrelloError
 from tests.helpers import (
@@ -724,6 +725,63 @@ def test_the_task_card_description_matches_the_snapshot(board: FakeBoard, tmp_pa
     publish_task(steps_file(tmp_path))
 
     assert task_card(board)["desc"].splitlines() == snapshot_lines("steps_de_card.txt")
+
+
+def from_the_ticket(steps: Steps) -> None:
+    """Поручение из тикета: review_ticket_de.json написан вручную по составленному тексту."""
+    [task] = Review.model_validate_json(
+        (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
+    ).tasks
+    assert steps.task is not None
+    steps.task.ticket_key = task.ticket_key
+    steps.task.ticket_url = task.ticket_url
+    steps.task.deadline = task.deadline
+    steps.task.constraints = task.constraints
+    steps.task.acceptance = task.acceptance
+    steps.task.do_not = task.do_not
+    steps.task.ask_back = task.ask_back
+
+
+def test_a_ticket_card_is_named_with_the_ticket_key_after_our_key(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    publish_task(steps_file(tmp_path, from_the_ticket))
+
+    steps = Steps.model_validate_json(STEPS_DE)
+    assert task_card(board)["name"] == f"[DCT-1] ABC-123 {steps.title.text}"
+
+
+def test_the_ticket_card_description_matches_the_snapshot(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    publish_task(steps_file(tmp_path, from_the_ticket))
+
+    assert task_card(board)["desc"].splitlines() == snapshot_lines("steps_ticket_de_card.txt")
+
+
+def test_a_ticket_without_a_link_names_its_key_in_the_description(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    def without_link(steps: Steps) -> None:
+        from_the_ticket(steps)
+        assert steps.task is not None
+        steps.task.ticket_url = None
+
+    publish_task(steps_file(tmp_path, without_link))
+
+    assert "Ticket: ABC-123" in task_card(board)["desc"].splitlines()
+
+
+def test_a_published_ticket_card_is_found_again_under_its_name(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    path = steps_file(tmp_path, from_the_ticket)
+    publish_task(path)
+
+    outcome = publish_task(path)
+
+    assert (outcome.key, outcome.status) == ("DCT-1", "existing")
+    assert len(board.cards) == 1
 
 
 def test_task_creates_the_assignments_list_on_the_left_and_nothing_else(

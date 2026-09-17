@@ -167,3 +167,23 @@ def test_the_stamp_writes_the_run_the_languages_and_what_was_said_over_the_model
 
 def test_the_steps_fixture_is_the_stamped_model_answer() -> None:
     assert stamp_steps(json.dumps(model_answer()), assignment()) == STEPS_DE
+
+
+def test_the_stamp_carries_the_ticket_and_its_acceptance_criteria_from_the_review() -> None:
+    """review_ticket_de.json написан вручную по составленному вручную тексту тикета."""
+    review = Review.model_validate_json(
+        (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
+    )
+    ticket_assignment = assignment_of(review, 1, CHILD, PARENT, None)
+
+    stamped = Steps.model_validate_json(
+        stamp_steps(json.dumps(model_answer()), ticket_assignment)
+    )
+
+    assert stamped.task is not None
+    task = review.tasks[0]
+    assert (stamped.task.ticket_key, stamped.task.ticket_url) == (
+        "ABC-123",
+        "https://jira.example.com/browse/ABC-123",
+    )
+    assert stamped.task.acceptance == task.acceptance

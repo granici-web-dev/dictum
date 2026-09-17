@@ -1,0 +1,19 @@
+Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geht: E-Mail-Format und Pflichtfelder. Die API bleibt unverändert.
+
+Ticket: https://jira.example.com/browse/ABC-123
+Deadline: 26.09.2026
+Constraints:
+- Die Felder des Login-Formulars sollen im Browser geprüft werden, bevor eine Anfrage an den Server geht.
+Acceptance criteria:
+- Ein leeres Pflichtfeld zeigt eine Fehlermeldung unter dem Feld.
+- Eine ungültige E-Mail-Adresse zeigt eine Fehlermeldung unter dem Feld.
+- Solange ein Feld ungültig ist, geht keine Anfrage an die API.
+Do not:
+- Die API bleibt unverändert, sie gehört dem Backend-Team.
+
+Translation (ru):
+Проверять форму входа в браузере до отправки
+Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не меняется.
+
+From review: 3f9c1a7e5b2d8c40, task 1
+dictum:DCT-1 run:7b2e0d91c4a3f615 local:A1

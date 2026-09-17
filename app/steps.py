@@ -12,7 +12,16 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.ingest import Source
-from app.review import NOT_BLANK, RECOGNISED_LANGUAGE_SOURCES, AskBack, Review, Said, Task
+from app.review import (
+    NOT_BLANK,
+    RECOGNISED_LANGUAGE_SOURCES,
+    TICKET_KEY,
+    AskBack,
+    Review,
+    Said,
+    Task,
+    absent,
+)
 
 MAX_STEPS = 10
 
@@ -37,8 +46,11 @@ class TaskRef(BaseModel):
 
     parent_run_id: str
     number: int = Field(ge=1)
+    ticket_key: str | None = Field(default=None, pattern=TICKET_KEY, exclude_if=absent)
+    ticket_url: str | None = Field(default=None, exclude_if=absent)
     deadline: Said | None = None
     constraints: list[Said] = Field(default_factory=list)
+    acceptance: list[Said] = Field(default_factory=list, exclude_if=absent)
     do_not: list[Said] = Field(default_factory=list)
     ask_back: list[AskBack] = Field(default_factory=list)
 
@@ -148,8 +160,11 @@ def stamp_steps(steps_json: str, assignment: Assignment) -> str:
     steps.task = TaskRef(
         parent_run_id=assignment.parent_run_id,
         number=assignment.number,
+        ticket_key=task.ticket_key,
+        ticket_url=task.ticket_url,
         deadline=task.deadline,
         constraints=task.constraints,
+        acceptance=task.acceptance,
         do_not=task.do_not,
         ask_back=task.ask_back,
     )

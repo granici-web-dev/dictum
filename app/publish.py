@@ -411,9 +411,17 @@ def task_card_body(steps: Steps, task: TaskRef) -> str:
     """
     lines = [steps.summary.text]
     said: list[str] = []
+    # Ключ уже стоит в имени карточки, и строка нужна ради ссылки; без ссылки её заменяет ключ.
+    ticket = task.ticket_url or task.ticket_key
+    if ticket:
+        said.append(f"Ticket: {ticket}")
     if task.deadline:
         said.append(f"Deadline: {said_on_card(task.deadline)}")
-    for heading, items in (("Constraints:", task.constraints), ("Do not:", task.do_not)):
+    for heading, items in (
+        ("Constraints:", task.constraints),
+        ("Acceptance criteria:", task.acceptance),
+        ("Do not:", task.do_not),
+    ):
         if items:
             said += [heading, *(f"- {said_on_card(item)}" for item in items)]
     if task.ask_back:
@@ -483,7 +491,7 @@ def publish_task(steps_path: Path) -> CardOutcome:
             local_id=local_id,
             phase=None,
             list_id=ensure_assignments_list(board),
-            title=steps.title.text.strip(),
+            title=" ".join(filter(None, (steps.task.ticket_key, steps.title.text.strip()))),
             body=task_card_body(steps, steps.task),
             label_ids=[],
             checklist_name=STEPS_CHECKLIST,
