@@ -3,7 +3,7 @@
   "tasks": [
     {
       "title": "Проверка формы входа до отправки на сервер",
-      "summary": "Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не трогать, он принадлежит команде бэкенда.",
+      "summary": "Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не трогать, он принадлежит Backend-Team.",
       "assigned_by": "Teamlead",
       "assignee": "du (имя не названо)",
       "status": "decision",
@@ -26,7 +26,7 @@
       ],
       "do_not": [
         {
-          "text": "трогать API: он принадлежит команде бэкенда",
+          "text": "трогать API: он принадлежит Backend-Team",
           "original": "Bitte die API nicht anfassen, die gehört dem Backend-Team.",
           "in_transcript": true
         }
@@ -53,14 +53,19 @@
     },
     {
       "title": "Сообщения об ошибках на странице аккаунта на немецком",
-      "summary": "Перевести сообщения об ошибках на странице аккаунта с английского на немецкий; тексты пришлёт Julia из продуктовой команды. Срочность ниже, чем у проверки формы входа, срок не назван.",
+      "summary": "Перевести сообщения об ошибках на странице аккаунта с английского на немецкий; тексты пришлёт Julia из Produktteam. Срочность ниже, чем у проверки формы входа, срок не назван.",
       "assigned_by": "Teamlead",
       "assignee": "du (имя не названо)",
       "status": "decision",
       "deadline": null,
       "constraints": [
         {
-          "text": "тексты пришлёт Julia из продуктовой команды",
+          "text": "не срочно",
+          "original": "das ist nicht so dringend",
+          "in_transcript": true
+        },
+        {
+          "text": "тексты пришлёт Julia из Produktteam",
           "original": "die Texte schickt dir Julia aus dem Produktteam",
           "in_transcript": true
         },
