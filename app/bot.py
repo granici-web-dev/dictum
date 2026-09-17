@@ -48,6 +48,8 @@ from app.pipeline import (
     ISSUES_JSON,
     NAMES,
     REVIEW_JSON,
+    REVIEW_MD,
+    TRANSCRIPT,
     Stage,
     StopKind,
     after,
@@ -56,7 +58,7 @@ from app.pipeline import (
     stages_between,
 )
 from app.publish import journal_of
-from app.render import backlog_digest, brief_digest, review_lead
+from app.render import backlog_digest, brief_digest, review_lead, review_messages
 from app.review import Review
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
@@ -263,7 +265,8 @@ class Ending(BaseModel):
     а ответить ещё раз есть смысл. Статус остановки тогда не пишут: его называет род (§4),
     и второе его написание разошлось бы с первым. `status` — только для концовок без остановки.
     `keyboard` собирает тот, кто читал артефакт: списку кнопок нужны сами идеи, и второе
-    чтение файла ради них завело бы второе место, где список живёт.
+    чтение файла ради них завело бы второе место, где список живёт. `review` — по тому же
+    доводу: поручения уходят сообщениями из того разбора, чьё оглавление уже в `text`.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -272,6 +275,7 @@ class Ending(BaseModel):
     status: str = ""
     stop: Pause | None = None
     keyboard: InlineKeyboardMarkup | None = None
+    review: Review | None = None
 
 
 def allowed_chats() -> frozenset[int]:
@@ -881,11 +885,28 @@ async def follow(
         # без содержания, без кнопок и без единого способа понять, чего от него ждут.
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
+    if ending.review is not None:
+        await send_review(note, run, ending.review)
     # Сколько человек прождал ответа: отчёт серии живых прогонов (P2-06) отвечает на этот вопрос
     # числом, а из длительностей стадий его не сложить — между ними скачивание, публикация и
     # правки.
     waited = datetime.now(timezone.utc) - asked_at
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
+
+
+async def send_review(note: Message, run: Run, review: Review) -> None:
+    """Поручения сообщениями в порядке встречи, затем разбор и расшифровка файлами (SPEC §7.3).
+
+    Строка уже закрыта, и каждая отправка прикрыта отдельно: сорванное сообщение одного
+    поручения не должно отнять у человека остальные и расшифровку, по которой их проверяют.
+    Расшифровка уходит и при пустом разборе: «заданий нет» проверяют как раз по ней.
+    """
+    for text in review_messages(review):
+        with suppress(TelegramError):
+            await note.reply_text(text)
+    for document in (REVIEW_MD, TRANSCRIPT):
+        with suppress(TelegramError):
+            await note.reply_document(run.root / document)
 
 
 def done_before(start: str) -> list[str]:
@@ -1119,7 +1140,9 @@ def review_ending(run: Run) -> Ending:
     """Разбор готов: оглавление встаёт в сообщение о ходе прогона, строка закрывается."""
     review = Review.model_validate_json(read_artifact(run.root, REVIEW_JSON))
     logger.info("run=%s reviewed tasks=%d", run.run_id, len(review.tasks))
-    return Ending(text=review_lead(review), status=REVIEWED if review.tasks else NO_TASK)
+    return Ending(
+        text=review_lead(review), status=REVIEWED if review.tasks else NO_TASK, review=review
+    )
 
 
 async def outcome(

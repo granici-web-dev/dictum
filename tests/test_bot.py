@@ -84,6 +84,8 @@ from app.pipeline import (
     ISSUES_MD,
     NAMES,
     REVIEW_JSON,
+    REVIEW_MD,
+    TRANSCRIPT,
     Stage,
     StopKind,
     stages_between,
@@ -103,7 +105,7 @@ from app.store import (
     STATUS_OF_STOP,
     Stopped,
 )
-from app.render import review_lead
+from app.render import review_lead, review_messages
 from app.review import Review
 from tests.helpers import REAL_BRIEF, REAL_ISSUES
 from tests.test_review import REVIEW_DE, REVIEW_NONE
@@ -2534,3 +2536,100 @@ async def test_next_at_a_gate_left_from_before_the_review_still_walks_to_the_car
 
     assert seen == [("research", "publish")]
     assert store.status["прогон"] == PUBLISHED
+
+
+class DeliveryChat(TextChat):
+    """Чат, который помнит, что и в каком порядке ушло человеку после сообщения о ходе прогона.
+
+    `failing` — что Telegram не примет: текст, начинающийся с этой строки, или путь документа.
+    """
+
+    def __init__(self, text: str, failing: str | Path | None = None) -> None:
+        super().__init__(text)
+        self.sent: list[str | Path] = []
+        self.failing = failing
+
+    async def reply_text(self, text: str) -> Message:
+        if self.replies:
+            if isinstance(self.failing, str) and text.startswith(self.failing):
+                raise TelegramError("сообщение не ушло")
+            self.sent.append(text)
+        return await super().reply_text(text)
+
+    async def reply_document(self, document: Path) -> Message:
+        if document == self.failing:
+            raise TelegramError("файл не ушёл")
+        self.sent.append(document)
+        return await super().reply_document(document)
+
+
+def reviewing_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, review_json: str) -> Path:
+    """Новый прогон текстом, который кончится этим разбором. Отдаёт корень прогона."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_reviewing(review_json))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "разбор")
+    return tmp_path / "runs" / "разбор"
+
+
+@pytest.mark.asyncio
+async def test_a_review_reaches_the_person_as_one_message_per_task_then_both_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Сообщение поручения можно переслать или закрепить; файлы — на хранение и на сверку."""
+    root = reviewing_in(tmp_path, monkeypatch, REVIEW_DE)
+    chat = DeliveryChat("Встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == review_lead(Review.model_validate_json(REVIEW_DE))
+    assert chat.sent == [
+        *review_messages(Review.model_validate_json(REVIEW_DE)),
+        root / REVIEW_MD,
+        root / TRANSCRIPT,
+    ]
+    assert store.status[root.name] == REVIEWED
+
+
+@pytest.mark.asyncio
+async def test_a_review_without_tasks_still_sends_the_review_and_the_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """«Заданий нет» проверяют как раз по расшифровке."""
+    root = reviewing_in(tmp_path, monkeypatch, REVIEW_NONE)
+    chat = DeliveryChat("Про отпуска и кофемашину")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.sent == [root / REVIEW_MD, root / TRANSCRIPT]
+    assert store.status[root.name] == NO_TASK
+
+
+@pytest.mark.asyncio
+async def test_a_task_message_that_did_not_go_keeps_the_rest_of_the_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    messages = review_messages(Review.model_validate_json(REVIEW_DE))
+    root = reviewing_in(tmp_path, monkeypatch, REVIEW_DE)
+    chat = DeliveryChat("Встреча текстом", failing=messages[0])
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.sent == [messages[1], root / REVIEW_MD, root / TRANSCRIPT]
+    assert store.status[root.name] == REVIEWED
+
+
+@pytest.mark.asyncio
+async def test_a_review_file_that_did_not_go_keeps_the_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    root = reviewing_in(tmp_path, monkeypatch, REVIEW_DE)
+    chat = DeliveryChat("Встреча текстом", failing=root / REVIEW_MD)
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.sent[-2:] == [
+        review_messages(Review.model_validate_json(REVIEW_DE))[-1],
+        root / TRANSCRIPT,
+    ]
+    assert store.status[root.name] == REVIEWED
