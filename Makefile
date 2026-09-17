@@ -9,8 +9,9 @@ test:
 	uv run ruff check . && uv run mypy app tests && uv run pytest -q
 run-text:
 	uv run python -m app.cli $(if $(FILE),--file $(FILE),"$(TEXT)") $(ARGS)
-# Уборка между прогонами репетиции. Обе цели только руками и ни от чего не зависят: попасть в них
-# из up, test или run-text нельзя, иначе однажды прогон сотрёт доску или артефакты за собой.
+# Уборка своей доски и артефактов после проверочных прогонов. Обе цели только руками и ни от
+# чего не зависят: попасть в них из up, test или run-text нельзя, иначе однажды прогон сотрёт
+# доску или артефакты за собой.
 clean-board:
 	uv run python -m scripts.clear_board $(if $(RUN),--run $(RUN),--all)
 clean-runs:

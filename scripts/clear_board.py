@@ -1,4 +1,4 @@
-"""Уборка демо-доски между прогонами репетиции (P2-06).
+"""Уборка своей доски после проверочных прогонов (P2-06).
 
 Карточки уходят в архив, а не под нож: архивная карточка исчезает с доски и не участвует в
 поиске маркеров при публикации, то есть для прогона это чистый лист, но любую можно вернуть.
@@ -60,7 +60,7 @@ def archive_lists(board: Trello) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Убрать карточки с демо-доски в архив.")
+    parser = argparse.ArgumentParser(description="Убрать карточки с доски в архив.")
     scope = parser.add_mutually_exclusive_group(required=True)
     scope.add_argument("--all", action="store_true", help="все карточки и все списки доски")
     scope.add_argument("--run", metavar="RUN_ID", help="только карточки одного прогона")
