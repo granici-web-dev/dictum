@@ -87,6 +87,7 @@ from app.pipeline import (
 )
 from app.run import Pause, Redo, Run, walk
 from app.dialog import Turn
+from app.transcribe import TranscriptionError
 from app.store import (
     AWAITING_ANSWER,
     AWAITING_GATE,
@@ -2267,6 +2268,29 @@ async def test_file_over_20_minutes_refused_after_download(
         f"refusal=file_too_long chat=12 run={run_id} seconds={MAX_FILE_SECONDS + 1}"
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_file_is_deleted_after_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(settings, "keep_audio", True)
+
+    def unreadable(path: Path) -> int:
+        raise TranscriptionError("ffprobe не смог прочитать recording.m4a: Invalid data found")
+
+    monkeypatch.setattr(bot, "recording_seconds", unreadable)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    press = ConsentPress(CONSENT_YES, SentRecording())
+
+    await on_consent_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, _, _)] = store.started
+    assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
+    assert store.status[run_id] == FAILED
+    assert press.edits == ["ffprobe не смог прочитать recording.m4a: Invalid data found"]
 
 
 @pytest.mark.asyncio

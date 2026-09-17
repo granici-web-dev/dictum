@@ -1,7 +1,10 @@
 import logging
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
+import httpx2
+import openai
 import pytest
 
 from app import transcribe
@@ -19,7 +22,7 @@ def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     voice.write_bytes(b"ogg")
 
     def convert(source: Path) -> Path:
-        target = source.with_suffix(".mp3")
+        target = transcribe.recoded(source)
         target.write_bytes(b"mp3")
         return target
 
@@ -80,7 +83,7 @@ def test_the_recording_is_gone_once_the_text_is_in_hand(
     transcribe.transcribe(recording, RUN)
 
     assert not recording.exists()
-    assert not recording.with_suffix(".mp3").exists()
+    assert not transcribe.recoded(recording).exists()
 
 
 def test_keep_audio_leaves_both_files_on_disk(
@@ -92,7 +95,41 @@ def test_keep_audio_leaves_both_files_on_disk(
     transcribe.transcribe(recording, RUN)
 
     assert recording.exists()
-    assert recording.with_suffix(".mp3").exists()
+    assert transcribe.recoded(recording).exists()
+
+
+def ffmpeg_breaks_halfway(source: Path) -> Path:
+    transcribe.recoded(source).write_bytes(b"mp3 without its end")
+    raise TranscriptionError("ffmpeg не смог перекодировать voice.oga")
+
+
+@pytest.mark.parametrize(
+    ("convert", "answer", "raised"),
+    [
+        (ffmpeg_breaks_halfway, None, TranscriptionError),
+        (None, httpx2.Response(400, json={"error": {"message": "bad file"}}), openai.APIError),
+        (None, heard("   "), TranscriptionError),
+    ],
+    ids=["ffmpeg", "whisper", "nothing_heard"],
+)
+def test_the_recording_is_gone_when_the_transcription_breaks(
+    whisper: InstallResponses,
+    recording: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    convert: Callable[[Path], Path] | None,
+    answer: httpx2.Response | None,
+    raised: type[Exception],
+) -> None:
+    """Чужая запись у нас не для повтора: бот начинает новый прогон с нового скачивания."""
+    if convert is not None:
+        monkeypatch.setattr(transcribe, "convert_to_mp3", convert)
+    whisper([] if answer is None else [answer])
+
+    with pytest.raises(raised):
+        transcribe.transcribe(recording, RUN)
+
+    assert not recording.exists()
+    assert not transcribe.recoded(recording).exists()
 
 
 def test_silence_is_refused_before_a_single_stage_is_paid_for(
@@ -215,3 +252,21 @@ def test_recording_seconds_raises_on_unreadable_file(
 
     with pytest.raises(TranscriptionError, match="recording.m4a"):
         recording_seconds(tmp_path / "recording.m4a")
+
+
+def test_ffprobe_refusal_shows_the_file_name_and_not_the_server_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recording = tmp_path / "runs" / "a1b2" / "inputs" / "recording.m4a"
+
+    def fails(command: list[str], **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(
+            1, command, stderr=f"{recording}: Invalid data found when processing input\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", fails)
+
+    with pytest.raises(TranscriptionError) as refusal:
+        recording_seconds(recording)
+    assert "recording.m4a: Invalid data found" in str(refusal.value)
+    assert str(tmp_path) not in str(refusal.value)

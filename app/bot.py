@@ -752,6 +752,8 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             seconds = await asyncio.to_thread(recording_seconds, audio)
         except TranscriptionError as error:
             logger.warning("Прогон %s не узнал длину записи: %s", run_id, error)
+            # Как и длинная: расшифровывать её никто не будет, KEEP_AUDIO тут ни при чём.
+            audio.unlink()
             await asyncio.to_thread(finish_run, run_id, FAILED)
             await note.edit_text(str(error))
             return

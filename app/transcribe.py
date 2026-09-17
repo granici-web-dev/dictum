@@ -101,9 +101,9 @@ def recording_seconds(recording: Path) -> int:
     except FileNotFoundError as error:
         raise TranscriptionError(FFPROBE_MISSING) from error
     except subprocess.CalledProcessError as error:
-        raise TranscriptionError(
-            f"ffprobe не смог прочитать {recording.name}: {error.stderr.strip()[-STDERR_TAIL:]}"
-        ) from error
+        # ffprobe называет файл полным путём, а текст читает человек: путь на сервере не его дело.
+        reason = error.stderr.replace(str(recording), recording.name).strip()[-STDERR_TAIL:]
+        raise TranscriptionError(f"ffprobe не смог прочитать {recording.name}: {reason}") from error
     # У потока без длительности ffprobe печатает «N/A» и выходит с нулём.
     try:
         return round(float(probed.stdout.strip()))
@@ -114,10 +114,14 @@ def recording_seconds(recording: Path) -> int:
         ) from error
 
 
-def convert_to_mp3(source: Path) -> Path:
+def recoded(source: Path) -> Path:
     # Не `with_suffix(".mp3")`: у присланного mp3 это тот же путь, что и вход, а ffmpeg править
     # файл на месте отказывается («Output same as Input») — прогон срывался на перекодировании.
-    target = source.with_name(f"{source.stem}.16k.mp3")
+    return source.with_name(f"{source.stem}.16k.mp3")
+
+
+def convert_to_mp3(source: Path) -> Path:
+    target = recoded(source)
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-i", str(source), "-ac", "1", "-ar", "16000", str(target)],
@@ -168,13 +172,21 @@ def language_code(detected: str) -> str:
 def transcribe(audio: Path, run_id: str) -> Transcription:
     # Клиент строится первым: он проверяет ALLOW_LIVE_API и ключ, и делать это после ffmpeg
     # значит запустить подпроцесс ради прогона, который всё равно откажется.
-    client = whisper_client()
-    mp3 = convert_to_mp3(audio)
-    started = time.perf_counter()
-    with mp3.open("rb") as recording:
-        answer = client.audio.transcriptions.create(
-            model=MODEL, file=recording, response_format="verbose_json"
-        )
+    try:
+        client = whisper_client()
+        mp3 = convert_to_mp3(audio)
+        started = time.perf_counter()
+        with mp3.open("rb") as recording:
+            answer = client.audio.transcriptions.create(
+                model=MODEL, file=recording, response_format="verbose_json"
+            )
+    finally:
+        # При любом исходе, а не после успеха: запись с диктофона несёт чужие голоса, и сорванная
+        # расшифровка не причина держать её у нас. Повтора с того же файла всё равно нет, бот
+        # начинает новый прогон с нового скачивания.
+        if not settings.keep_audio:
+            audio.unlink(missing_ok=True)
+            recoded(audio).unlink(missing_ok=True)
     logger.info(
         "stage=ingest run=%s model=%s audio_seconds=%d duration_ms=%d",
         run_id,
@@ -185,9 +197,6 @@ def transcribe(audio: Path, run_id: str) -> Transcription:
     text = answer.text.strip()
     if not text:
         raise NothingHeard(NOTHING_HEARD)
-    if not settings.keep_audio:
-        audio.unlink()
-        mp3.unlink()
     return Transcription(
         text=text,
         lang=language_code(answer.language),
