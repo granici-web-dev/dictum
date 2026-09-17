@@ -70,14 +70,14 @@ Do not change a row without recording the decision in `SPEC.md`.
 - **LangChain, LlamaIndex, agent frameworks.** Five prompts and one SDK do not need an orchestration layer; frameworks hide the exact prompt and the token usage we log.
 - **Trello SDKs (py-trello and similar).** Six REST endpoints via httpx are easier to test with respx than a wrapper with its own auth and pagination behaviour.
 - **Web frameworks (FastAPI, Django) before P4-03.** The bot is the only UI. A webhook endpoint arrives with the Hetzner deploy, not earlier.
-- **Run state in JSON files.** Concurrent runs and 24 h gate timeouts need transactions and timestamps, not file locks.
+- **Run state in JSON files.** Concurrent runs and stops that survive a restart need transactions and timestamps, not file locks.
 
 ## TESTING
 
 ### Worth testing
 - **Artifact contracts and validation.** `issues.json` schema, unknown `depends_on`, cycles, `estimate` and `test_hint`; frontmatter of `transcript.md` and `brief.md`; parsing of the PRD "Скоп MVP" table.
 - **External clients through mocks.** Trello: list creation, card, checklist and label creation, publish idempotency via the `dictum:<KEY-N> run:<run_id> local:<id>` marker read back from the board, one repeat on 429. Anthropic: prompt assembly, `user_edit` appended, retry on network error, one retry on invalid JSON. Whisper: chunking and merging of long audio.
-- **Gates and run status transitions.** Pipeline stops after intake (candidates or low confidence), brief and decompose; consent blocks audio; `auto_approve` skips every gate except consent; 24 h timeout → `stalled`.
+- **Gates and run status transitions.** Pipeline stops after intake (candidates or low confidence), brief and decompose; consent blocks audio; `auto_approve` skips every gate except consent.
 - **Prompts and templates exist and have the right shape.** Each `.claude/commands/<stage>.md` exists with frontmatter; `templates/prd_oneshot.md` contains the scope table header.
 
 ### Not worth testing
