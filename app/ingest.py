@@ -3,6 +3,7 @@
 См. SPEC.md §3.1. Расшифровка записи живёт в app/transcribe.py, здесь — только frontmatter.
 """
 
+import re
 import secrets
 from typing import Literal
 
@@ -14,6 +15,8 @@ import frontmatter
 RUN_ID_BYTES = 8
 
 Source = Literal["text", "voice", "file"]
+
+RUN_ID_LINE = re.compile(r"^run_id:.*$", re.MULTILINE)
 
 
 def new_run_id() -> str:
@@ -37,6 +40,22 @@ def build_transcript(
     if consent_confirmed is not None:
         header += f"\nconsent_confirmed: {str(consent_confirmed).lower()}"
     return f"---\n{header}\n---\n\n{text.strip()}\n"
+
+
+def child_transcript(parent: str, run_id: str, parent_run_id: str) -> str:
+    """Расшифровка разбора для дочернего прогона: номер свой, отпечаток записи родительский.
+
+    `source`, `duration`, `lang` и согласие остаются как были: запись одна, и ребёнок её не
+    получал. Строки правятся на месте, а не собираются заново из разобранного YAML: иначе
+    run_id из одних цифр снова ушёл бы без кавычек.
+    """
+    if run_id_of(parent) != parent_run_id:
+        raise ValueError(f"Расшифровка не прогона {parent_run_id}: отдать её ребёнку нельзя")
+    header_end = parent.index("\n---\n", len("---\n"))
+    header = RUN_ID_LINE.sub(
+        f'run_id: "{run_id}"\nparent_run_id: "{parent_run_id}"', parent[:header_end], count=1
+    )
+    return header + parent[header_end:]
 
 
 def run_id_of(transcript: str) -> str | None:

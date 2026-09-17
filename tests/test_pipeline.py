@@ -82,6 +82,13 @@ def test_the_review_comes_right_after_the_transcript() -> None:
     assert NAMES[:2] == ("ingest", "review")
 
 
+def test_the_idea_starts_from_the_transcript_of_the_review_and_ends_on_the_board() -> None:
+    """Путь идеи берёт расшифровку у разбора: второй маршрут не делит с первым ни одной стадии."""
+    assert route_of("handoff") == route_of("intake") == ("handoff", "publish")
+    assert route_of("ingest") == ("ingest", "review")
+    assert stage_named("handoff").runs == "code"
+
+
 def test_a_recording_ends_with_its_review_and_an_assignment_with_its_cards() -> None:
     assert route_end("ingest") == "review"
     assert route_end("brief") == "publish"

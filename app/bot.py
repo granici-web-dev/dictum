@@ -125,6 +125,7 @@ MAX_FILE_BYTES = MAX_FILE_MEGABYTES * 1024 * 1024
 LABEL = {
     "ingest": "принял идею",
     "review": "разбор встречи",
+    "handoff": "взял расшифровку разбора",
     "intake": "выделил суть",
     "brief": "собрал бриф",
     "research": "ресёрч пропущен",

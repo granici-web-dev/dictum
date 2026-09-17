@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.dialog import Turn
-from app.ingest import Source, build_transcript
+from app.ingest import Source, build_transcript, child_transcript
 from app.pipeline import (
     ASSIGNMENT_JSON,
     BRIEF_QUESTION,
@@ -133,6 +133,13 @@ def ingest_body(run: Run) -> dict[str, str]:
     }
 
 
+def handoff_body(run: Run) -> dict[str, str]:
+    if run.parent_root is None or run.parent_run_id is None:
+        raise ValueError(f"Прогон {run.run_id} не знает разбора, из которого взять расшифровку")
+    parent = read_artifact(run.parent_root, TRANSCRIPT)
+    return {TRANSCRIPT: child_transcript(parent, run.run_id, run.parent_run_id)}
+
+
 def research_body(run: Run) -> dict[str, str]:
     # Настоящий ресёрч, положенный руками или прошлым прогоном, затирать нечем.
     if (run.root / RESEARCH).exists():
@@ -168,6 +175,7 @@ def card_body(run: Run) -> dict[str, str]:
 # язык, распознанный Whisper. Другого места у языка нет: он свойство прогона, а не артефакта.
 BODIES: dict[str, Callable[[Run], dict[str, str]]] = {
     "ingest": ingest_body,
+    "handoff": handoff_body,
     "research": research_body,
     "publish": publish_body,
     "assignment": assignment_body,

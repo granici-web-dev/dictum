@@ -681,3 +681,33 @@ def test_an_auto_approved_task_walk_ends_with_one_card(
 
     assert len(board.posted("/1/cards")) == 1
     assert (tmp_path / "child/outputs/publish.json").is_file()
+
+
+def test_an_idea_walk_takes_the_transcript_of_its_review_and_pays_no_second_transcription(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent_root = tmp_path / "parent"
+    parent = walk(
+        Run(root=parent_root, run_id=PARENT_RUN, lang="ru", text=TEXT, source="text"),
+        "ingest",
+        "ingest",
+    )
+    assert parent is None
+    monkeypatch.setattr(walking, "transcribe", lambda audio, run_id: pytest.fail("второй Whisper"))
+    requests = llm([ok(IDEA_BLOCK)])
+    child = Run(
+        root=tmp_path / "child",
+        run_id=RUN_ID,
+        lang="ru",
+        source="text",
+        parent_root=parent_root,
+        parent_run_id=PARENT_RUN,
+    )
+
+    walk(child, "handoff", "intake")
+
+    transcript = read_artifact(child.root, TRANSCRIPT)
+    assert run_id_of(transcript) == RUN_ID
+    assert f'parent_run_id: "{PARENT_RUN}"' in transcript
+    assert TEXT in request_body(requests[0])["messages"][0]["content"]
+    assert (child.root / IDEA).is_file()

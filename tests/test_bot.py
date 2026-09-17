@@ -125,8 +125,9 @@ from tests.test_review import REVIEW_DE, REVIEW_NONE
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
 
-# Путь до карточек в фазе 1 начинается только с остановки, заведённой до выкладки (SPEC §7.2).
+# Путь идеи продолжают остановки на intake и дальше; начинается маршрут с handoff (SPEC §7.2).
 CARDS_ROUTE_START = "intake"
+IDEA_ROUTE_START = "handoff"
 
 
 class FakeStore:
@@ -321,18 +322,18 @@ def test_the_progress_of_a_new_run_shows_the_stages_up_to_the_review() -> None:
 
 
 def test_the_progress_of_a_continued_run_shows_its_own_route_to_the_cards() -> None:
-    """Остановка, заведённая до выкладки, идёт до карточек и показывает этот путь, а не разбор."""
+    """Остановка пути идеи идёт до карточек и показывает этот путь, а не разбор."""
     text = progress_text(a_run(), [], CARDS_ROUTE_START)
 
     printed = [line[2:] for line in text.splitlines()[2:]]
-    assert printed == [LABEL[stage.name] for stage in stages_between(CARDS_ROUTE_START, "publish")]
+    assert printed == [LABEL[stage.name] for stage in stages_between(IDEA_ROUTE_START, "publish")]
 
 
 def test_the_progress_marks_what_is_done_and_what_runs_now() -> None:
-    text = progress_text(a_run(), ["intake", "brief"], CARDS_ROUTE_START)
+    text = progress_text(a_run(), ["handoff", "intake", "brief"], CARDS_ROUTE_START)
 
     marks = [line[0] for line in text.splitlines()[2:]]
-    assert marks == ["✓", "✓", "▸", "·", "·", "·"]
+    assert marks == ["✓", "✓", "✓", "▸", "·", "·", "·"]
 
 
 def test_a_finished_walk_marks_everything_and_points_at_nothing() -> None:
@@ -753,7 +754,7 @@ async def test_the_answer_after_a_choice_continues_the_same_run(
         )
     ]
     assert 12 not in store.stops
-    assert chat.replies[0].splitlines()[2] == f"▸ {LABEL['intake']}"
+    assert chat.replies[0].splitlines()[2:4] == [f"✓ {LABEL['handoff']}", f"▸ {LABEL['intake']}"]
 
 
 @pytest.mark.asyncio
@@ -1819,7 +1820,8 @@ async def test_a_continued_run_stops_at_the_next_gate_and_shows_the_route_it_wal
 
     await on_gate_button(a_press(chat), NO_CONTEXT)
 
-    assert chat.replies[0].splitlines()[2:5] == [
+    assert chat.replies[0].splitlines()[2:6] == [
+        f"✓ {LABEL['handoff']}",
         f"✓ {LABEL['intake']}",
         f"✓ {LABEL['brief']}",
         f"▸ {LABEL['research']}",
