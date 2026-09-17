@@ -16,7 +16,9 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
+    SmallInteger,
     String,
     create_engine,
     func,
@@ -56,7 +58,6 @@ FAILED = "failed"
 # Рабочие статусы — имена стадий: их называет обход, и второй словарь названий разошёлся бы с
 # ним. Прогон в рабочем статусе на старте процесса означает, что процесс умер вместе с ним.
 WORKING = frozenset(NAMES)
-FIRST_STATUS = NAMES[0]
 
 # Род остановки статус и несёт: все три ждут ответа из одного чата и различаются только тем,
 # чего от человека ждут. Отдельной колонки под род поэтому нет.
@@ -93,16 +94,28 @@ class RunRow(Base):
     # Есть только у файла с диктофона и только согласием (SPEC §4): у текста и голосового чужой
     # записи нет, и вопроса о согласии им не задавали.
     consent_confirmed: Mapped[bool | None]
+    # Прогон, начатый кнопкой под разбором (P3-08, фаза 2), и номер поручения в нём, с единицы.
+    # Родитель есть, а номера нет: вся запись идёт путём идеи.
+    parent_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("runs.id", name="fk_runs_parent_id_runs")
+    )
+    assignment: Mapped[int | None] = mapped_column(SmallInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     __table_args__ = (
+        # Согласие несёт строка, которая получила запись. Ребёнок наследует source родителя, но
+        # записи не касается, поэтому у файла с родителем согласия нет.
         CheckConstraint(
-            "(source = 'file' AND consent_confirmed IS TRUE)"
-            " OR (source <> 'file' AND consent_confirmed IS NULL)",
+            "(source = 'file' AND parent_id IS NULL AND consent_confirmed IS TRUE)"
+            " OR ((source <> 'file' OR parent_id IS NOT NULL) AND consent_confirmed IS NULL)",
             name="ck_runs_consent_only_for_file",
+        ),
+        CheckConstraint(
+            "assignment IS NULL OR (parent_id IS NOT NULL AND assignment >= 1)",
+            name="ck_runs_assignment_of_parent",
         ),
         # Остановку ищут по чату и статусу: единственный запрос бота на горячем пути.
         Index("ix_runs_chat_status", "chat_id", "status"),
@@ -117,6 +130,23 @@ class RunRow(Base):
                 "status in ("
                 + ", ".join(f"'{status}'" for status in sorted(STATUS_OF_STOP.values()))
                 + ")"
+            ),
+        ),
+        # Один живой прогон на выбор из разбора, иначе второе нажатие опубликовало бы поручение
+        # второй раз. failed считается: сорванный прогон возобновляется тем же run_id.
+        Index(
+            "ux_runs_one_run_per_task",
+            "parent_id",
+            "assignment",
+            unique=True,
+            postgresql_where=text(f"assignment IS NOT NULL AND status <> '{DROPPED}'"),
+        ),
+        Index(
+            "ux_runs_one_idea_per_review",
+            "parent_id",
+            unique=True,
+            postgresql_where=text(
+                f"parent_id IS NOT NULL AND assignment IS NULL AND status <> '{DROPPED}'"
             ),
         ),
     )
@@ -136,6 +166,23 @@ class Stopped(BaseModel):
     # Пусто у всех остановок, кроме вопроса брифа, и у первого его вопроса тоже: отвечать не на
     # что было.
     turns: tuple[Turn, ...] = ()
+
+
+class Parent(BaseModel):
+    """Разбор, под которым нажата кнопка: от него ребёнок берёт язык и источник записи."""
+
+    run_id: str
+    lang: str
+    source: Source
+    status: str
+
+
+class Child(BaseModel):
+    """Живой прогон по выбору из разбора: его возобновляют, а не заводят второй."""
+
+    run_id: str
+    status: str
+    auto_approve: bool
 
 
 class Orphan(BaseModel):
@@ -204,7 +251,11 @@ def start_run(
     lang: str,
     auto_approve: bool,
     consent_confirmed: bool | None,
+    status: str,
+    parent_id: str | None = None,
+    assignment: int | None = None,
 ) -> None:
+    """Заводит строку. Статус первой стадии называет вызывающий: у каждого маршрута она своя."""
     with session() as opened:
         opened.add(
             RunRow(
@@ -212,11 +263,43 @@ def start_run(
                 chat_id=chat_id,
                 source=source,
                 lang=lang,
-                status=FIRST_STATUS,
+                status=status,
                 auto_approve=auto_approve,
                 consent_confirmed=consent_confirmed,
+                parent_id=parent_id,
+                assignment=assignment,
             )
         )
+
+
+def parent_of(run_id: str, chat_id: int) -> Parent | None:
+    """Разбор этого чата, законченный так, что под ним есть кнопки. Иначе кнопка устарела."""
+    with session() as opened:
+        row = opened.scalars(
+            select(RunRow).where(
+                RunRow.id == run_id,
+                RunRow.chat_id == chat_id,
+                RunRow.status.in_((REVIEWED, NO_TASK)),
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return Parent(run_id=row.id, lang=row.lang, source=row.source, status=row.status)
+
+
+def child_of(parent_id: str, assignment: int | None) -> Child | None:
+    """Живой прогон по поручению `assignment` или, при None, по всей записи как идее.
+
+    Брошенный (`dropped`) не в счёт: его сняли до публикации, и нажатие заводит новый.
+    """
+    chosen = RunRow.assignment.is_(None) if assignment is None else RunRow.assignment == assignment
+    with session() as opened:
+        row = opened.scalars(
+            select(RunRow).where(RunRow.parent_id == parent_id, chosen, RunRow.status != DROPPED)
+        ).one_or_none()
+        if row is None:
+            return None
+        return Child(run_id=row.id, status=row.status, auto_approve=row.auto_approve)
 
 
 def mark_stage(run_id: str, status: str, lang: str) -> None:
@@ -247,6 +330,16 @@ def stop_run(run_id: str, kind: StopKind, stage: str, artifact: str) -> None:
 
 
 def finish_run(run_id: str, status: str) -> None:
+    with session() as opened:
+        opened.execute(
+            update(RunRow)
+            .where(RunRow.id == run_id)
+            .values(status=status, stopped_stage=None, stopped_artifact=None)
+        )
+
+
+def reopen_run(run_id: str, status: str) -> None:
+    """Сорванный дочерний прогон снова в работе, с той стадии, откуда его поведут."""
     with session() as opened:
         opened.execute(
             update(RunRow)

@@ -477,6 +477,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 run.lang,
                 run.auto_approve,
                 run.consent_confirmed,
+                FIRST_STAGE,
             )
             logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
@@ -533,6 +534,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             run.lang,
             run.auto_approve,
             run.consent_confirmed,
+            FIRST_STAGE,
         )
         logger.info("start=voice run=%s chat=%s", run_id, message.chat_id)
         # Сообщение о ходе — до скачивания: на мобильной сети голосовое едет секунды,
@@ -785,6 +787,7 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             run.lang,
             run.auto_approve,
             run.consent_confirmed,
+            FIRST_STAGE,
         )
         logger.info("start=file run=%s chat=%s", run_id, message.chat_id)
         logger.info("consent=yes chat=%s by=%s run=%s", message.chat_id, by, run_id)

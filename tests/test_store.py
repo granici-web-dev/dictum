@@ -27,7 +27,9 @@ from app.store import (
     AWAITING_ANSWER,
     AWAITING_CHOICE,
     AWAITING_GATE,
+    DROPPED,
     FAILED,
+    NO_TASK,
     PUBLISHED,
     REFUSED,
     REVIEWED,
@@ -36,12 +38,15 @@ from app.store import (
     Base,
     RunRow,
     add_turn,
+    child_of,
     drop_stop,
     engine,
     fail_orphans,
     finish_run,
     mark_stage,
     one_bot_per_database,
+    parent_of,
+    reopen_run,
     session,
     start_run,
     stop_run,
@@ -55,6 +60,7 @@ CANDIDATES = "outputs/candidates.md"
 BRIEF = "outputs/brief.md"
 QUESTION = "outputs/brief_question.md"
 TEST_DATABASE = "dictum_test"
+INGEST = "ingest"
 
 
 def address_of_test_database() -> str:
@@ -116,17 +122,17 @@ def db(migrated: None) -> Iterator[None]:
 
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "voice", "ru", True, None)
+    start_run(run_id, chat_id, "voice", "ru", True, None, INGEST)
     stop_run(run_id, "choice", "intake", CANDIDATES)
 
 
 def a_gated_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "text", "ru", False, None)
+    start_run(run_id, chat_id, "text", "ru", False, None, INGEST)
     stop_run(run_id, "gate", "brief", BRIEF)
 
 
 def an_asked_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "text", "ru", False, None)
+    start_run(run_id, chat_id, "text", "ru", False, None, INGEST)
     stop_run(run_id, "answer", "brief", QUESTION)
 
 
@@ -191,7 +197,7 @@ def test_the_answer_moves_the_run_on_and_the_stop_is_gone(db: None) -> None:
 def test_a_chat_cannot_hold_two_stops_at_once(db: None) -> None:
     """Вторая остановка означала бы, что ответ человека уходит непонятно в какой прогон."""
     a_stopped_run("первый")
-    start_run("второй", 12, "voice", "ru", True, None)
+    start_run("второй", 12, "voice", "ru", True, None, INGEST)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "choice", "intake", CANDIDATES)
@@ -200,7 +206,7 @@ def test_a_chat_cannot_hold_two_stops_at_once(db: None) -> None:
 def test_a_gate_stop_collides_with_a_choice_stop_in_the_same_chat(db: None) -> None:
     """Род остановки на счёт не влияет: ответ человека всё равно один, и прогон для него один."""
     a_stopped_run("первый")
-    start_run("второй", 12, "text", "ru", False, None)
+    start_run("второй", 12, "text", "ru", False, None, INGEST)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "gate", "brief", BRIEF)
@@ -240,9 +246,9 @@ def test_leaving_a_gate_drops_the_stop_too(db: None) -> None:
 
 
 def test_orphans_are_named_and_closed_but_finished_runs_are_left_alone(db: None) -> None:
-    start_run("живой", 12, "voice", "ru", True, None)
+    start_run("живой", 12, "voice", "ru", True, None, INGEST)
     mark_stage("живой", "brief", "ru")
-    start_run("готовый", 13, "text", "ru", True, None)
+    start_run("готовый", 13, "text", "ru", True, None, INGEST)
     finish_run("готовый", PUBLISHED)
 
     orphans = fail_orphans()
@@ -257,7 +263,7 @@ def test_orphans_are_named_and_closed_but_finished_runs_are_left_alone(db: None)
 
 def test_fail_orphans_ignores_refused(db: None) -> None:
     """Отвергнутая запись закрыта: уборка на старте не должна объявить её прерванной."""
-    start_run("отвергнутый", 12, "file", "ru", False, True)
+    start_run("отвергнутый", 12, "file", "ru", False, True, INGEST)
     finish_run("отвергнутый", REFUSED)
 
     assert fail_orphans() == []
@@ -326,7 +332,7 @@ def test_a_run_waiting_for_an_answer_waits_under_its_own_status(db: None) -> Non
 def test_a_question_stop_collides_with_a_gate_stop_in_the_same_chat(db: None) -> None:
     """Третий род остановки считается тем же индексом: ответ человека уходит в один прогон."""
     an_asked_run("первый")
-    start_run("второй", 12, "text", "ru", False, None)
+    start_run("второй", 12, "text", "ru", False, None, INGEST)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "gate", "brief", BRIEF)
@@ -356,7 +362,7 @@ def test_a_run_that_was_never_asked_anything_carries_an_empty_dialog(db: None) -
 
 
 def test_start_run_stores_consent_for_file(db: None) -> None:
-    start_run("файл", 12, "file", "ru", True, True)
+    start_run("файл", 12, "file", "ru", True, True, INGEST)
 
     with session() as opened:
         assert opened.get(RunRow, "файл").consent_confirmed is True  # type: ignore[union-attr]
@@ -364,7 +370,7 @@ def test_start_run_stores_consent_for_file(db: None) -> None:
 
 def test_waiting_for_carries_consent(db: None) -> None:
     """Без согласия продолженный файловый прогон был бы тем, что ingest считает незаконным."""
-    start_run("файл", 12, "file", "ru", False, True)
+    start_run("файл", 12, "file", "ru", False, True, INGEST)
     stop_run("файл", "gate", "brief", BRIEF)
 
     stopped = waiting_for(12)
@@ -377,19 +383,19 @@ def test_waiting_for_carries_consent(db: None) -> None:
 def test_check_rejects_file_run_without_consent(db: None, consent: bool | None) -> None:
     """Файл без согласия обрабатывать нельзя (§ 201 StGB), и об этом говорит база, а не код."""
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
-        start_run("файл", 12, "file", "ru", True, consent)
+        start_run("файл", 12, "file", "ru", True, consent, INGEST)
 
 
 @pytest.mark.parametrize("consent", [True, False])
 def test_check_rejects_consent_on_voice_run(db: None, consent: bool) -> None:
     """У голосового чужой записи нет: любое значение врало бы, что вопрос о согласии задавали."""
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
-        start_run("голос", 12, "voice", "ru", True, consent)
+        start_run("голос", 12, "voice", "ru", True, consent, INGEST)
 
 
 def test_a_reviewed_run_is_finished_and_waits_for_nothing(db: None) -> None:
     """Разбор не остановка: он не занимает место остановки в чате и не считается брошенным."""
-    start_run("разбор", 12, "file", "de", False, True)
+    start_run("разбор", 12, "file", "de", False, True, INGEST)
     mark_stage("разбор", "review", "de")
 
     finish_run("разбор", REVIEWED)
@@ -402,3 +408,163 @@ def test_a_reviewed_run_is_finished_and_waits_for_nothing(db: None) -> None:
 
         assert row is not None
         assert (row.status, row.stopped_stage, row.stopped_artifact) == (REVIEWED, None, None)
+
+
+def a_review(run_id: str = "разбор", chat_id: int = 12, status: str = REVIEWED) -> None:
+    start_run(run_id, chat_id, "file", "de", False, True, INGEST)
+    finish_run(run_id, status)
+
+
+def a_task_run(run_id: str, number: int, parent_id: str = "разбор") -> None:
+    start_run(run_id, 12, "file", "de", False, None, "assignment", parent_id, number)
+
+
+def an_idea_run(run_id: str, parent_id: str = "разбор") -> None:
+    start_run(run_id, 12, "file", "de", False, None, "handoff", parent_id)
+
+
+def test_a_task_child_and_an_idea_child_are_stored_with_their_parent(db: None) -> None:
+    a_review()
+    a_task_run("поручение", 1)
+    an_idea_run("идея")
+
+    with session() as opened:
+        task = opened.get(RunRow, "поручение")
+        idea = opened.get(RunRow, "идея")
+
+        assert task is not None and idea is not None
+        assert (task.parent_id, task.assignment, task.status) == ("разбор", 1, "assignment")
+        assert (idea.parent_id, idea.assignment, idea.status) == ("разбор", None, "handoff")
+
+
+@pytest.mark.parametrize(("parent_id", "number"), [(None, 1), ("разбор", 0)])
+def test_check_rejects_an_assignment_without_a_parent_or_below_one(
+    db: None, parent_id: str | None, number: int
+) -> None:
+    """Номер поручения есть только у ребёнка разбора и считается с единицы, как в кнопке."""
+    a_review()
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_assignment_of_parent"):
+        start_run("поручение", 12, "text", "de", False, None, "assignment", parent_id, number)
+
+
+def test_a_child_of_a_recording_carries_no_consent(db: None) -> None:
+    """Согласие дали на запись, и его несёт строка, которая запись получила."""
+    a_review()
+    a_task_run("без согласия", 1)
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
+        start_run("с согласием", 12, "file", "de", False, True, "assignment", "разбор", 2)
+
+
+def test_a_file_without_a_parent_still_needs_consent(db: None) -> None:
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
+        start_run("файл", 12, "file", "de", False, None, INGEST)
+
+
+def test_second_live_run_for_the_same_task_is_rejected_unless_the_first_was_dropped(
+    db: None,
+) -> None:
+    """Сорванный прогон возобновляют, а брошенный до публикации уступает место новому."""
+    a_review()
+    a_task_run("первый", 1)
+    finish_run("первый", FAILED)
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ux_runs_one_run_per_task"):
+        a_task_run("второй", 1)
+
+
+def test_a_dropped_task_run_makes_room_for_a_new_one(db: None) -> None:
+    a_review()
+    a_task_run("первый", 1)
+    finish_run("первый", DROPPED)
+
+    a_task_run("второй", 1)
+
+    assert child_of("разбор", 1) is not None
+
+
+def test_second_live_idea_run_of_one_review_is_rejected_unless_the_first_was_dropped(
+    db: None,
+) -> None:
+    a_review()
+    an_idea_run("первая")
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ux_runs_one_idea_per_review"):
+        an_idea_run("вторая")
+
+    finish_run("первая", DROPPED)
+    an_idea_run("третья")
+
+
+def test_a_task_and_the_idea_of_one_review_live_side_by_side(db: None) -> None:
+    a_review()
+    a_task_run("поручение 1", 1)
+    a_task_run("поручение 2", 2)
+    an_idea_run("идея")
+
+    children = [child_of("разбор", number) for number in (1, 2, None)]
+
+    assert [child.run_id if child else None for child in children] == [
+        "поручение 1",
+        "поручение 2",
+        "идея",
+    ]
+
+
+@pytest.mark.parametrize("status", [REVIEWED, NO_TASK])
+def test_a_finished_review_of_the_same_chat_is_a_parent(db: None, status: str) -> None:
+    a_review(status=status)
+
+    parent = parent_of("разбор", 12)
+
+    assert parent is not None
+    assert (parent.run_id, parent.lang, parent.source, parent.status) == (
+        "разбор",
+        "de",
+        "file",
+        status,
+    )
+
+
+def test_a_review_of_another_chat_is_not_a_parent(db: None) -> None:
+    a_review(chat_id=13)
+
+    assert parent_of("разбор", 12) is None
+
+
+def test_a_run_that_is_not_a_finished_review_is_not_a_parent(db: None) -> None:
+    a_review(status=PUBLISHED)
+
+    assert parent_of("разбор", 12) is None
+
+
+def test_child_of_does_not_see_a_dropped_run(db: None) -> None:
+    a_review()
+    a_task_run("брошенный", 1)
+    finish_run("брошенный", DROPPED)
+
+    assert child_of("разбор", 1) is None
+
+
+def test_child_of_tells_a_task_from_the_idea(db: None) -> None:
+    a_review()
+    start_run("поручение", 12, "file", "de", True, None, "assignment", "разбор", 1)
+
+    task = child_of("разбор", 1)
+
+    assert task is not None
+    assert (task.run_id, task.status, task.auto_approve) == ("поручение", "assignment", True)
+    assert child_of("разбор", None) is None
+    assert child_of("разбор", 2) is None
+
+
+def test_a_reopened_run_is_back_at_work_under_the_same_id(db: None) -> None:
+    a_review()
+    a_task_run("поручение", 1)
+    finish_run("поручение", FAILED)
+
+    reopen_run("поручение", "card")
+
+    child = child_of("разбор", 1)
+    assert child is not None and (child.run_id, child.status) == ("поручение", "card")

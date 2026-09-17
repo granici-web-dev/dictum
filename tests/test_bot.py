@@ -156,17 +156,21 @@ class FakeStore:
         lang: str,
         auto_approve: bool,
         consent_confirmed: bool | None,
+        status: str,
+        parent_id: str | None = None,
+        assignment: int | None = None,
     ) -> None:
         # Правило базы `ck_runs_consent_only_for_file`: без него двойник принял бы строку, которую
         # Postgres отвергнет, и обработчик с перепутанным согласием прошёл бы тесты зелёным.
-        allowed = consent_confirmed is True if source == "file" else consent_confirmed is None
+        received_recording = source == "file" and parent_id is None
+        allowed = consent_confirmed is True if received_recording else consent_confirmed is None
         if not allowed:
             raise IntegrityError(
                 "INSERT INTO runs", {}, Exception("ck_runs_consent_only_for_file")
             )
         self.started.append((run_id, chat_id, source))
         self.chats[run_id] = chat_id
-        self.status[run_id] = NAMES[0]
+        self.status[run_id] = status
         self.sources[run_id] = source
         self.consents[run_id] = consent_confirmed
         self.approved[run_id] = auto_approve
