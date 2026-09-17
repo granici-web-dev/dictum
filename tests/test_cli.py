@@ -14,14 +14,28 @@ from app.cli import (
 from app import bot, cli, publish, stages
 from app.config import settings
 from app.ingest import build_transcript, run_id_of
-from app.pipeline import BRIEF, CANDIDATES, IDEA, PRD, RESEARCH, REVIEW_JSON, REVIEW_MD, TRANSCRIPT
+from app.pipeline import (
+    ASSIGNMENT_JSON,
+    BRIEF,
+    CANDIDATES,
+    IDEA,
+    PRD,
+    RESEARCH,
+    REVIEW_JSON,
+    REVIEW_MD,
+    STEPS_JSON,
+    STEPS_MD,
+    TRANSCRIPT,
+)
 from tests.helpers import (
     BROKEN_ISSUES,
+    FIXTURES,
     InstallResponses,
     decompose_answer,
     ok,
     request_body,
     server_error,
+    steps_answer,
 )
 
 EARLIER_RUN = "прогон-восемь"
@@ -557,3 +571,111 @@ def test_a_module_run_as_a_command_names_its_logger_by_hand() -> None:
     named = [module.logger.name for module in (cli, bot, publish)]
 
     assert named == ["app.cli", "app.bot", "app.publish"]
+
+
+MEETING_RUN = "3f9c1a7e5b2d8c40"
+
+
+def a_review_of_an_earlier_run(root: Path, with_review: bool = True) -> None:
+    """Разбор немецкой встречи, лежащий после make run-text: его каталог и есть каталог родителя."""
+    (root / "inputs").mkdir(parents=True, exist_ok=True)
+    (root / TRANSCRIPT).write_text(
+        build_transcript("Erstens das Login-Formular.", "de", MEETING_RUN, "file", 95, True),
+        encoding="utf-8",
+    )
+    if with_review:
+        (root / "outputs").mkdir(exist_ok=True)
+        (root / REVIEW_JSON).write_text(
+            (FIXTURES / "review_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
+def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_steps(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    a_review_of_an_earlier_run(tmp_path)
+    requests = llm([ok(steps_answer())])
+
+    with caplog.at_level(logging.INFO, logger="app.cli"):
+        assert main(["--task", "1"]) == EXIT_OK
+
+    assignment = json.loads((tmp_path / ASSIGNMENT_JSON).read_text(encoding="utf-8"))
+    assert assignment["parent_run_id"] == MEETING_RUN
+    assert assignment["run_id"] not in ("", MEETING_RUN)
+    assert assignment["meeting_lang"] == "de"
+    steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
+    assert steps["run_id"] == assignment["run_id"]
+    assert len(requests) == 1
+    assert not (tmp_path / "outputs/publish.json").exists()
+    assert STEPS_MD in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("argv", "with_review"),
+    [
+        (["--task", "9"], True),
+        (["--task", "0"], True),
+        (["--task", "один"], True),
+        (["--task", "1"], False),
+        (["--task", "1", "--gates"], True),
+        (["--task", "1", "--from", "steps"], True),
+        (["--from", "card"], True),
+        (["--from", "assignment"], True),
+        (["--from", "publish"], True),
+    ],
+)
+def test_a_task_that_cannot_be_walked_is_a_usage_error_before_any_call(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    with_review: bool,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    a_review_of_an_earlier_run(tmp_path, with_review)
+    requests = llm([])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert requests == []
+    assert not (tmp_path / ASSIGNMENT_JSON).exists()
+
+
+def test_steps_are_repeated_under_the_run_id_of_the_assignment_on_disk(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / ASSIGNMENT_JSON).write_text(
+        (FIXTURES / "assignment_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    llm([ok(steps_answer())])
+
+    assert main(["--from", "steps"]) == EXIT_OK
+
+    steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
+    assert steps["run_id"] == "7b2e0d91c4a3f615"
+
+
+def test_steps_without_an_assignment_on_disk_is_a_usage_error(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    a_review_of_an_earlier_run(tmp_path)
+    requests = llm([])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "steps"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert "--task" in capsys.readouterr().err
+    assert requests == []

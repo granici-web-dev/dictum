@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Any
 
 import anthropic
 import httpx2
@@ -9,9 +10,10 @@ from anthropic import DefaultHttpxClient
 from app import stages
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.pipeline import STAGES
-from app.render import issues_markdown, review_markdown
+from app.render import issues_markdown, review_markdown, steps_markdown
 from app.review import Review
 from app.review import fragments
+from app.steps import Steps
 from app.stages import (
     StageError,
     load_prompt,
@@ -19,13 +21,16 @@ from app.stages import (
 )
 from tests.helpers import (
     BROKEN_ISSUES,
+    FIXTURES,
     REAL_ISSUES,
+    STEPS_DE,
     InstallResponses,
     decompose_answer,
     ok,
     real_issues,
     request_body,
     server_error,
+    steps_answer,
 )
 from tests.test_review import MEETING_DE, REVIEW_DE
 
@@ -417,3 +422,59 @@ def test_an_empty_translation_of_a_german_recording_fails_after_the_repair(
         run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
 
     assert len(requests) == 2
+
+
+ASSIGNMENT_INPUTS = {
+    "inputs/assignment.json": (FIXTURES / "assignment_de.json").read_text(encoding="utf-8")
+}
+
+
+def untranslated_step(data: dict[str, Any]) -> None:
+    data["steps"][1]["translation"] = ""
+
+
+def test_steps_come_back_stamped_and_drawn_without_a_repair(llm: InstallResponses) -> None:
+    requests = llm([ok(steps_answer())])
+
+    result = run_stage("steps", ASSIGNMENT_INPUTS, RUN)
+
+    assert len(requests) == 1
+    assert result.files["outputs/steps.json"] == STEPS_DE
+    assert result.files["outputs/steps.md"] == steps_markdown(Steps.model_validate_json(STEPS_DE))
+
+
+def test_an_empty_step_translation_gets_the_one_repair_and_is_named_in_it(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(steps_answer(untranslated_step)), ok(steps_answer())])
+
+    result = run_stage("steps", ASSIGNMENT_INPUTS, RUN)
+
+    assert len(requests) == 2
+    repair = request_body(requests[1])["messages"][-1]["content"]
+    assert "steps.1.translation: перевод пуст" in repair
+    assert result.files["outputs/steps.json"] == STEPS_DE
+
+
+def test_an_empty_step_translation_in_both_answers_fails_the_stage(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(steps_answer(untranslated_step)), ok(steps_answer(untranslated_step))])
+
+    with pytest.raises(StageError, match=r"steps\.1\.translation: перевод пуст"):
+        run_stage("steps", ASSIGNMENT_INPUTS, RUN)
+
+    assert len(requests) == 2
+
+
+def test_steps_do_not_pay_for_a_call_on_an_assignment_that_is_not_one(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(steps_answer())])
+    broken = json.loads(ASSIGNMENT_INPUTS["inputs/assignment.json"])
+    del broken["owner_lang"]
+
+    with pytest.raises(StageError, match="assignment.json не проходит схему"):
+        run_stage("steps", {"inputs/assignment.json": json.dumps(broken)}, RUN)
+
+    assert requests == []

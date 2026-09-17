@@ -264,3 +264,18 @@ class FakeBoard:
             self.card(path.split("/")[3])["attachments"].append(attachment)
             return httpx.Response(200, json=attachment)
         return httpx.Response(200, json={"id": self.new_id("item"), "name": fields["name"]})
+
+
+STEPS_DE = (FIXTURES / "steps_de.json").read_text(encoding="utf-8")
+
+
+def steps_answer(change: Callable[[dict[str, Any]], None] = lambda data: None) -> str:
+    """Ответ стадии steps по fixtures/steps_de.json: без полей, которые вписывает код.
+
+    Немецкие шаги в фикстуре составлены вручную: живого прогона стадии ещё не было.
+    """
+    data: dict[str, Any] = json.loads(STEPS_DE)
+    for stamped in ("run_id", "owner_lang", "meeting_lang", "task"):
+        del data[stamped]
+    change(data)
+    return f'<file path="outputs/steps.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'

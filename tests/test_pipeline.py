@@ -2,10 +2,12 @@ import pytest
 
 from app.pipeline import (
     NAMES,
+    PUBLISHING,
     ROUTES,
     STAGES,
     after,
     route_end,
+    route_of,
     stage_named,
     stages_between,
 )
@@ -38,7 +40,7 @@ def test_every_input_is_written_by_an_earlier_stage() -> None:
 def test_a_walk_covers_the_stages_it_was_asked_for_and_no_others() -> None:
     walked = tuple(stage.name for stage in stages_between("prd", "decompose"))
     assert walked == ("prd", "decompose")
-    assert tuple(stage.name for stage in stages_between("ingest", "publish")) == NAMES
+    assert tuple(stage.name for stage in stages_between("ingest", "card")) == NAMES
 
 
 def test_an_unknown_stage_is_refused_by_name() -> None:
@@ -53,9 +55,21 @@ def test_the_stage_after_a_gate_is_the_one_the_run_continues_from() -> None:
 
 
 def test_there_is_nothing_after_the_last_stage() -> None:
-    """Ворот после publish не бывает: вопрос может задать только ошибка в данных."""
-    with pytest.raises(ValueError, match="после стадии publish"):
-        after("publish")
+    """Ворот после card не бывает: вопрос может задать только ошибка в данных."""
+    with pytest.raises(ValueError, match="после стадии card"):
+        after("card")
+
+
+def test_an_assignment_goes_from_the_review_to_its_card() -> None:
+    """Шаги подтверждают на воротах, и «Дальше» ведёт к карточке, а не обратно в шаги."""
+    assert route_of("steps") == ("assignment", "card")
+    assert after("steps").name == "card"
+    assert stage_named("steps").gate_after == "outputs/steps.md"
+
+
+def test_the_stages_that_write_to_the_board_end_their_routes() -> None:
+    """Локальный прогон останавливается перед ними, и опирается на данные, а не на имя."""
+    assert PUBLISHING <= {last for _, last in ROUTES}
 
 
 def test_every_stage_belongs_to_exactly_one_route() -> None:

@@ -11,7 +11,8 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.review import NOT_BLANK, AskBack, Review, Said, Task
+from app.ingest import Source
+from app.review import NOT_BLANK, RECOGNISED_LANGUAGE_SOURCES, AskBack, Review, Said, Task
 
 MAX_STEPS = 10
 
@@ -66,6 +67,11 @@ class Assignment(BaseModel):
     meeting_lang: str | None
     owner_lang: str
     task: Task
+
+
+def meeting_lang_of(source: Source, lang: str) -> str | None:
+    """Язык встречи, если его назвало распознавание. У текста `lang` это DEFAULT_LANG, не язык."""
+    return lang if source in RECOGNISED_LANGUAGE_SOURCES else None
 
 
 def assignment_of(

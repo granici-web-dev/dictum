@@ -24,6 +24,9 @@ RESEARCH = "outputs/research.md"
 PRD = "outputs/prd.md"
 ISSUES_JSON = "outputs/issues.json"
 ISSUES_MD = "outputs/issues.md"
+ASSIGNMENT_JSON = "inputs/assignment.json"
+STEPS_JSON = "outputs/steps.json"
+STEPS_MD = "outputs/steps.md"
 
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
@@ -113,6 +116,28 @@ STAGES: tuple[Stage, ...] = (
         inputs=(ISSUES_JSON,),
         outputs=(frozenset(),),
     ),
+    # Поручение из разбора родителя собирает код, без вызова модели и без соседних поручений:
+    # стадии шагов нужно одно поручение, а не вся встреча.
+    Stage(
+        name="assignment",
+        runs="code",
+        outputs=(frozenset({ASSIGNMENT_JSON}),),
+    ),
+    # Язык встречи стадия берёт из assignment.json, а не `lang` прогона: у текста это не язык.
+    Stage(
+        name="steps",
+        runs="llm",
+        inputs=(ASSIGNMENT_JSON,),
+        outputs=(frozenset({STEPS_JSON}),),
+        gate_after=STEPS_MD,
+    ),
+    # Поручение ложится на доску одной карточкой; publish.json стадия пишет сама, как publish.
+    Stage(
+        name="card",
+        runs="code",
+        inputs=(STEPS_JSON,),
+        outputs=(frozenset(),),
+    ),
 )
 
 NAMES = tuple(stage.name for stage in STAGES)
@@ -120,9 +145,17 @@ NAMES = tuple(stage.name for stage in STAGES)
 # Маршруты: отрезки списка от первой стадии до последней включительно, у каждого свой результат.
 # Обход идёт до конца маршрута, в котором стоит стартовая стадия: так продолженный прогон доходит
 # до того же результата, к которому шёл, а не до конца всего списка (P3-08).
-# Запись кончается разбором встречи; путь до карточек начинается с intake и в фазе 1 из бота не
-# заводится: его держат остановки, заведённые до выкладки, и `make run-text --from intake`.
-ROUTES: tuple[tuple[str, str], ...] = (("ingest", "review"), ("intake", "publish"))
+# Запись кончается разбором встречи. Путь идеи начинается с intake и из бота пока не заводится:
+# его держат остановки, заведённые до выкладки разбора, и `make run-text --from intake`. Путь
+# поручения начинается с assignment и кончается карточкой.
+ROUTES: tuple[tuple[str, str], ...] = (
+    ("ingest", "review"),
+    ("intake", "publish"),
+    ("assignment", "card"),
+)
+# Стадии, которые пишут на доску. Локальный прогон их не выполняет: публикация тратит деньги на
+# доске и заслуживает собственной команды.
+PUBLISHING = frozenset({"publish", "card"})
 
 
 def stage_named(name: str) -> Stage:
@@ -160,8 +193,8 @@ def route_end(name: str) -> str:
 def after(name: str) -> Stage:
     """Следующая запись: откуда идти дальше прогону, подтверждённому на воротах.
 
-    Ворот после последней стадии не бывает — обход их не отдаёт, — поэтому вопрос «что после
-    publish» может задать только ошибка в данных, и отвечать на неё `None` значит завести у
+    Ворот после последней стадии маршрута не бывает — обход их не отдаёт, — поэтому вопрос «что
+    после card» может задать только ошибка в данных, и отвечать на неё `None` значит завести у
     вызывающего ветку, которой неоткуда случиться.
     """
     following = NAMES.index(stage_named(name).name) + 1

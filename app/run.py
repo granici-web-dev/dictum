@@ -15,17 +15,21 @@ from app.config import settings
 from app.dialog import Turn
 from app.ingest import Source, build_transcript
 from app.pipeline import (
+    ASSIGNMENT_JSON,
     BRIEF_QUESTION,
     CANDIDATES,
     ISSUES_JSON,
     RESEARCH,
     RESEARCH_SKIPPED,
+    REVIEW_JSON,
+    STEPS_JSON,
     TRANSCRIPT,
     Stage,
     StopKind,
     stages_between,
 )
-from app.publish import publish
+from app.publish import publish, publish_task
+from app.review import Review
 from app.stages import (
     StageError,
     StageResult,
@@ -34,6 +38,7 @@ from app.stages import (
     previous_answer,
     run_stage,
 )
+from app.steps import assignment_of, meeting_lang_of
 from app.transcribe import transcribe
 
 logger = logging.getLogger(__name__)
@@ -58,6 +63,11 @@ class Run(BaseModel):
     # Есть ли кому отвечать на вопросы стадии (SPEC §3.3). Умолчание — «некому»: у локального
     # прогона интерфейса ответов нет вовсе, и вопрос там встал бы навсегда (CLAUDE.md §1).
     interactive: bool = False
+    # Разбор, из которого прогон взял работу (P3-08, фаза 2): его каталог, номер и поручение в
+    # нём. У бота каталог это runs/<родитель>, у локального прогона текущий каталог.
+    parent_root: Path | None = None
+    parent_run_id: str | None = None
+    assignment: int | None = None
 
 
 class Pause(BaseModel):
@@ -135,12 +145,33 @@ def publish_body(run: Run) -> dict[str, str]:
     return {}
 
 
+def assignment_body(run: Run) -> dict[str, str]:
+    if run.parent_root is None or run.parent_run_id is None or run.assignment is None:
+        raise ValueError(f"Прогон {run.run_id} не знает разбора, из которого взять поручение")
+    review = Review.model_validate_json(read_artifact(run.parent_root, REVIEW_JSON))
+    built = assignment_of(
+        review,
+        run.assignment,
+        run.run_id,
+        run.parent_run_id,
+        meeting_lang_of(run.source, run.lang),
+    )
+    return {ASSIGNMENT_JSON: built.model_dump_json(indent=2) + "\n"}
+
+
+def card_body(run: Run) -> dict[str, str]:
+    publish_task(run.root / STEPS_JSON)
+    return {}
+
+
 # Тело стадии-кода: отдаёт файлы к записи и вправе поправить сам прогон — ingest так проставляет
 # язык, распознанный Whisper. Другого места у языка нет: он свойство прогона, а не артефакта.
 BODIES: dict[str, Callable[[Run], dict[str, str]]] = {
     "ingest": ingest_body,
     "research": research_body,
     "publish": publish_body,
+    "assignment": assignment_body,
+    "card": card_body,
 }
 
 

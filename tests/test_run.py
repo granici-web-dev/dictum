@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 from app.dialog import Turn
-from app.ingest import run_id_of
+from app.ingest import Source, run_id_of
 from app.pipeline import (
+    ASSIGNMENT_JSON,
     BRIEF,
     BRIEF_QUESTION,
     CANDIDATES,
@@ -16,6 +17,8 @@ from app.pipeline import (
     RESEARCH,
     REVIEW_JSON,
     REVIEW_MD,
+    STEPS_JSON,
+    STEPS_MD,
     TRANSCRIPT,
     stage_named,
 )
@@ -32,8 +35,17 @@ from app.run import (
     walk,
 )
 from app.stages import StageError
+from app.steps import Assignment, Steps
 from app.transcribe import Transcription
-from tests.helpers import FakeBoard, InstallResponses, ok, real_issues, request_body
+from tests.helpers import (
+    FIXTURES,
+    FakeBoard,
+    InstallResponses,
+    ok,
+    real_issues,
+    request_body,
+    steps_answer,
+)
 from tests.test_review import MEETING_DE
 from tests.test_stages import said_verbatim
 from tests.test_cli import (
@@ -573,3 +585,99 @@ def test_a_recording_walks_to_its_review_and_no_further(
     asked = request_body(requests[0])
     params = asked["messages"][0]["content"].split("<params>\n", 1)[1].split("\n</params>", 1)[0]
     assert params.splitlines() == ["owner_lang: ru"]
+
+
+PARENT_RUN = "3f9c1a7e5b2d8c40"
+
+
+def a_review_on_disk(root: Path) -> Path:
+    (root / "outputs").mkdir(parents=True)
+    (root / REVIEW_JSON).write_text(
+        (FIXTURES / "review_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    return root
+
+
+def a_task_run(root: Path, parent_root: Path, source: Source, auto_approve: bool = True) -> Run:
+    return Run(
+        root=root,
+        run_id=RUN_ID,
+        lang="de",
+        source=source,
+        auto_approve=auto_approve,
+        parent_root=parent_root,
+        parent_run_id=PARENT_RUN,
+        assignment=1,
+    )
+
+
+def test_an_assignment_walk_writes_the_task_and_its_stamped_steps(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    child = tmp_path / "child"
+    llm([ok(steps_answer())])
+
+    assert walk(a_task_run(child, parent, "voice"), "assignment", "steps") is None
+
+    assignment = Assignment.model_validate_json(read_artifact(child, ASSIGNMENT_JSON))
+    assert (assignment.run_id, assignment.parent_run_id, assignment.number) == (
+        RUN_ID,
+        PARENT_RUN,
+        1,
+    )
+    assert assignment.meeting_lang == "de"
+    steps = Steps.model_validate_json(read_artifact(child, STEPS_JSON))
+    assert steps.run_id == RUN_ID and steps.task is not None
+    assert (child / STEPS_MD).is_file()
+
+
+def test_a_text_parent_gives_the_steps_no_meeting_language(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """У текста `lang` это DEFAULT_LANG, а не распознанный язык встречи."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    requests = llm([ok(steps_answer())])
+
+    walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
+
+    assignment = json.loads(read_artifact(tmp_path / "child", ASSIGNMENT_JSON))
+    assert assignment["meeting_lang"] is None
+    assert '"meeting_lang": null' in request_body(requests[0])["messages"][0]["content"]
+
+
+def test_an_assignment_without_the_review_of_its_parent_fails_before_the_model(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    requests = llm([])
+
+    with pytest.raises(OSError):
+        walk(a_task_run(tmp_path / "child", tmp_path / "gone", "voice"), "assignment", "steps")
+
+    assert requests == []
+
+
+def test_a_task_walk_with_gates_stops_on_the_steps_before_the_card(
+    llm: InstallResponses, board: FakeBoard, tmp_path: Path
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    llm([ok(steps_answer())])
+
+    waiting = walk(
+        a_task_run(tmp_path / "child", parent, "voice", auto_approve=False), "assignment", "card"
+    )
+
+    assert waiting == Pause(stage="steps", artifact=STEPS_MD, kind="gate")
+    assert board.posted("/1/cards") == []
+
+
+def test_an_auto_approved_task_walk_ends_with_one_card(
+    llm: InstallResponses, board: FakeBoard, tmp_path: Path
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    llm([ok(steps_answer())])
+
+    assert walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "card") is None
+
+    assert len(board.posted("/1/cards")) == 1
+    assert (tmp_path / "child/outputs/publish.json").is_file()
