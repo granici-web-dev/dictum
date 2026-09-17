@@ -147,7 +147,7 @@ TOO_LONG = (
     "Наговорите покороче или пришлите текстом."
 )
 
-UNSUPPORTED = "Принимаю голосовое, текст и запись с диктофона (mp3, m4a, wav)."
+UNSUPPORTED = "Принимаю голосовое, текст и аудиофайл с записью, например mp3, m4a или wav."
 
 VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
 
@@ -173,6 +173,8 @@ CONSENT_QUESTION = (
 CONSENT_YES, CONSENT_NO = "consent:yes", "consent:no"
 
 CONSENT_BUTTONS = ((CONSENT_YES, "Да, все согласны"), (CONSENT_NO, "Нет"))
+
+CONSENT_ANSWERED_AT = "%d.%m %H:%M UTC"
 
 HEARD = "Вот что я услышал:"
 
@@ -709,8 +711,7 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     by = query.from_user.id
     if query.data == CONSENT_NO:
         logger.info("consent=no chat=%s by=%s", message.chat_id, by)
-        with suppress(TelegramError):
-            await query.edit_message_reply_markup(reply_markup=None)
+        await close_consent_question(query, message.chat_id, CONSENT_NO, NO_RUN)
         return
     if query.data != CONSENT_YES:
         await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
@@ -728,8 +729,6 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     async with running:
-        with suppress(TelegramError):
-            await query.edit_message_reply_markup(reply_markup=None)
         run_id = new_run_id()
         audio = RUNS / run_id / f"inputs/recording{Path(recording.file_name or '').suffix}"
         run = started_run(
@@ -740,6 +739,7 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         logger.info("start=file run=%s chat=%s", run_id, message.chat_id)
         logger.info("consent=yes chat=%s by=%s run=%s", message.chat_id, by, run_id)
+        await close_consent_question(query, message.chat_id, CONSENT_YES, run_id)
         note = await message.reply_text(progress_text(run, []))
         try:
             await save_recording(recording, audio)
@@ -771,6 +771,26 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         dropped = await asyncio.to_thread(drop_stop, message.chat_id)
         logger.info("run=%s dropped=%s", run_id, dropped or NO_RUN)
         await follow(note, run, datetime.now(timezone.utc))
+
+
+async def close_consent_question(
+    query: CallbackQuery, chat_id: int, pressed: str, run_id: str
+) -> None:
+    """Ответ дописывается в сам вопрос, кнопки уходят тем же вызовом.
+
+    Вопрос с кнопками, оставшийся в чате, звал бы нажать «Да» ещё раз: та же запись скачалась бы
+    и второй раз ушла бы в OpenAI. Сорванная правка прогон не держит, но молчать о ней нельзя.
+    """
+    answer = dict(CONSENT_BUTTONS)[pressed]
+    at = datetime.now(timezone.utc).strftime(CONSENT_ANSWERED_AT)
+    try:
+        await query.edit_message_text(f"{CONSENT_QUESTION}\n\n{answer}. {at}")
+    except TelegramError:
+        logger.warning(
+            "consent_question=kept chat=%s run=%s: ответ в вопрос не дописан, кнопки остались",
+            chat_id,
+            run_id,
+        )
 
 
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

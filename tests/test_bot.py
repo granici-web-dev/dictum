@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -2090,6 +2091,17 @@ class ConsentPress(ButtonChat):
             if recording is None
             else SimpleNamespace(audio=None, document=recording, from_user=SimpleNamespace(id=7))
         )
+        self.question_edits: list[str] = []
+        self.question_edit_fails = False
+
+    async def edit_message_text(self, text: str) -> Message:
+        if self.question_edit_fails:
+            raise TelegramError("Message can't be edited")
+        self.question_edits.append(text)
+        return cast(Message, self)
+
+
+ANSWERED_AT = r"\d\d\.\d\d \d\d:\d\d UTC"
 
 
 def an_audio(seconds: int = 60, size: int = 1024) -> Audio:
@@ -2167,7 +2179,8 @@ async def test_gate_blocks_audio_without_consent(
     assert recording.fetched == 0
     assert store.started == []
     assert not (tmp_path / "runs").exists()
-    assert press.markups == [None]
+    [answered] = press.question_edits
+    assert re.fullmatch(rf"{re.escape(CONSENT_QUESTION)}\n\nНет\. {ANSWERED_AT}", answered)
     assert "consent=no chat=12 by=99" in caplog.text
 
 
@@ -2192,7 +2205,10 @@ async def test_consent_yes_starts_file_run_from_replied_message(
 
     [(run_id, chat_id, source)] = store.started
     assert (chat_id, source, store.consents[run_id]) == (12, "file", True)
-    assert press.markups == [None]
+    [answered] = press.question_edits
+    assert re.fullmatch(
+        rf"{re.escape(CONSENT_QUESTION)}\n\nДа, все согласны\. {ANSWERED_AT}", answered
+    )
     assert press.replies[0].splitlines()[2] == f"▸ {FILE_INGEST_LABEL}"
     [run] = seen
     assert (run.run_id, run.source, run.consent_confirmed) == (run_id, "file", True)
@@ -2271,6 +2287,31 @@ async def test_file_over_20_minutes_refused_after_download(
 
 
 @pytest.mark.asyncio
+async def test_consent_question_that_could_not_be_edited_is_logged_and_the_run_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Кнопки, оставшиеся под вопросом, зовут нажать «Да» второй раз: об этом должен знать лог."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
+    seen: list[Run] = []
+    monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
+    press = ConsentPress(CONSENT_YES, SentRecording())
+    press.question_edit_fails = True
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, _, _)] = store.started
+    [warning] = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert f"consent_question=kept chat=12 run={run_id}" in warning.getMessage()
+    assert [run.run_id for run in seen] == [run_id]
+
+
+@pytest.mark.asyncio
 async def test_unreadable_file_is_deleted_after_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
@@ -2315,7 +2356,7 @@ async def test_consent_press_during_run_is_busy_and_keeps_keyboard(
     assert press.replies == [BUSY]
     assert "refusal=busy chat=12 press=yes by=99" in caplog.text
     assert "consent=yes" not in caplog.text
-    assert press.markups == []
+    assert press.question_edits == []
     assert recording.fetched == 0
     assert store.started == []
 
