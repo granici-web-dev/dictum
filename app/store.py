@@ -54,6 +54,10 @@ NO_TASK = "no_task"
 REFUSED = "refused"
 DROPPED = "dropped"
 FAILED = "failed"
+# Вопросы для тимлида отданы владельцу, прогон ждёт его ответа днями (P3-11). Это не остановка:
+# пока тимлид молчит, чат принимает новые встречи и поручения, а индекс одной остановки этого
+# статуса не видит. И не рабочий статус: имени стадии в нём нет, уборка на старте его не трогает.
+QUESTIONS_SENT = "questions_sent"
 
 # Рабочие статусы — имена стадий: их называет обход, и второй словарь названий разошёлся бы с
 # ним. Прогон в рабочем статусе на старте процесса означает, что процесс умер вместе с ним.
@@ -100,6 +104,12 @@ class RunRow(Base):
         String(32), ForeignKey("runs.id", name="fk_runs_parent_id_runs")
     )
     assignment: Mapped[int | None] = mapped_column(SmallInteger)
+    # Ресёрч поручения выбран кнопкой и должен пережить парковку на дни, как auto_approve. Есть
+    # ровно у ребёнка-поручения.
+    research: Mapped[bool | None]
+    # Сообщения с вопросами для тимлида: ответом (reply) на любое из них приходит ответ тимлида.
+    questions_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    questions_note_id: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -116,6 +126,14 @@ class RunRow(Base):
         CheckConstraint(
             "assignment IS NULL OR (parent_id IS NOT NULL AND assignment >= 1)",
             name="ck_runs_assignment_of_parent",
+        ),
+        CheckConstraint(
+            "(assignment IS NULL) = (research IS NULL)", name="ck_runs_research_of_task"
+        ),
+        CheckConstraint(
+            "(questions_message_id IS NULL AND questions_note_id IS NULL)"
+            " OR assignment IS NOT NULL",
+            name="ck_runs_questions_of_task",
         ),
         # Остановку ищут по чату и статусу: единственный запрос бота на горячем пути.
         Index("ix_runs_chat_status", "chat_id", "status"),
@@ -183,6 +201,16 @@ class Child(BaseModel):
     run_id: str
     status: str
     auto_approve: bool
+    research: bool | None
+
+
+class Parked(BaseModel):
+    """Прогон, на чьи вопросы ответили reply. Статус любой: протухший ответ различает вызывающий."""
+
+    run_id: str
+    status: str
+    parent_id: str
+    assignment: int
 
 
 class Orphan(BaseModel):
@@ -254,6 +282,7 @@ def start_run(
     status: str,
     parent_id: str | None = None,
     assignment: int | None = None,
+    research: bool | None = None,
 ) -> None:
     """Заводит строку. Статус первой стадии называет вызывающий: у каждого маршрута она своя."""
     with session() as opened:
@@ -268,6 +297,7 @@ def start_run(
                 consent_confirmed=consent_confirmed,
                 parent_id=parent_id,
                 assignment=assignment,
+                research=research,
             )
         )
 
@@ -299,7 +329,9 @@ def child_of(parent_id: str, assignment: int | None) -> Child | None:
         ).one_or_none()
         if row is None:
             return None
-        return Child(run_id=row.id, status=row.status, auto_approve=row.auto_approve)
+        return Child(
+            run_id=row.id, status=row.status, auto_approve=row.auto_approve, research=row.research
+        )
 
 
 def mark_stage(run_id: str, status: str, lang: str) -> None:
@@ -345,6 +377,43 @@ def reopen_run(run_id: str, status: str) -> None:
             update(RunRow)
             .where(RunRow.id == run_id)
             .values(status=status, stopped_stage=None, stopped_artifact=None)
+        )
+
+
+def park_run(run_id: str) -> None:
+    """Вопросы для тимлида отданы владельцу: прогон ждёт ответа, не занимая места остановки."""
+    with session() as opened:
+        opened.execute(
+            update(RunRow)
+            .where(RunRow.id == run_id)
+            .values(status=QUESTIONS_SENT, stopped_stage=None, stopped_artifact=None)
+        )
+
+
+def note_questions(run_id: str, message_id: int, note_id: int) -> None:
+    """Сообщения, ответом на которые придёт ответ тимлида. Повторная отправка их переписывает."""
+    with session() as opened:
+        opened.execute(
+            update(RunRow)
+            .where(RunRow.id == run_id)
+            .values(questions_message_id=message_id, questions_note_id=note_id)
+        )
+
+
+def parked_by_reply(chat_id: int, message_id: int) -> Parked | None:
+    """Прогон, на чьё сообщение с вопросами ответили в этом чате, в каком бы статусе он ни был."""
+    with session() as opened:
+        row = opened.scalars(
+            select(RunRow).where(
+                RunRow.chat_id == chat_id,
+                (RunRow.questions_message_id == message_id)
+                | (RunRow.questions_note_id == message_id),
+            )
+        ).one_or_none()
+        if row is None or row.parent_id is None or row.assignment is None:
+            return None
+        return Parked(
+            run_id=row.id, status=row.status, parent_id=row.parent_id, assignment=row.assignment
         )
 
 

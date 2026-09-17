@@ -866,6 +866,9 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 start,
                 parent_id,
                 number,
+                # Ресёрч поручения выбирается кнопкой. Пока кнопки «Шаги без ресёрча» нет,
+                # нажимают только обычную, а она значит «с ресёрчем».
+                True if number is not None else None,
             )
         else:
             # Тот же run_id, а не новый: карточка сорванной публикации несёт его в маркере, и

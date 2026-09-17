@@ -17,7 +17,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.engine import make_url
 
 from app.config import settings
@@ -31,6 +31,7 @@ from app.store import (
     FAILED,
     NO_TASK,
     PUBLISHED,
+    QUESTIONS_SENT,
     REFUSED,
     REVIEWED,
     STATUS_OF_STOP,
@@ -44,8 +45,11 @@ from app.store import (
     fail_orphans,
     finish_run,
     mark_stage,
+    note_questions,
     one_bot_per_database,
     parent_of,
+    park_run,
+    parked_by_reply,
     reopen_run,
     session,
     start_run,
@@ -416,7 +420,7 @@ def a_review(run_id: str = "разбор", chat_id: int = 12, status: str = REVI
 
 
 def a_task_run(run_id: str, number: int, parent_id: str = "разбор") -> None:
-    start_run(run_id, 12, "file", "de", False, None, "assignment", parent_id, number)
+    start_run(run_id, 12, "file", "de", False, None, "assignment", parent_id, number, True)
 
 
 def an_idea_run(run_id: str, parent_id: str = "разбор") -> None:
@@ -445,7 +449,9 @@ def test_check_rejects_an_assignment_without_a_parent_or_below_one(
     a_review()
 
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_assignment_of_parent"):
-        start_run("поручение", 12, "text", "de", False, None, "assignment", parent_id, number)
+        start_run(
+            "поручение", 12, "text", "de", False, None, "assignment", parent_id, number, True
+        )
 
 
 def test_a_child_of_a_recording_carries_no_consent(db: None) -> None:
@@ -454,7 +460,7 @@ def test_a_child_of_a_recording_carries_no_consent(db: None) -> None:
     a_task_run("без согласия", 1)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
-        start_run("с согласием", 12, "file", "de", False, True, "assignment", "разбор", 2)
+        start_run("с согласием", 12, "file", "de", False, True, "assignment", "разбор", 2, True)
 
 
 def test_a_file_without_a_parent_still_needs_consent(db: None) -> None:
@@ -549,7 +555,7 @@ def test_child_of_does_not_see_a_dropped_run(db: None) -> None:
 
 def test_child_of_tells_a_task_from_the_idea(db: None) -> None:
     a_review()
-    start_run("поручение", 12, "file", "de", True, None, "assignment", "разбор", 1)
+    start_run("поручение", 12, "file", "de", True, None, "assignment", "разбор", 1, True)
 
     task = child_of("разбор", 1)
 
@@ -568,3 +574,156 @@ def test_a_reopened_run_is_back_at_work_under_the_same_id(db: None) -> None:
 
     child = child_of("разбор", 1)
     assert child is not None and (child.run_id, child.status) == ("поручение", "card")
+
+
+def a_parked_task(run_id: str = "поручение", number: int = 1, chat_id: int = 12) -> None:
+    a_task_run(run_id, number)
+    park_run(run_id)
+    note_questions(run_id, 501, 502)
+
+
+def test_research_belongs_to_a_task_child_and_only_to_it(db: None) -> None:
+    """Выбор ресёрча переживает парковку в строке, и у пути идеи его нет вовсе."""
+    a_review()
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_research_of_task"):
+        start_run("идея", 12, "file", "de", False, None, "handoff", "разбор", None, True)
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_research_of_task"):
+        start_run("поручение", 12, "file", "de", False, None, "assignment", "разбор", 1)
+
+
+def test_questions_are_sent_only_about_a_task(db: None) -> None:
+    a_review()
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_questions_of_task"):
+        note_questions("разбор", 501, 502)
+
+
+def test_parked_run_does_not_block_a_stop_in_the_same_chat(db: None) -> None:
+    """Тимлид отвечает днями, и всё это время чат обязан принимать новые встречи и ворота."""
+    a_review()
+    a_parked_task()
+    a_gated_run("ворота")
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None and stopped.run_id == "ворота"
+
+
+def test_waiting_for_does_not_see_a_parked_run(db: None) -> None:
+    a_review()
+    a_parked_task()
+
+    assert QUESTIONS_SENT not in STOP_STATUSES
+    assert waiting_for(12) is None
+
+
+def test_fail_orphans_leaves_a_parked_run_alone(db: None) -> None:
+    """Припаркованный прогон не держит процесса: перезапуск бота его не обрывает."""
+    a_review()
+    a_parked_task()
+
+    assert fail_orphans() == []
+    assert drop_stop(12) is None
+    with session() as opened:
+        assert opened.get(RunRow, "поручение").status == QUESTIONS_SENT  # type: ignore[union-attr]
+
+
+def test_parked_by_reply_finds_the_run_by_either_message(db: None) -> None:
+    a_review()
+    a_parked_task()
+
+    by_copy, by_note = parked_by_reply(12, 501), parked_by_reply(12, 502)
+
+    assert by_copy is not None and by_copy == by_note
+    assert (by_copy.run_id, by_copy.status, by_copy.parent_id, by_copy.assignment) == (
+        "поручение",
+        QUESTIONS_SENT,
+        "разбор",
+        1,
+    )
+    assert parked_by_reply(13, 501) is None
+    assert parked_by_reply(12, 503) is None
+
+
+def test_a_reply_to_questions_already_closed_still_names_the_run(db: None) -> None:
+    """Протухший ответ отличает вызывающий: без статуса он завёл бы из ответа новый разбор."""
+    a_review()
+    a_parked_task()
+    mark_stage("поручение", "answers", "de")
+
+    parked = parked_by_reply(12, 502)
+
+    assert parked is not None and parked.status == "answers"
+
+
+def test_resent_questions_replace_the_messages_a_reply_is_matched_against(db: None) -> None:
+    a_review()
+    a_parked_task()
+
+    note_questions("поручение", 601, 602)
+
+    assert parked_by_reply(12, 501) is None
+    assert parked_by_reply(12, 602) is not None
+
+
+def test_a_second_run_of_a_parked_task_is_rejected(db: None) -> None:
+    """Припаркованный прогон жив: второе нажатие не должно оплатить вопросы второй раз."""
+    a_review()
+    a_parked_task()
+
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ux_runs_one_run_per_task"):
+        a_task_run("второй", 1)
+
+
+def test_child_of_carries_the_research_choice(db: None) -> None:
+    a_review()
+    start_run("поручение", 12, "file", "de", True, None, "assignment", "разбор", 1, False)
+
+    child = child_of("разбор", 1)
+
+    assert child is not None and child.research is False
+
+
+def insert_rows(*statements: str) -> None:
+    with engine().begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
+
+
+def test_the_upgrade_marks_existing_task_children_as_run_without_research(db: None) -> None:
+    """Дети поручения до 0006 шли без ресёрча: миграция записывает факт, а не умолчание."""
+    config = Config("alembic.ini")
+    command.downgrade(config, "0005_child_runs")
+    try:
+        insert_rows(
+            "insert into runs (id, chat_id, source, lang, status, auto_approve, consent_confirmed)"
+            " values ('разбор', 12, 'file', 'de', 'reviewed', false, true)",
+            "insert into runs (id, chat_id, source, lang, status, auto_approve, parent_id,"
+            " assignment) values ('поручение', 12, 'file', 'de', 'published', false, 'разбор', 1)",
+            "insert into runs (id, chat_id, source, lang, status, auto_approve, parent_id)"
+            " values ('идея', 12, 'file', 'de', 'published', false, 'разбор')",
+        )
+    finally:
+        command.upgrade(config, "head")
+
+    with session() as opened:
+        research = {row.id: row.research for row in opened.scalars(select(RunRow))}
+
+    assert research == {"разбор": None, "поручение": False, "идея": None}
+
+
+@pytest.mark.parametrize("status", [QUESTIONS_SENT, "clarify", "answers", "approach"])
+def test_the_downgrade_refuses_while_rows_sit_in_statuses_the_old_code_does_not_know(
+    db: None, status: str
+) -> None:
+    a_review()
+    a_task_run("поручение", 1)
+    mark_stage("поручение", status, "de")
+
+    with pytest.raises(sqlalchemy.exc.ProgrammingError, match="P3-11 statuses"):
+        command.downgrade(Config("alembic.ini"), "0005_child_runs")
+
+    with engine().connect() as connection:
+        context = MigrationContext.configure(connection)
+        assert context.get_current_revision() == "0006_teamlead_questions"

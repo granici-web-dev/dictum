@@ -152,6 +152,7 @@ class FakeStore:
         self.langs: dict[str, str] = {}
         # Кто чей ребёнок и по какому поручению: (родитель, номер) у строки из кнопки разбора.
         self.children: dict[str, tuple[str, int | None]] = {}
+        self.research: dict[str, bool | None] = {}
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
@@ -178,7 +179,10 @@ class FakeStore:
         status: str,
         parent_id: str | None = None,
         assignment: int | None = None,
+        research: bool | None = None,
     ) -> None:
+        if (assignment is None) != (research is None):
+            raise IntegrityError("INSERT INTO runs", {}, Exception("ck_runs_research_of_task"))
         # Правило базы `ck_runs_consent_only_for_file`: без него двойник принял бы строку, которую
         # Postgres отвергнет, и обработчик с перепутанным согласием прошёл бы тесты зелёным.
         received_recording = source == "file" and parent_id is None
@@ -196,6 +200,7 @@ class FakeStore:
         self.approved[run_id] = auto_approve
         if parent_id is not None:
             self.children[run_id] = (parent_id, assignment)
+        self.research[run_id] = research
 
     def parent_of(self, run_id: str, chat_id: int) -> Parent | None:
         if self.chats.get(run_id) != chat_id or self.status[run_id] not in (REVIEWED, NO_TASK):
@@ -211,7 +216,10 @@ class FakeStore:
         for run_id, chosen in self.children.items():
             if chosen == (parent_id, assignment) and self.status[run_id] != DROPPED:
                 return Child(
-                    run_id=run_id, status=self.status[run_id], auto_approve=self.approved[run_id]
+                    run_id=run_id,
+                    status=self.status[run_id],
+                    auto_approve=self.approved[run_id],
+                    research=self.research[run_id],
                 )
         return None
 
@@ -3069,7 +3077,7 @@ def a_child_in(
     tmp_path: Path, store: FakeStore, status: str, journal: bool, number: int = 1
 ) -> Path:
     """Дочерний прогон поручения, уже бывший: строка и, если просят, журнал публикации."""
-    store.start_run("ребёнок", 12, "voice", "de", True, None, "assignment", PARENT, number)
+    store.start_run("ребёнок", 12, "voice", "de", True, None, "assignment", PARENT, number, True)
     store.status["ребёнок"] = status
     root = tmp_path / "runs" / "ребёнок"
     (root / "outputs").mkdir(parents=True)
