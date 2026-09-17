@@ -280,6 +280,54 @@ def test_publish_adds_the_dod_items_a_broken_run_never_wrote(
     assert by_local(outcomes)[first.id].status == "completed"
 
 
+def test_publish_leaves_a_complete_dod_checklist_untouched(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    known = put_on_board(board, first, "DCT-3", "прогон-три")
+    checklist_id = known["checklists"][0]["id"]
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-три"))
+
+    assert board.posted(f"/1/checklists/{checklist_id}/checkItems") == []
+    assert by_local(outcomes)[first.id].status == "existing"
+
+
+def test_publish_does_not_mix_a_foreign_dod_into_the_checklist(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """Пункт не из этого файла: чек-лист собран другим прогоном или правлен человеком."""
+    issues = real_issues()
+    first = issues.issues[0]
+    mixed = put_on_board(
+        board, first, "DCT-3", "прогон-три", dod=[*first.dod[1:], "Пункт, дописанный руками"]
+    )
+    checklist_id = mixed["checklists"][0]["id"]
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-три"))
+
+    assert board.posted(f"/1/checklists/{checklist_id}/checkItems") == []
+    assert by_local(outcomes)[first.id].status == "differs"
+
+
+def test_publish_takes_a_dod_item_with_a_trailing_space_for_its_own(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    issues = real_issues()
+    first = issues.issues[0]
+    half_made = put_on_board(
+        board, first, "DCT-3", "прогон-три", dod=[f"{item} " for item in first.dod[1:]]
+    )
+    checklist_id = half_made["checklists"][0]["id"]
+
+    outcomes = publish(issues_file(tmp_path, run_id="прогон-три"))
+
+    added = board.posted(f"/1/checklists/{checklist_id}/checkItems")
+    assert [fields["name"] for fields in added] == first.dod[:1]
+    assert by_local(outcomes)[first.id].status == "completed"
+
+
 def test_publish_finishes_a_card_left_without_its_dependency_links(
     board: FakeBoard, tmp_path: Path
 ) -> None:

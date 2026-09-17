@@ -43,6 +43,9 @@ MARKER = re.compile(
 PROJECT_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 
 Status = Literal["created", "completed", "existing", "differs"]
+# Чем кончилась досборка карточки: всё было на месте, дописано недостающее или в чек-листе
+# стоит пункт, которого в плане нет, и дописывать в него нельзя.
+Filling = Literal["complete", "filled", "foreign"]
 
 LABEL_COLOURS: dict[LabelName, str] = {
     "frontend": "blue",
@@ -252,33 +255,42 @@ def same_card(known: TrelloCard, name: str, description: str, planned: PlannedCa
 
 def fill_checklist(
     board: Trello, card_id: str, planned: PlannedCard, existing: TrelloChecklist | None
-) -> bool:
-    """Доводит чеклист карточки до полного набора пунктов, чем бы ни кончился прошлый прогон."""
+) -> Filling:
+    """Доводит чеклист карточки до полного набора пунктов, чем бы ни кончился прошлый прогон.
+
+    Пункт, которого в плане нет, значит, что чек-лист собран из другого файла или правлен
+    человеком. Дописать к нему недостающие значило бы смешать два набора, поэтому такой чек-лист
+    не трогается. Имена сравниваются обрезанными: пробелы по краям Trello мог срезать сам.
+    """
     if not planned.checklist:
-        return False
+        return "complete"
+    wanted = {item.strip() for item in planned.checklist}
+    present = {item.name.strip() for item in existing.check_items} if existing else set()
+    if present - wanted:
+        return "foreign"
     checklist = existing or board.create_checklist(card_id, planned.checklist_name)
-    present = {item.name for item in checklist.check_items}
-    missing = [item for item in planned.checklist if item not in present]
+    missing = [item for item in planned.checklist if item.strip() not in present]
     for item in missing:
         board.add_check_item(checklist.id, item)
-    return bool(missing)
+    return "filled" if missing else "complete"
 
 
 def finish_card(
     board: Trello, known: TrelloCard, planned: PlannedCard, journal: dict[str, PublishedCard]
-) -> bool:
+) -> Filling:
     """Дособирает карточку, которую оборвавшийся прогон успел создать, но не успел наполнить."""
     checklist = next(
         (item for item in known.checklists if item.name == planned.checklist_name), None
     )
-    finished = fill_checklist(board, known.id, planned, checklist)
+    filling = fill_checklist(board, known.id, planned, checklist)
     attached = {item.name for item in known.attachments}
     for dependency in planned.depends_on:
         published = journal[dependency]
         if published.key not in attached:
             board.attach_url(known.id, published.url, published.key)
-            finished = True
-    return finished
+            if filling == "complete":
+                filling = "filled"
+    return filling
 
 
 def write_log(
@@ -307,9 +319,12 @@ def revisit_card(
     name = card_name(known.key, planned.title)
     description = card_description(known.key, run_id, planned, published)
     status: Status = "existing" if same_card(known.card, name, description, planned) else "differs"
+    filling = finish_card(board, known.card, planned, published)
     # Дособранная карточка, которая вдобавок разошлась с файлом, остаётся differs:
     # человеку важнее знать про расхождение, чем про дописанный чеклист.
-    if finish_card(board, known.card, planned, published) and status == "existing":
+    if filling == "foreign":
+        status = "differs"
+    elif filling == "filled" and status == "existing":
         status = "completed"
     return CardOutcome(
         local_id=planned.local_id,
