@@ -48,6 +48,9 @@ class Run(BaseModel):
     # Откуда прогон, знает он сам, а не наличие записи: у продолженного записи на диске уже нет
     # (её мог унести `KEEP_AUDIO=false`), а подписан прогресс по-прежнему по источнику.
     source: Source = "text"
+    # Согласие участников чужой записи (CLAUDE.md §8). Факт строки прогона, а не кнопки: у
+    # продолженного прогона его приносит `Stopped`.
+    consent_confirmed: bool | None = None
     # Ворота — норма, а демо — исключение (CLAUDE.md §1), поэтому снимает их тот, кто заводит
     # прогон, и делает это явно.
     auto_approve: bool = False
@@ -89,15 +92,28 @@ class Redo(BaseModel):
     closes_branch: str | None = None
 
 
+class ConsentMissing(RuntimeError):
+    """Файл с диктофона без согласия участников: запись не обрабатывается (CLAUDE.md §8)."""
+
+
 def ingest_body(run: Run) -> dict[str, str]:
+    # Кнопка согласия живёт в боте, но `auto_approve` снимает всё, кроме consent (SPEC §3.2), и
+    # стадия проверяет его сама — до ffmpeg и до первого байта в OpenAI.
+    if run.source == "file" and run.consent_confirmed is not True:
+        raise ConsentMissing(f"Прогон {run.run_id}: файл без подтверждённого согласия на запись")
     if run.audio is None:
-        return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id, "text", None)}
+        return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id, "text", None, None)}
     heard = transcribe(run.audio, run.run_id)
     # Язык прогона задаёт голос, а не DEFAULT_LANG: brief и стадии за ним читают уже его.
     run.lang = heard.lang
     return {
         TRANSCRIPT: build_transcript(
-            heard.text, heard.lang, run.run_id, run.source, heard.duration_seconds
+            heard.text,
+            heard.lang,
+            run.run_id,
+            run.source,
+            heard.duration_seconds,
+            run.consent_confirmed,
         )
     }
 

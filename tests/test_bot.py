@@ -917,6 +917,17 @@ def test_a_continued_run_takes_its_facts_from_the_row_and_not_from_the_settings(
     assert run.lang == "ru"
 
 
+def test_continued_file_run_keeps_consent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без него продолженный файловый прогон был бы тем, что ingest считает незаконным."""
+    stopped = a_stopped_choice(tmp_path, monkeypatch).model_copy(
+        update={"source": "file", "consent_confirmed": True}
+    )
+
+    run = bot.continued(stopped)
+
+    assert (run.source, run.consent_confirmed) == ("file", True)
+
+
 def test_a_number_becomes_the_choice_the_stage_can_read() -> None:
     found = parse_candidates(MULTIPLE)
 

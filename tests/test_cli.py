@@ -31,7 +31,7 @@ def transcript_of_an_earlier_run(root: Path) -> Path:
     path = root / TRANSCRIPT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        build_transcript("Идея с прошлого прогона.", "ru", EARLIER_RUN, "text", None), "utf-8"
+        build_transcript("Идея с прошлого прогона.", "ru", EARLIER_RUN, "text", None, None), "utf-8"
     )
     return path
 
@@ -221,7 +221,7 @@ def test_a_continued_run_keeps_the_language_of_its_transcript(
     monkeypatch.setattr(settings, "default_lang", "de")
     (tmp_path / "inputs").mkdir()
     (tmp_path / TRANSCRIPT).write_text(
-        build_transcript("Хочу бота.", "ru", EARLIER_RUN, "voice", 34), encoding="utf-8"
+        build_transcript("Хочу бота.", "ru", EARLIER_RUN, "voice", 34, None), encoding="utf-8"
     )
     (tmp_path / IDEA).write_text("# Идея\n", encoding="utf-8")
     requests = llm([ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])

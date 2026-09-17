@@ -19,6 +19,7 @@ from app.pipeline import (
 )
 from app import run as walking
 from app.run import (
+    ConsentMissing,
     Pause,
     Redo,
     Run,
@@ -106,6 +107,18 @@ def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -
     )
 
 
+def a_file_run(root: Path, consent_confirmed: bool | None) -> Run:
+    return Run(
+        root=root,
+        run_id=RUN_ID,
+        lang="de",
+        audio=root / "inputs/recording.mp3",
+        source="file",
+        consent_confirmed=consent_confirmed,
+        auto_approve=True,
+    )
+
+
 def test_a_voice_run_writes_a_transcript_that_names_the_source_and_the_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -114,6 +127,44 @@ def test_a_voice_run_writes_a_transcript_that_names_the_source_and_the_seconds(
     assert run_id_of(transcript) == RUN_ID
     assert "source: voice\nduration: 47\nlang: ru\n" in transcript
     assert TEXT in transcript
+
+
+@pytest.mark.parametrize("consent", [None, False])
+def test_ingest_refuses_file_without_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, consent: bool | None
+) -> None:
+    """Даже `auto_approve` согласия не снимает, поэтому стадия не верит одной кнопке в боте."""
+
+    def never(audio: Path, run_id: str) -> Transcription:
+        raise AssertionError("запись ушла на расшифровку без согласия")
+
+    monkeypatch.setattr(walking, "transcribe", never)
+
+    with pytest.raises(ConsentMissing):
+        ingest_body(a_file_run(tmp_path, consent))
+
+
+def test_file_transcript_carries_consent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        walking,
+        "transcribe",
+        lambda audio, run_id: Transcription(text=TEXT, lang="ru", duration_seconds=600),
+    )
+
+    transcript = ingest_body(a_file_run(tmp_path, True))[TRANSCRIPT]
+
+    assert "source: file\nduration: 600\nlang: ru\nconsent_confirmed: true\n" in transcript
+
+
+def test_text_and_voice_transcripts_have_no_consent_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Вопроса о согласии им не задавали, и строка с null врала бы, что задавали."""
+    voice = ingest_body(a_voice_run(tmp_path, monkeypatch))[TRANSCRIPT]
+    text = ingest_body(a_run(tmp_path))[TRANSCRIPT]
+
+    assert "consent_confirmed" not in voice
+    assert "consent_confirmed" not in text
 
 
 def test_the_language_of_the_run_follows_the_voice_and_not_the_default(

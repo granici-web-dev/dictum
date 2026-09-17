@@ -304,6 +304,7 @@ def continued(stopped: Stopped) -> Run:
         run_id=stopped.run_id,
         lang=stopped.lang,
         source=stopped.source,
+        consent_confirmed=stopped.consent_confirmed,
         auto_approve=stopped.auto_approve,
     )
 
