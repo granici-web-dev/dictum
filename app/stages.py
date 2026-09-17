@@ -7,24 +7,31 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
+from typing import TypeVar
 
 import anthropic
 from anthropic import DefaultHttpxClient
 from anthropic.types import Message, MessageParam
 from pydantic import BaseModel, ValidationError
 
+from app.answers import read_answers
 from app.candidates import check_candidates
+from app.clarify import Clarify, check_clarify, stamp_clarify
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.dialog import Turn, check_question
 from app.models import IssuesFile
 from app.pipeline import (
+    ANSWERS,
     ASSIGNMENT_JSON,
     BRIEF_QUESTION,
     CANDIDATES,
+    CLARIFY_JSON,
     ISSUES_JSON,
     ISSUES_MD,
+    PROJECT,
     REVIEW_JSON,
     REVIEW_MD,
     STEPS_JSON,
@@ -32,6 +39,7 @@ from app.pipeline import (
     TRANSCRIPT,
     stage_named,
 )
+from app.project import read_project
 from app.render import issues_markdown, review_markdown, steps_markdown
 from app.review import (
     Review,
@@ -41,10 +49,12 @@ from app.review import (
     unmatched_originals,
     unmatched_tickets,
 )
-from app.steps import Assignment, Steps, check_steps, stamp_steps
+from app.steps import Assignment, Pair, Steps, check_steps, stamp_steps
 from app.validate import check_issues
 
 logger = logging.getLogger(__name__)
+
+Parsed = TypeVar("Parsed")
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / ".claude" / "commands"
@@ -90,9 +100,13 @@ def repairable_problems(
         return check_issues(files[ISSUES_JSON])
     if stage == "review":
         return check_review(files[REVIEW_JSON], inputs[TRANSCRIPT], params["owner_lang"])
+    if stage == "clarify":
+        assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
+        return check_clarify(files[CLARIFY_JSON], assignment)
     if stage == "steps":
         assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
-        return check_steps(files[STEPS_JSON], assignment)
+        asked = Clarify.model_validate_json(inputs[CLARIFY_JSON]).questions
+        return check_steps(files[STEPS_JSON], assignment, len(asked))
     if CANDIDATES in files:
         return check_candidates(files[CANDIDATES])
     if BRIEF_QUESTION in files:
@@ -290,6 +304,20 @@ def with_run_id(issues_json: str, run_id: str) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
+def parsed_input(
+    stage: str, inputs: dict[str, str], path: str, parse: Callable[[str], Parsed]
+) -> Parsed:
+    """Вход стадии поручения по его схеме, до вызова модели.
+
+    Входы пишет код, но их можно поправить руками, а вход с чужой формой проверить и
+    проштамповать нечем: платить за такой вызов незачем.
+    """
+    try:
+        return parse(inputs[path])
+    except ValueError as error:
+        raise StageError(f"{stage}: {path} не проходит схему: {error}", "") from error
+
+
 def run_stage(
     stage: str,
     inputs: dict[str, str],
@@ -303,13 +331,12 @@ def run_stage(
     outputs = allowed if allowed is not None else stage_named(stage).outputs
     given_params = params or {}
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
+    if stage in ("clarify", "steps"):
+        assignment = parsed_input(stage, inputs, ASSIGNMENT_JSON, Assignment.model_validate_json)
+        project = parsed_input(stage, inputs, PROJECT, read_project)
     if stage == "steps":
-        # Вход пишет код, но его можно поправить руками, а поручение без языка владельца или с
-        # чужой формой проверить и проштамповать нечем: платить за такой вызов незачем.
-        try:
-            assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
-        except ValidationError as error:
-            raise StageError(f"steps: {ASSIGNMENT_JSON} не проходит схему: {error}", "") from error
+        clarify = parsed_input(stage, inputs, CLARIFY_JSON, Clarify.model_validate_json)
+        answers = parsed_input(stage, inputs, ANSWERS, read_answers)
     messages: list[MessageParam] = [
         *(history or []),
         {"role": "user", "content": build_user_message(inputs, user_edit, params)},
@@ -366,9 +393,19 @@ def run_stage(
         unverified = sum(not fragment.in_transcript for fragment in fragments(review))
         logger.info("stage=review run=%s unverified=%d", run_id, unverified)
         files[REVIEW_MD] = review_markdown(review)
+    if stage == "clarify":
+        files[CLARIFY_JSON] = stamp_clarify(files[CLARIFY_JSON], assignment)
     if stage == "steps":
-        files[STEPS_JSON] = stamp_steps(files[STEPS_JSON], assignment)
-        files[STEPS_MD] = steps_markdown(Steps.model_validate_json(files[STEPS_JSON]))
+        files[STEPS_JSON] = stamp_steps(
+            files[STEPS_JSON],
+            assignment,
+            clarify.title,
+            [Pair(text=asked.text, translation=asked.translation) for asked in clarify.questions],
+            answers.status == "answered",
+        )
+        files[STEPS_MD] = steps_markdown(
+            Steps.model_validate_json(files[STEPS_JSON]), answers, project
+        )
     return StageResult(
         files=files,
         model=response.model,

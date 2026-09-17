@@ -1,19 +1,27 @@
 import json
+import logging
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from app.answers import read_answers
+from app.config import settings
 from app.dialog import Turn
 from app.ingest import Source, run_id_of
 from app.pipeline import (
+    ANSWERS,
     ASSIGNMENT_JSON,
     BRIEF,
     BRIEF_QUESTION,
     CANDIDATES,
+    CLARIFY_JSON,
     IDEA,
     ISSUES_JSON,
     ISSUES_MD,
     PRD,
+    PROJECT,
     RESEARCH,
     REVIEW_JSON,
     REVIEW_MD,
@@ -34,6 +42,7 @@ from app.run import (
     read_artifact,
     walk,
 )
+from app.project import project_snapshot, read_project, read_standards
 from app.stages import StageError
 from app.steps import Assignment, Steps
 from app.transcribe import Transcription
@@ -41,6 +50,8 @@ from tests.helpers import (
     FIXTURES,
     FakeBoard,
     InstallResponses,
+    clarify_answer,
+    no_questions,
     ok,
     real_issues,
     request_body,
@@ -616,7 +627,7 @@ def test_an_assignment_walk_writes_the_task_and_its_stamped_steps(
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
     child = tmp_path / "child"
-    llm([ok(steps_answer())])
+    llm([ok(clarify_answer()), ok(steps_answer())])
 
     assert walk(a_task_run(child, parent, "voice"), "assignment", "steps") is None
 
@@ -637,7 +648,7 @@ def test_a_text_parent_gives_the_steps_no_meeting_language(
 ) -> None:
     """У текста `lang` это DEFAULT_LANG, а не распознанный язык встречи."""
     parent = a_review_on_disk(tmp_path / "parent")
-    requests = llm([ok(steps_answer())])
+    requests = llm([ok(clarify_answer()), ok(steps_answer())])
 
     walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
 
@@ -661,7 +672,7 @@ def test_a_task_walk_with_gates_stops_on_the_steps_before_the_card(
     llm: InstallResponses, board: FakeBoard, tmp_path: Path
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
-    llm([ok(steps_answer())])
+    llm([ok(clarify_answer()), ok(steps_answer())])
 
     waiting = walk(
         a_task_run(tmp_path / "child", parent, "voice", auto_approve=False), "assignment", "card"
@@ -675,7 +686,7 @@ def test_an_auto_approved_task_walk_ends_with_one_card(
     llm: InstallResponses, board: FakeBoard, tmp_path: Path
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
-    llm([ok(steps_answer())])
+    llm([ok(clarify_answer()), ok(steps_answer())])
 
     assert walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "card") is None
 
@@ -711,3 +722,154 @@ def test_an_idea_walk_takes_the_transcript_of_its_review_and_pays_no_second_tran
     assert f'parent_run_id: "{PARENT_RUN}"' in transcript
     assert TEXT in request_body(requests[0])["messages"][0]["content"]
     assert (child.root / IDEA).is_file()
+
+
+def test_walk_parks_after_clarify_only_when_the_run_asks_teamlead(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Без того, кто покажет вопросы владельцу, ждать ответа некому: вопросы идут на карточку."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    asking = a_task_run(tmp_path / "asking", parent, "voice", auto_approve=False)
+    asking.asks_teamlead = True
+    requests = llm([ok(clarify_answer()), ok(clarify_answer()), ok(steps_answer())])
+
+    assert walk(asking, "assignment", "card") == Pause(
+        stage="clarify", artifact=CLARIFY_JSON, kind="questions"
+    )
+    assert not (asking.root / ANSWERS).exists()
+    assert len(requests) == 1
+
+    silent = a_task_run(tmp_path / "silent", parent, "voice")
+    assert walk(silent, "assignment", "steps") is None
+    assert read_answers(read_artifact(silent.root, ANSWERS)).status == "not_sent"
+    steps = Steps.model_validate_json(read_artifact(silent.root, STEPS_JSON))
+    assert steps.unanswered == [1, 2, 3]
+
+
+def nothing_unanswered(data: dict[str, object]) -> None:
+    data["unanswered"] = []
+
+
+def test_a_task_without_questions_walks_on_without_a_pause(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    run = a_task_run(tmp_path / "child", parent, "voice", auto_approve=False)
+    run.asks_teamlead = True
+    llm([ok(clarify_answer(no_questions)), ok(steps_answer(nothing_unanswered))])
+
+    waiting = walk(run, "assignment", "card")
+
+    assert waiting == Pause(stage="steps", artifact=STEPS_MD, kind="gate")
+    assert read_answers(read_artifact(run.root, ANSWERS)).status == "nothing_asked"
+
+
+def test_a_parked_run_continues_from_answers_with_the_reply_it_was_given(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    run = a_task_run(tmp_path / "child", parent, "voice", auto_approve=False)
+    run.asks_teamlead = True
+    llm([ok(clarify_answer()), ok(steps_answer())])
+    walk(run, "assignment", "card")
+    reply = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"))
+    run.answers = reply
+
+    waiting = walk(run, "answers", "card")
+
+    assert waiting == Pause(stage="steps", artifact=STEPS_MD, kind="gate")
+    assert read_answers(read_artifact(run.root, ANSWERS)) == reply
+    steps = Steps.model_validate_json(read_artifact(run.root, STEPS_JSON))
+    assert steps.unanswered == [1, 3]
+
+
+def test_a_run_that_asks_but_brings_no_answer_to_answers_is_refused(tmp_path: Path) -> None:
+    run = a_task_run(tmp_path / "child", tmp_path, "voice")
+    run.asks_teamlead = True
+    (run.root / "outputs").mkdir(parents=True)
+    (run.root / CLARIFY_JSON).write_text(
+        (FIXTURES / "clarify_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (run.root / "inputs").mkdir()
+    (run.root / PROJECT).write_text(project_md_of(None), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="без ответа тимлида"):
+        walk(run, "answers", "answers")
+
+
+def project_md_of(directory: Path | None) -> str:
+    standards = read_standards(directory) if directory else None
+    return project_snapshot(standards, datetime(2026, 9, 17, 10, 2, tzinfo=UTC))
+
+
+def test_assignment_takes_a_snapshot_of_the_configured_standards(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    monkeypatch.setattr(settings, "project_context_dir", str(FIXTURES / "project_frontend"))
+    requests = llm([ok(clarify_answer())])
+
+    walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "clarify")
+
+    project = read_project(read_artifact(tmp_path / "child", PROJECT))
+    assert (project.source, project.stack, project.testing) == ("project_frontend", True, True)
+    assert "React Hook Form" in request_body(requests[0])["messages"][0]["content"]
+
+
+def test_a_configured_directory_that_is_gone_fails_the_assignment_before_the_model(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Владелец рассчитывает на стандарты: шаги без них потратили бы деньги не по его стеку."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    monkeypatch.setattr(settings, "project_context_dir", str(tmp_path / "shop-frontend"))
+    requests = llm([])
+
+    gone = "Каталог стандартов проекта shop-frontend не найден"
+    with pytest.raises(StageError, match=gone) as error:
+        walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "steps")
+
+    assert requests == []
+    assert str(tmp_path) not in str(error.value)
+
+
+def test_answers_take_a_fresh_snapshot_when_the_standards_changed_meanwhile(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    standards = tmp_path / "shop-frontend"
+    shutil.copytree(FIXTURES / "project_frontend", standards)
+    (standards / "TESTING.md").unlink()
+    monkeypatch.setattr(settings, "project_context_dir", str(standards))
+    run = a_task_run(tmp_path / "child", parent, "voice")
+    llm([ok(clarify_answer())])
+    walk(run, "assignment", "clarify")
+    assert read_project(read_artifact(run.root, PROJECT)).testing is False
+
+    shutil.copy(FIXTURES / "project_frontend/TESTING.md", standards / "TESTING.md")
+    walk(run, "answers", "answers")
+
+    assert read_project(read_artifact(run.root, PROJECT)).testing is True
+
+
+def test_answers_keep_the_snapshot_when_the_directory_is_gone(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ответ тимлида уже получен: снимок двухдневной давности лучше сорванного прогона."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    standards = tmp_path / "shop-frontend"
+    shutil.copytree(FIXTURES / "project_frontend", standards)
+    monkeypatch.setattr(settings, "project_context_dir", str(standards))
+    run = a_task_run(tmp_path / "child", parent, "voice")
+    llm([ok(clarify_answer())])
+    walk(run, "assignment", "clarify")
+    taken = read_artifact(run.root, PROJECT)
+
+    shutil.rmtree(standards)
+    with caplog.at_level(logging.WARNING, logger="app.run"):
+        walk(run, "answers", "answers")
+
+    assert read_artifact(run.root, PROJECT) == taken
+    assert "project_context=kept reason=missing" in caplog.text

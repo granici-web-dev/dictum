@@ -830,6 +830,8 @@ def test_a_task_without_translations_has_no_translation_block_and_plain_items(
     def untranslated(steps: Steps) -> None:
         for pair in (steps.title, steps.summary, *steps.steps):
             pair.translation = None
+        for asked in steps.questions:
+            asked.translation = None
 
     publish_task(steps_file(tmp_path, untranslated))
 
@@ -848,8 +850,30 @@ def test_the_translation_block_keeps_the_open_questions(board: FakeBoard, tmp_pa
 
     lines = task_card(board)["desc"].splitlines()
     translation = lines.index("Translation (ru):")
-    assert lines[translation + 3 : translation + 5] == ["Open questions:", "- Где форма?"]
+    assert lines[translation + 3 : translation + 7] == [
+        "Open questions:",
+        "- Проверка до отправки только для формы входа или и для формы регистрации?",
+        "- Ждут ли для проверки формы входа ещё и автотесты?",
+        "- Где форма?",
+    ]
     assert "- Wo liegt das Formular?" in lines[:translation]
+
+
+def test_questions_the_teamlead_answered_do_not_reach_the_card(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """На карточке ровно неотвеченное: отвеченный вопрос выглядел бы там открытым."""
+
+    def all_answered(steps: Steps) -> None:
+        steps.unanswered = []
+        for asked in steps.questions:
+            asked.answered = True
+
+    publish_task(steps_file(tmp_path, all_answered))
+
+    description = task_card(board)["desc"]
+    assert "Open questions" not in description
+    assert "Ask back" not in description
 
 
 def test_publishing_the_same_task_again_finds_its_card(board: FakeBoard, tmp_path: Path) -> None:

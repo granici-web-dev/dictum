@@ -137,6 +137,8 @@ LABEL = {
     "decompose": "разбил на задачи",
     "publish": "опубликовал в Trello",
     "assignment": "поручение из разбора",
+    "clarify": "вопросы для тимлида",
+    "answers": "ответы тимлида",
     "steps": "разложил на шаги",
     "card": "карточка в Trello",
 }
@@ -1119,7 +1121,8 @@ async def follow(
 
     ending = await outcome(run, report, start, redo)
     try:
-        if ending.stop:
+        # Вопросы для тимлида строке не остановка: до такой паузы бот не доходит (`outcome`).
+        if ending.stop and ending.stop.kind != "questions":
             await asyncio.to_thread(
                 stop_run, run.run_id, ending.stop.kind, ending.stop.stage, ending.stop.artifact
             )
@@ -1473,6 +1476,10 @@ async def outcome(
                 stop=waiting,
                 keyboard=assemble_keyboard(run.run_id),
             )
+        if waiting and waiting.kind == "questions":
+            # Вопросы бот владельцу пока не показывает и не паркуется: `child_run` не ставит
+            # `asks_teamlead`, и вопросы ложатся на карточку открытыми.
+            raise RuntimeError(f"Прогон {run.run_id} встал на вопросах, которых бот не показывает")
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return Ending(

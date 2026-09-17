@@ -14,12 +14,16 @@ from app.cli import (
 from app import bot, cli, publish, stages
 from app.config import settings
 from app.ingest import build_transcript, run_id_of
+from app.answers import read_answers
 from app.pipeline import (
+    ANSWERS,
     ASSIGNMENT_JSON,
     BRIEF,
     CANDIDATES,
+    CLARIFY_JSON,
     IDEA,
     PRD,
+    PROJECT,
     RESEARCH,
     REVIEW_JSON,
     REVIEW_MD,
@@ -30,7 +34,9 @@ from app.pipeline import (
 from tests.helpers import (
     BROKEN_ISSUES,
     FIXTURES,
+    CLARIFY_DE,
     InstallResponses,
+    clarify_answer,
     decompose_answer,
     ok,
     request_body,
@@ -598,7 +604,7 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
 ) -> None:
     monkeypatch.chdir(tmp_path)
     a_review_of_an_earlier_run(tmp_path)
-    requests = llm([ok(steps_answer())])
+    requests = llm([ok(clarify_answer()), ok(steps_answer())])
 
     with caplog.at_level(logging.INFO, logger="app.cli"):
         assert main(["--task", "1"]) == EXIT_OK
@@ -609,7 +615,9 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
     assert assignment["meeting_lang"] == "de"
     steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
     assert steps["run_id"] == assignment["run_id"]
-    assert len(requests) == 1
+    assert len(requests) == 2
+    assert read_answers((tmp_path / ANSWERS).read_text(encoding="utf-8")).status == "not_sent"
+    assert steps["unanswered"] == [1, 2, 3]
     assert not (tmp_path / "outputs/publish.json").exists()
     assert STEPS_MD in caplog.text
 
@@ -626,6 +634,9 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
         (["--from", "card"], True),
         (["--from", "assignment"], True),
         (["--from", "publish"], True),
+        (["--answers", "answers.txt"], True),
+        (["--task", "1", "--answers", "answers.txt"], True),
+        (["--from", "intake", "--answers", "answers.txt"], True),
     ],
 )
 def test_a_task_that_cannot_be_walked_is_a_usage_error_before_any_call(
@@ -647,20 +658,90 @@ def test_a_task_that_cannot_be_walked_is_a_usage_error_before_any_call(
     assert not (tmp_path / ASSIGNMENT_JSON).exists()
 
 
+def a_task_asked_on_disk(root: Path) -> None:
+    """Поручение, по которому --task N уже задал вопросы и не отправил их: всё, что читают шаги."""
+    (root / "inputs").mkdir(exist_ok=True)
+    (root / "outputs").mkdir(exist_ok=True)
+    (root / ASSIGNMENT_JSON).write_text(
+        (FIXTURES / "assignment_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (root / CLARIFY_JSON).write_text(CLARIFY_DE, encoding="utf-8")
+    (root / ANSWERS).write_text("---\nstatus: not_sent\n---\n", encoding="utf-8")
+    (root / PROJECT).write_text(
+        '---\nconfigured: false\nsource: null\ntaken_at: "2026-09-17T10:02:00+00:00"\n'
+        "stack: false\nprinciples: false\ntesting: false\nsame_as: {}\n---\n",
+        encoding="utf-8",
+    )
+
+
 def test_steps_are_repeated_under_the_run_id_of_the_assignment_on_disk(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "inputs").mkdir()
-    (tmp_path / ASSIGNMENT_JSON).write_text(
-        (FIXTURES / "assignment_de.json").read_text(encoding="utf-8"), encoding="utf-8"
-    )
+    a_task_asked_on_disk(tmp_path)
     llm([ok(steps_answer())])
 
     assert main(["--from", "steps"]) == EXIT_OK
 
     steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
     assert steps["run_id"] == "7b2e0d91c4a3f615"
+
+
+def test_steps_with_answers_take_the_reply_as_it_was_written_and_run_again(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """answers_de_partial.md составлен вручную: тимлид ответил «zu 1» на второй вопрос бота."""
+    monkeypatch.chdir(tmp_path)
+    a_task_asked_on_disk(tmp_path)
+    reply = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8")).text
+    (tmp_path / "reply.txt").write_text(reply + "\n", encoding="utf-8")
+    requests = llm([ok(steps_answer())])
+
+    assert main(["--from", "steps", "--answers", "reply.txt"]) == EXIT_OK
+
+    answers = read_answers((tmp_path / ANSWERS).read_text(encoding="utf-8"))
+    assert (answers.status, answers.text) == ("answered", reply)
+    assert reply in request_body(requests[0])["messages"][0]["content"]
+    steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
+    assert steps["unanswered"] == [1, 3]
+
+
+@pytest.mark.parametrize("content", [None, "  \n"])
+def test_steps_with_an_answers_file_that_is_missing_or_empty_is_a_usage_error(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str | None
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    a_task_asked_on_disk(tmp_path)
+    if content is not None:
+        (tmp_path / "reply.txt").write_text(content, encoding="utf-8")
+    requests = llm([])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "steps", "--answers", "reply.txt"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert requests == []
+    assert read_answers((tmp_path / ANSWERS).read_text(encoding="utf-8")).status == "not_sent"
+
+
+def test_steps_on_an_assignment_older_than_the_questions_is_a_usage_error(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Прогон поручения до вопросов для тимлида повторяется с --task N, а не с --from steps."""
+    monkeypatch.chdir(tmp_path)
+    a_task_asked_on_disk(tmp_path)
+    (tmp_path / CLARIFY_JSON).unlink()
+    requests = llm([])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--from", "steps"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert f"{CLARIFY_JSON}: его пишет --task N" in capsys.readouterr().err
+    assert requests == []
 
 
 def test_steps_without_an_assignment_on_disk_is_a_usage_error(

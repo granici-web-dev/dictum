@@ -2931,6 +2931,9 @@ async def test_the_child_run_takes_its_parent_folder_and_the_pressed_task(
     assert run.parent_root == tmp_path / "runs" / PARENT
     assert (run.parent_run_id, run.assignment) == (PARENT, 2)
     assert status == "assignment"
+    # Парковки в боте ещё нет: вопросы для тимлида уходят на карточку открытыми.
+    assert run.asks_teamlead is False
+    assert store.research[run.run_id] is True
 
 
 @pytest.mark.asyncio

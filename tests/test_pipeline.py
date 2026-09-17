@@ -67,6 +67,21 @@ def test_an_assignment_goes_from_the_review_to_its_card() -> None:
     assert stage_named("steps").gate_after == "outputs/steps.md"
 
 
+def test_an_assignment_asks_the_teamlead_before_the_steps() -> None:
+    """Ожидание ответа тимлида длится днями и начинается сразу после нажатия."""
+    route = [stage.name for stage in stages_between(*route_of("assignment"))]
+
+    assert route == ["assignment", "clarify", "answers", "steps", "card"]
+    assert stage_named("clarify").runs == "llm"
+    assert stage_named("answers").runs == "code"
+    assert set(stage_named("steps").inputs) == {
+        "inputs/assignment.json",
+        "outputs/clarify.json",
+        "inputs/answers.md",
+        "inputs/project.md",
+    }
+
+
 def test_the_stages_that_write_to_the_board_end_their_routes() -> None:
     """Локальный прогон останавливается перед ними, и опирается на данные, а не на имя."""
     assert PUBLISHING <= {last for _, last in ROUTES}

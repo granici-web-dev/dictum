@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from app.answers import Answers, AnswersStatus, read_answers
 from app.clarify import Clarify
 from app.models import Deferred
 from app.project import project_snapshot, read_project, read_standards
@@ -239,10 +240,46 @@ def steps_de() -> Steps:
     return Steps.model_validate_json((FIXTURES / "steps_de.json").read_text(encoding="utf-8"))
 
 
+TAKEN_AT = datetime(2026, 9, 17, 10, 2, tzinfo=UTC)
+UNSET = read_project(project_snapshot(None, TAKEN_AT))
+PARTIAL = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"))
+
+
 def test_the_rendered_steps_match_the_snapshot() -> None:
     expected = (FIXTURES / "steps_de.md").read_text(encoding="utf-8")
 
-    assert steps_markdown(steps_de()) == expected
+    assert steps_markdown(steps_de(), PARTIAL, UNSET) == expected
+
+
+def test_the_steps_file_marks_every_question_left_without_an_answer() -> None:
+    rendered = steps_markdown(steps_de(), PARTIAL, UNSET)
+
+    marked = [line for line in rendered.splitlines() if line.endswith("*(no answer)*")]
+    assert [line.split(".", 1)[0] for line in marked] == ["1", "3"]
+
+
+@pytest.mark.parametrize(
+    ("status", "line"),
+    [
+        ("without_answers", "- **Teamlead answers:** went on without answers"),
+        ("not_sent", "- **Teamlead answers:** questions were not sent"),
+        ("nothing_asked", "- **Teamlead answers:** nothing to ask"),
+    ],
+)
+def test_the_steps_file_says_why_there_is_no_answer(status: AnswersStatus, line: str) -> None:
+    rendered = steps_markdown(steps_de(), Answers(status=status), UNSET)
+
+    assert line in rendered.splitlines()
+    assert "## Teamlead answers" not in rendered
+
+
+def test_the_steps_file_names_the_standards_the_steps_were_written_with() -> None:
+    standards = read_standards(FIXTURES / "project_frontend")
+    frontend = read_project(project_snapshot(standards, TAKEN_AT))
+
+    rendered = steps_markdown(steps_de(), PARTIAL, frontend)
+
+    assert "- **Project standards:** `project_frontend` (STACK.md, TESTING.md)" in rendered
 
 
 def test_the_steps_digest_names_the_task_the_steps_and_the_open_questions() -> None:
@@ -259,9 +296,9 @@ def test_steps_without_translation_show_no_arrows_and_a_title_in_the_meeting_lan
     for pair in (steps.title, steps.summary, *steps.steps):
         pair.translation = None
 
-    rendered = steps_markdown(steps)
+    rendered = steps_markdown(steps, PARTIAL, UNSET)
 
-    assert "→" not in rendered.split("## Ask back")[0]
+    assert "→" not in rendered.split("## Questions for the teamlead")[0]
     assert steps_digest(steps).startswith(f"Поручение 1 «{steps.title.text}»: 4 шага")
 
 
@@ -302,10 +339,6 @@ def test_the_ticket_and_the_acceptance_criteria_reach_the_review_file() -> None:
 
 def clarify_de() -> Clarify:
     return Clarify.model_validate_json((FIXTURES / "clarify_de.json").read_text(encoding="utf-8"))
-
-
-TAKEN_AT = datetime(2026, 9, 17, 10, 2, tzinfo=UTC)
-UNSET = read_project(project_snapshot(None, TAKEN_AT))
 
 
 def test_the_copy_text_matches_the_snapshot() -> None:

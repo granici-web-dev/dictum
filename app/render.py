@@ -14,11 +14,12 @@ outputs/steps.md для ворот.
 
 import frontmatter
 
+from app.answers import Answers
 from app.clarify import Clarify
 from app.models import Issue, IssuesFile
 from app.project import STANDARD_ALIASES, Project
 from app.review import AskBack, Quote, Review, Said, Task
-from app.steps import Pair, Steps
+from app.steps import AskedQuestion, Pair, Steps
 
 NOTHING = "—"
 
@@ -287,8 +288,36 @@ def pair_in_file(pair: Pair, lead: str, indent: str) -> list[str]:
     return lines
 
 
-def steps_markdown(steps: Steps) -> str:
-    """Шаги поручения для чтения на воротах, вместе со сказанным на встрече о поручении."""
+ANSWERS_IN_FILE = {
+    "without_answers": "went on without answers",
+    "not_sent": "questions were not sent",
+    "nothing_asked": "nothing to ask",
+}
+
+
+def answers_in_file(answers: Answers) -> str:
+    if answers.received_at is None:
+        return ANSWERS_IN_FILE[answers.status]
+    return f"received {answers.received_at:%Y-%m-%d %H:%M} UTC"
+
+
+def standards_in_file(project: Project) -> str:
+    found = [name for name in STANDARD_ALIASES if name in project.texts]
+    if not found:
+        return f"none found in `{project.source}`" if project.configured else "not set"
+    return f"`{project.source}` ({', '.join(found)})"
+
+
+def asked_in_file(question: AskedQuestion) -> list[str]:
+    mark = "" if question.answered else " *(no answer)*"
+    lines = [f"{question.number}. {question.text}{mark}"]
+    if question.translation:
+        lines.append(f"   → {question.translation}")
+    return lines
+
+
+def steps_markdown(steps: Steps, answers: Answers, project: Project) -> str:
+    """Шаги поручения для чтения на воротах, со сказанным на встрече и вопросами для тимлида."""
     lines = [*pair_in_file(steps.title, "# ", ""), "", *pair_in_file(steps.summary, "", "")]
     task = steps.task
     if task:
@@ -297,6 +326,8 @@ def steps_markdown(steps: Steps) -> str:
             "",
             f"- **From review:** `{task.parent_run_id}`, task {task.number}",
             f"- **Deadline:** {deadline}",
+            f"- **Teamlead answers:** {answers_in_file(answers)}",
+            f"- **Project standards:** {standards_in_file(project)}",
         ]
         for heading, said in (("Constraints", task.constraints), ("Do not", task.do_not)):
             if said:
@@ -308,10 +339,13 @@ def steps_markdown(steps: Steps) -> str:
         lines += ["", "## Open questions", ""]
         for question in steps.open_questions:
             lines += pair_in_file(question, "- ", "  ")
-    if task and task.ask_back:
-        lines += ["", "## Ask back", ""]
-        for ask in task.ask_back:
-            lines += ask_back_in_file(ask)
+    if steps.questions:
+        lines += ["", "## Questions for the teamlead", ""]
+        for asked in steps.questions:
+            lines += asked_in_file(asked)
+    if answers.text:
+        quoted = [f"> {line}" for line in answers.text.splitlines()]
+        lines += ["", "## Teamlead answers", "", *quoted]
     return "\n".join(lines) + "\n"
 
 

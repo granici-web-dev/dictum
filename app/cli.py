@@ -7,6 +7,7 @@
 import argparse
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
@@ -14,9 +15,11 @@ import anthropic
 import frontmatter
 from pydantic import ValidationError
 
+from app.answers import Answers, answers_file
 from app.config import ConfigError, settings
 from app.ingest import new_run_id, run_id_of
 from app.pipeline import (
+    ANSWERS,
     ASSIGNMENT_JSON,
     NAMES,
     PUBLISHING,
@@ -27,10 +30,11 @@ from app.pipeline import (
     TRANSCRIPT,
     produced_by,
     route_end,
+    stage_named,
     stages_between,
 )
 from app.review import Review
-from app.run import Run, missing_before, read_artifact, walk
+from app.run import Run, missing_before, read_artifact, walk, write_artifact
 from app.stages import StageError
 from app.steps import Assignment, ReviewUnusable, assignment_of, meeting_lang_of
 
@@ -149,10 +153,24 @@ def task_run(parser: CommandLineParser, number: int) -> Run:
     return run
 
 
-def steps_run(parser: CommandLineParser) -> Run:
-    """Повтор шагов по лежащему assignment.json: run_id прогона поручения берётся оттуда."""
-    if not Path(ASSIGNMENT_JSON).exists():
-        parser.error(f"для --from steps нужен {ASSIGNMENT_JSON}: его пишет --task N")
+def steps_run(parser: CommandLineParser, answers_path: str | None) -> Run:
+    """Повтор шагов по лежащему assignment.json: run_id прогона поручения берётся оттуда.
+
+    С `answers_path` ответ тимлида из файла ложится в inputs/answers.md как пришедший: так
+    локальный прогон проходит ту ветку, которую в боте открывает reply на вопросы.
+    """
+    for needed in stage_named("steps").inputs:
+        if not Path(needed).exists():
+            parser.error(f"для --from steps нужен {needed}: его пишет --task N")
+    if answers_path is not None:
+        try:
+            text = Path(answers_path).read_text(encoding="utf-8")
+        except OSError as error:
+            parser.error(f"не читается {answers_path}: {error.strerror}")
+        if not text.strip():
+            parser.error(f"{answers_path} пустой: ответа тимлида в нём нет")
+        answers = Answers(status="answered", received_at=datetime.now(UTC), text=text)
+        write_artifact(Path("."), ANSWERS, answers_file(answers))
     try:
         assignment = Assignment.model_validate_json(read_artifact(Path("."), ASSIGNMENT_JSON))
     except ValidationError as error:
@@ -189,6 +207,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Разложить на шаги поручение N из лежащего outputs/review.json.",
     )
     parser.add_argument(
+        "--answers",
+        metavar="FILE",
+        help="С --from steps: ответ тимлида из файла, как его прислали, и шаги заново.",
+    )
+    parser.add_argument(
         "--lang", help="Язык артефактов. По умолчанию из frontmatter входа, иначе DEFAULT_LANG."
     )
     parser.add_argument(
@@ -197,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Останавливаться на воротах: без флага локальный прогон авто-подтверждён.",
     )
     args = parser.parse_args(argv)
+
+    if args.answers is not None and args.start != "steps":
+        parser.error("--answers повторяет шаги с ответом тимлида и идёт только с --from steps")
 
     if args.task is not None:
         if args.start or args.gates or args.text or args.file:
@@ -208,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.start == "steps":
         if args.text or args.file:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
-        return start_pipeline(steps_run(parser), "steps")
+        return start_pipeline(steps_run(parser, args.answers), "steps")
 
     if args.start:
         if args.text or args.file:

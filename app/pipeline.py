@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 # Род остановки обхода (SPEC §3.2, §3.3). Объявлен здесь, потому что читают его с двух сторон:
 # `Pause` и `Redo` в app/run.py и `Stopped` в app/store.py, а общий у них только этот модуль.
 StopKind = Literal["choice", "gate", "answer"]
+# Пауза обхода шире остановки: вопросы для тимлида ждут ответа днями и не занимают места остановки
+# в чате (P3-11), поэтому строке они не остановка, а обходу такой же выход, как остальные.
+PauseKind = StopKind | Literal["questions"]
 
 TRANSCRIPT = "inputs/transcript.md"
 REVIEW_JSON = "outputs/review.json"
@@ -25,6 +28,9 @@ PRD = "outputs/prd.md"
 ISSUES_JSON = "outputs/issues.json"
 ISSUES_MD = "outputs/issues.md"
 ASSIGNMENT_JSON = "inputs/assignment.json"
+PROJECT = "inputs/project.md"
+CLARIFY_JSON = "outputs/clarify.json"
+ANSWERS = "inputs/answers.md"
 STEPS_JSON = "outputs/steps.json"
 STEPS_MD = "outputs/steps.md"
 
@@ -125,16 +131,33 @@ STAGES: tuple[Stage, ...] = (
     ),
     # Поручение из разбора родителя собирает код, без вызова модели и без соседних поручений:
     # стадии шагов нужно одно поручение, а не вся встреча.
+    # Снимок стандартов рабочего проекта пишется тем же ходом: прогон помнит, по каким стандартам
+    # его собирали, и `--from steps` через неделю идёт по тому же снимку.
     Stage(
         name="assignment",
         runs="code",
-        outputs=(frozenset({ASSIGNMENT_JSON}),),
+        outputs=(frozenset({ASSIGNMENT_JSON, PROJECT}),),
+    ),
+    # Вопросы для тимлида до шагов: ожидание ответа, которое длится днями, начинается сразу.
+    Stage(
+        name="clarify",
+        runs="llm",
+        inputs=(ASSIGNMENT_JSON, PROJECT),
+        outputs=(frozenset({CLARIFY_JSON}),),
+    ),
+    # Ответ тимлида пишется всегда, одним из четырёх состояний, и снимок стандартов переснимается:
+    # между вопросами и ответом проходят дни, и каталог могли поправить.
+    Stage(
+        name="answers",
+        runs="code",
+        inputs=(CLARIFY_JSON, PROJECT),
+        outputs=(frozenset({ANSWERS, PROJECT}),),
     ),
     # Язык встречи стадия берёт из assignment.json, а не `lang` прогона: у текста это не язык.
     Stage(
         name="steps",
         runs="llm",
-        inputs=(ASSIGNMENT_JSON,),
+        inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, PROJECT),
         outputs=(frozenset({STEPS_JSON}),),
         gate_after=STEPS_MD,
     ),

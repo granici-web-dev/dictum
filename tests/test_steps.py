@@ -1,8 +1,9 @@
 """Контракт шагов поручения (app/steps.py).
 
 Немецкие шаги, название и суть в fixtures/steps_de.json составлены вручную, как и
-transcript_meeting_de.md: живого прогона стадии steps ещё не было. assignment_de.json собран
-кодом из review_de.json, и первый тест это проверяет.
+transcript_meeting_de.md: живого прогона стадии steps ещё не было. Так же вручную составлены
+вопросы clarify_de.json и ответы тимлида answers_de.md и answers_de_partial.md. assignment_de.json
+собран кодом из review_de.json, и первый тест это проверяет.
 """
 
 import json
@@ -10,10 +11,13 @@ from typing import Any
 
 import pytest
 
+from app.answers import read_answers
+from app.clarify import Clarify
 from app.review import Review
 from app.steps import (
     MAX_STEPS,
     Assignment,
+    Pair,
     ReviewUnusable,
     Steps,
     assignment_of,
@@ -27,6 +31,9 @@ ASSIGNMENT_DE = (FIXTURES / "assignment_de.json").read_text(encoding="utf-8")
 STEPS_DE = (FIXTURES / "steps_de.json").read_text(encoding="utf-8")
 PARENT = "3f9c1a7e5b2d8c40"
 CHILD = "7b2e0d91c4a3f615"
+CLARIFY = Clarify.model_validate_json((FIXTURES / "clarify_de.json").read_text(encoding="utf-8"))
+ASKED = [Pair(text=asked.text, translation=asked.translation) for asked in CLARIFY.questions]
+PARTIAL = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"))
 
 
 def assignment(meeting_lang: str | None = "de") -> Assignment:
@@ -38,13 +45,23 @@ def assignment(meeting_lang: str | None = "de") -> Assignment:
 def model_answer() -> dict[str, Any]:
     """Ответ модели: без полей, которые вписывает код."""
     data: dict[str, Any] = json.loads(STEPS_DE)
-    for stamped in ("run_id", "owner_lang", "meeting_lang", "task"):
+    for stamped in ("run_id", "owner_lang", "meeting_lang", "task", "questions"):
         del data[stamped]
     return data
 
 
 def problems_of(data: dict[str, Any], meeting_lang: str | None = "de") -> list[str]:
-    return check_steps(json.dumps(data, ensure_ascii=False), assignment(meeting_lang))
+    return check_steps(json.dumps(data, ensure_ascii=False), assignment(meeting_lang), len(ASKED))
+
+
+def stamped(
+    data: dict[str, Any],
+    given: Assignment | None = None,
+    answered: bool = True,
+    asked: list[Pair] = ASKED,
+) -> Steps:
+    stamp = stamp_steps(json.dumps(data), given or assignment(), CLARIFY.title, asked, answered)
+    return Steps.model_validate_json(stamp)
 
 
 def test_the_assignment_fixture_is_task_one_of_the_german_review() -> None:
@@ -80,7 +97,7 @@ def test_a_review_without_the_owner_language_is_refused() -> None:
 
 
 def test_the_german_steps_pass_the_check() -> None:
-    assert check_steps(STEPS_DE, assignment()) == []
+    assert check_steps(STEPS_DE, assignment(), len(ASKED)) == []
     assert problems_of(model_answer()) == []
 
 
@@ -144,7 +161,7 @@ def test_a_blank_step_is_a_problem() -> None:
 
 
 def test_broken_json_is_a_problem() -> None:
-    assert check_steps("{", assignment())[0].startswith("не разбирается как JSON")
+    assert check_steps("{", assignment(), len(ASKED))[0].startswith("не разбирается как JSON")
 
 
 def test_the_stamp_writes_the_run_the_languages_and_what_was_said_over_the_model() -> None:
@@ -153,20 +170,24 @@ def test_the_stamp_writes_the_run_the_languages_and_what_was_said_over_the_model
     data["meeting_lang"] = "en"
     data["task"] = {"parent_run_id": "чужой", "number": 9, "do_not": []}
 
-    stamped = Steps.model_validate_json(stamp_steps(json.dumps(data), assignment()))
+    result = stamped(data)
 
     task = Assignment.model_validate_json(ASSIGNMENT_DE).task
-    assert (stamped.run_id, stamped.owner_lang, stamped.meeting_lang) == (CHILD, "ru", "de")
-    assert stamped.task is not None
-    assert (stamped.task.parent_run_id, stamped.task.number) == (PARENT, 1)
-    assert stamped.task.deadline == task.deadline
-    assert stamped.task.constraints == task.constraints
-    assert stamped.task.do_not == task.do_not
-    assert stamped.task.ask_back == task.ask_back
+    assert (result.run_id, result.owner_lang, result.meeting_lang) == (CHILD, "ru", "de")
+    assert result.task is not None
+    assert (result.task.parent_run_id, result.task.number) == (PARENT, 1)
+    assert result.task.deadline == task.deadline
+    assert result.task.constraints == task.constraints
+    assert result.task.do_not == task.do_not
+    assert result.task.ask_back == task.ask_back
 
 
 def test_the_steps_fixture_is_the_stamped_model_answer() -> None:
-    assert stamp_steps(json.dumps(model_answer()), assignment()) == STEPS_DE
+    """Шаги написаны по частичному ответу: тимлид ответил только на вопрос о библиотеке."""
+    assert PARTIAL.status == "answered"
+    answer = json.dumps(model_answer(), ensure_ascii=False)
+
+    assert stamp_steps(answer, assignment(), CLARIFY.title, ASKED, True) == STEPS_DE
 
 
 def test_the_stamp_carries_the_ticket_and_its_acceptance_criteria_from_the_review() -> None:
@@ -176,14 +197,97 @@ def test_the_stamp_carries_the_ticket_and_its_acceptance_criteria_from_the_revie
     )
     ticket_assignment = assignment_of(review, 1, CHILD, PARENT, None)
 
-    stamped = Steps.model_validate_json(
-        stamp_steps(json.dumps(model_answer()), ticket_assignment)
-    )
+    result = stamped(model_answer(), ticket_assignment)
 
-    assert stamped.task is not None
+    assert result.task is not None
     task = review.tasks[0]
-    assert (stamped.task.ticket_key, stamped.task.ticket_url) == (
+    assert (result.task.ticket_key, result.task.ticket_url) == (
         "ABC-123",
         "https://jira.example.com/browse/ABC-123",
     )
-    assert stamped.task.acceptance == task.acceptance
+    assert result.task.acceptance == task.acceptance
+
+
+def test_an_unanswered_number_outside_the_questions_is_a_problem() -> None:
+    data = model_answer()
+    data["unanswered"] = [1, 9]
+
+    assert problems_of(data) == [
+        "unanswered: вопроса 9 нет, вопросы тимлиду пронумерованы от 1 до 3"
+    ]
+
+
+def test_any_unanswered_number_is_a_problem_when_nothing_was_asked() -> None:
+    data = model_answer()
+    data["unanswered"] = [1]
+
+    problems = check_steps(json.dumps(data), assignment(), 0)
+
+    assert problems == ["unanswered: вопроса 1 нет, тимлиду вопросов не задавали"]
+
+
+@pytest.mark.parametrize("unanswered", [[2, 3], [1, 2, 3], []])
+def test_partial_answer_leaves_any_subset_unanswered(unanswered: list[int]) -> None:
+    """Тимлид ответил «zu 1» на второй вопрос бота: какие вопросы закрыты, решает стадия по смыслу.
+
+    Код не сверяет ответ с номерами: любое подмножество валидно, и при пришедшем ответе штамп
+    оставляет его как есть.
+    """
+    data = model_answer()
+    data["unanswered"] = unanswered
+
+    assert problems_of(data) == []
+    result = stamped(data)
+    assert result.unanswered == unanswered
+    assert [question.answered for question in result.questions] == [
+        number not in unanswered for number in (1, 2, 3)
+    ]
+
+
+def test_without_an_answer_every_question_stays_unanswered_whatever_the_model_said() -> None:
+    """«Продолжить без ответов» и неотправленные вопросы: ответа не было ни на один."""
+    data = model_answer()
+    data["unanswered"] = [2]
+
+    result = stamped(data, answered=False)
+
+    assert result.unanswered == [1, 2, 3]
+    assert not any(question.answered for question in result.questions)
+
+
+def test_nothing_asked_leaves_no_questions_and_nothing_unanswered() -> None:
+    data = model_answer()
+    data["unanswered"] = []
+
+    result = stamped(data, answered=False, asked=[])
+
+    assert (result.unanswered, result.questions) == ([], [])
+
+
+def test_the_questions_are_numbered_and_copied_by_the_code_over_the_model() -> None:
+    data = model_answer()
+    data["questions"] = [
+        {"number": 1, "text": "переписала модель", "origin": "clarify", "answered": True}
+    ]
+
+    result = stamped(data)
+
+    assert [(asked.number, asked.text, asked.origin) for asked in result.questions] == [
+        (number, pair.text, "clarify") for number, pair in enumerate(ASKED, start=1)
+    ]
+
+
+def test_the_title_of_the_questions_overwrites_the_title_the_model_sent() -> None:
+    """Вопросы и чек-лист идут под одним названием, и написала его стадия вопросов."""
+    data = model_answer()
+    data["title"] = {"text": "Ein anderer Titel", "translation": "Другое название"}
+
+    assert stamped(data).title == CLARIFY.title
+
+
+def test_a_note_to_the_teamlead_is_a_schema_error() -> None:
+    """Текст на воротах пишется владельцу: фразы-обращения к тимлиду у шагов нет."""
+    data = model_answer()
+    data["teamlead_note"] = {"text": "Mein Plan, passt das so?", "translation": None}
+
+    assert problems_of(data) == ["teamlead_note: Extra inputs are not permitted"]

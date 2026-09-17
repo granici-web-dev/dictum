@@ -7,26 +7,43 @@
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from app.answers import Answers, answers_file
+from app.clarify import Clarify, has_questions
 from app.config import settings
 from app.dialog import Turn
 from app.ingest import Source, build_transcript, child_transcript
 from app.pipeline import (
+    ANSWERS,
     ASSIGNMENT_JSON,
     BRIEF_QUESTION,
     CANDIDATES,
+    CLARIFY_JSON,
     ISSUES_JSON,
+    PROJECT,
     RESEARCH,
     RESEARCH_SKIPPED,
     REVIEW_JSON,
     STEPS_JSON,
     TRANSCRIPT,
+    PauseKind,
     Stage,
     StopKind,
     stages_between,
+)
+from app.project import (
+    ProjectContextError,
+    ProjectContextMissing,
+    ProjectContextTooLarge,
+    Standards,
+    configured_directory,
+    project_snapshot,
+    read_standards,
+    refreshed_snapshot,
 )
 from app.publish import publish, publish_task
 from app.review import Review
@@ -68,6 +85,11 @@ class Run(BaseModel):
     parent_root: Path | None = None
     parent_run_id: str | None = None
     assignment: int | None = None
+    # Показывать ли владельцу вопросы для тимлида и ждать ответа (P3-11). Умолчание «нет»: у
+    # локального прогона и без ворот ждать некому, и вопросы уходят на карточку открытыми.
+    asks_teamlead: bool = False
+    # Ответ тимлида или отказ его ждать: приносит тот, кто продолжает припаркованный прогон.
+    answers: Answers | None = None
 
 
 class Pause(BaseModel):
@@ -77,11 +99,13 @@ class Pause(BaseModel):
     `gate` — человек подтверждает готовый артефакт; `auto_approve` снимает только эти остановки.
     `answer` — человек отвечает на вопрос брифа (§3.3); подтверждать там тоже нечего, но и
     случиться она может только у прогона, которому есть кому отвечать (`Run.interactive`).
+    `questions` — вопросы для тимлида отданы владельцу (P3-11): это не остановка чата, прогон
+    ждёт ответа днями и только у того, кто спрашивает тимлида (`Run.asks_teamlead`).
     """
 
     stage: str
     artifact: str
-    kind: StopKind
+    kind: PauseKind
 
 
 class Redo(BaseModel):
@@ -152,6 +176,26 @@ def publish_body(run: Run) -> dict[str, str]:
     return {}
 
 
+def current_standards() -> Standards | None:
+    """Стандарты из PROJECT_CONTEXT_DIR; None, если настройка пуста. Ошибки каталога летят выше."""
+    directory = configured_directory()
+    return read_standards(directory) if directory else None
+
+
+def log_snapshot(run: Run, stage: str, standards: Standards | None) -> None:
+    if standards is None:
+        logger.info("stage=%s run=%s project_context=unset", stage, run.run_id)
+        return
+    logger.info(
+        "stage=%s run=%s project_context=%s files=%s chars=%d",
+        stage,
+        run.run_id,
+        "snapshot" if standards.texts else "empty",
+        ",".join([*standards.texts, *standards.same_as]),
+        sum(len(text) for text in standards.texts.values()),
+    )
+
+
 def assignment_body(run: Run) -> dict[str, str]:
     if run.parent_root is None or run.parent_run_id is None or run.assignment is None:
         raise ValueError(f"Прогон {run.run_id} не знает разбора, из которого взять поручение")
@@ -163,7 +207,42 @@ def assignment_body(run: Run) -> dict[str, str]:
         run.parent_run_id,
         meeting_lang_of(run.source, run.lang),
     )
-    return {ASSIGNMENT_JSON: built.model_dump_json(indent=2) + "\n"}
+    # Заданный, но сломанный каталог роняет прогон до вызова модели: владелец рассчитывает на
+    # стандарты, и тихий прогон без них потратил бы деньги на шаги не по его стеку.
+    try:
+        standards = current_standards()
+    except ProjectContextError as error:
+        raise StageError(str(error), "") from error
+    log_snapshot(run, "assignment", standards)
+    return {
+        ASSIGNMENT_JSON: built.model_dump_json(indent=2) + "\n",
+        PROJECT: project_snapshot(standards, datetime.now(UTC)),
+    }
+
+
+def answers_body(run: Run) -> dict[str, str]:
+    clarify = Clarify.model_validate_json(read_artifact(run.root, CLARIFY_JSON))
+    if not has_questions(clarify):
+        answers = Answers(status="nothing_asked")
+    elif not run.asks_teamlead:
+        answers = Answers(status="not_sent")
+    elif run.answers is None:
+        raise ValueError(f"Прогон {run.run_id} продолжен после вопросов, но без ответа тимлида")
+    else:
+        answers = run.answers
+    fresh: Standards | ProjectContextMissing | ProjectContextTooLarge | None
+    try:
+        fresh = current_standards()
+    except (ProjectContextMissing, ProjectContextTooLarge) as error:
+        fresh = error
+    snapshot, kept = refreshed_snapshot(
+        read_artifact(run.root, PROJECT), fresh, datetime.now(UTC)
+    )
+    if kept is not None:
+        logger.warning("stage=answers run=%s project_context=kept reason=%s", run.run_id, kept)
+    elif not isinstance(fresh, ProjectContextError):
+        log_snapshot(run, "answers", fresh)
+    return {ANSWERS: answers_file(answers), PROJECT: snapshot}
 
 
 def card_body(run: Run) -> dict[str, str]:
@@ -179,6 +258,7 @@ BODIES: dict[str, Callable[[Run], dict[str, str]]] = {
     "research": research_body,
     "publish": publish_body,
     "assignment": assignment_body,
+    "answers": answers_body,
     "card": card_body,
 }
 
@@ -282,6 +362,12 @@ def walk(
             return Pause(stage=stage.name, artifact=CANDIDATES, kind="choice")
         if BRIEF_QUESTION in files:
             return Pause(stage=stage.name, artifact=BRIEF_QUESTION, kind="answer")
+        if (
+            CLARIFY_JSON in files
+            and run.asks_teamlead
+            and has_questions(Clarify.model_validate_json(files[CLARIFY_JSON]))
+        ):
+            return Pause(stage=stage.name, artifact=CLARIFY_JSON, kind="questions")
         # Ворота останавливают прогон перед следующей стадией, а после stop останавливать нечего:
         # обход и так закончился, и «ждёт человека» вместо «дошёл до конца» соврало бы.
         if stage.gate_after and not run.auto_approve and stage.name != stop:

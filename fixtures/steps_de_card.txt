@@ -6,12 +6,16 @@ Constraints:
 - also E-Mail-Format und Pflichtfelder
 Do not:
 - Bitte die API nicht anfassen, die gehört dem Backend-Team.
-Ask back:
-- Gilt die Prüfung auch für die Registrierung?
+Open questions:
+- Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?
+- Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?
 
 Translation (ru):
 Проверять форму входа в браузере до отправки
 Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не меняется.
+Open questions:
+- Проверка до отправки только для формы входа или и для формы регистрации?
+- Ждут ли для проверки формы входа ещё и автотесты?
 
 From review: 3f9c1a7e5b2d8c40, task 1
 dictum:DCT-1 run:7b2e0d91c4a3f615 local:A1

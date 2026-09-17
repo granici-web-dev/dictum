@@ -267,15 +267,33 @@ class FakeBoard:
 
 
 STEPS_DE = (FIXTURES / "steps_de.json").read_text(encoding="utf-8")
+CLARIFY_DE = (FIXTURES / "clarify_de.json").read_text(encoding="utf-8")
 
 
 def steps_answer(change: Callable[[dict[str, Any]], None] = lambda data: None) -> str:
     """Ответ стадии steps по fixtures/steps_de.json: без полей, которые вписывает код.
 
-    Немецкие шаги в фикстуре составлены вручную: живого прогона стадии ещё не было.
+    Немецкие шаги в фикстуре составлены вручную, под частичный ответ тимлида из
+    answers_de_partial.md: живого прогона стадии с ответами ещё не было.
     """
     data: dict[str, Any] = json.loads(STEPS_DE)
-    for stamped in ("run_id", "owner_lang", "meeting_lang", "task"):
+    for stamped in ("run_id", "owner_lang", "meeting_lang", "task", "questions"):
         del data[stamped]
     change(data)
     return f'<file path="outputs/steps.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
+def clarify_answer(change: Callable[[dict[str, Any]], None] = lambda data: None) -> str:
+    """Ответ стадии clarify по fixtures/clarify_de.json: без полей, которые вписывает код.
+
+    Немецкие вопросы в фикстуре составлены вручную: живого прогона стадии ещё не было.
+    """
+    data: dict[str, Any] = json.loads(CLARIFY_DE)
+    for stamped in ("run_id", "meeting_lang", "owner_lang", "address_in_text"):
+        del data[stamped]
+    change(data)
+    return f'<file path="outputs/clarify.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
+def no_questions(data: dict[str, Any]) -> None:
+    data["questions"] = []

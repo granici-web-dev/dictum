@@ -8,6 +8,7 @@
 """
 
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -55,6 +56,18 @@ class TaskRef(BaseModel):
     ask_back: list[AskBack] = Field(default_factory=list)
 
 
+class AskedQuestion(BaseModel):
+    """Вопрос для тимлида под своим номером: текст переносит код, модель его не переписывает."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number: int = Field(ge=1)
+    text: str
+    translation: str | None = None
+    origin: Literal["clarify"]
+    answered: bool
+
+
 class Steps(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -66,6 +79,12 @@ class Steps(BaseModel):
     summary: Pair
     steps: list[Pair] = Field(min_length=1, max_length=MAX_STEPS)
     open_questions: list[Pair] = Field(default_factory=list)
+    # Номера вопросов без ответа, которые ещё нужны. Неотправленный вопрос и вопрос без ответа
+    # это один случай: что из вопросов владелец отправил, не знает никто, кроме него.
+    unanswered: list[int] = Field(default_factory=list)
+    # Подход, по которому написаны шаги, одной строкой. Пока ресёрча нет, писать его не из чего.
+    approach: Pair | None = None
+    questions: list[AskedQuestion] = Field(default_factory=list)
 
 
 class Assignment(BaseModel):
@@ -131,28 +150,60 @@ def pairs_by_place(steps: Steps) -> list[tuple[str, Pair]]:
     ]
 
 
-def check_steps(steps_json: str, assignment: Assignment) -> list[str]:
-    """Претензии к ответу стадии. Перевод проверяется, только если язык встречи известен."""
+def check_steps(steps_json: str, assignment: Assignment, questions: int) -> list[str]:
+    """Претензии к ответу стадии. Перевод проверяется, только если язык встречи известен.
+
+    `questions` это сколько вопросов было задано тимлиду: номера в `unanswered` берутся из них.
+    """
     problems = schema_problems(steps_json)
     if problems:
         return problems
+    steps = Steps.model_validate_json(steps_json)
+    problems = [
+        f"unanswered: вопроса {number} нет, вопросы тимлиду пронумерованы от 1 до {questions}"
+        if questions
+        else f"unanswered: вопроса {number} нет, тимлиду вопросов не задавали"
+        for number in steps.unanswered
+        if not 1 <= number <= questions
+    ]
     meeting_lang, owner_lang = assignment.meeting_lang, assignment.owner_lang
     if meeting_lang is None or meeting_lang == owner_lang:
-        return []
-    return [
+        return problems
+    return problems + [
         f"{place}.translation: перевод пуст, а встреча на {meeting_lang}, язык владельца "
         f"{owner_lang}"
-        for place, pair in pairs_by_place(Steps.model_validate_json(steps_json))
+        for place, pair in pairs_by_place(steps)
         if not (pair.translation and pair.translation.strip())
     ]
 
 
-def stamp_steps(steps_json: str, assignment: Assignment) -> str:
-    """Готовые шаги: номер прогона, языки и сказанное на встрече вписаны кодом из входа.
+def stamp_steps(
+    steps_json: str,
+    assignment: Assignment,
+    title: Pair,
+    questions: list[Pair],
+    answered: bool,
+) -> str:
+    """Готовые шаги: номер прогона, языки, название, вопросы и сказанное на встрече вписаны кодом.
 
-    Всё, что модель прислала в этих полях, затирается: дословное переносит только код.
+    Всё, что модель прислала в этих полях, затирается: дословное переносит только код. Название
+    одно на вопросы и чек-лист, его написала стадия вопросов. Если ответа не было, без ответа
+    остались все вопросы, что бы ни решила модель; если был, какие он закрыл, решает она.
     """
     steps = Steps.model_validate_json(steps_json)
+    steps.title = title
+    numbers = range(1, len(questions) + 1)
+    steps.unanswered = list(numbers) if not answered else sorted(set(steps.unanswered))
+    steps.questions = [
+        AskedQuestion(
+            number=number,
+            text=question.text,
+            translation=question.translation,
+            origin="clarify",
+            answered=number not in steps.unanswered,
+        )
+        for number, question in zip(numbers, questions, strict=True)
+    ]
     task = assignment.task
     steps.run_id = assignment.run_id
     steps.owner_lang = assignment.owner_lang

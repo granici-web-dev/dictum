@@ -7,12 +7,17 @@ import httpx2
 import pytest
 from anthropic import DefaultHttpxClient
 
+from datetime import UTC, datetime
+
 from app import stages
+from app.answers import read_answers
+from app.clarify import Clarify
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
 from app.pipeline import STAGES
 from app.render import issues_markdown, review_markdown, steps_markdown
 from app.review import Review
 from app.review import fragments
+from app.project import project_snapshot, read_project
 from app.steps import Steps
 from app.stages import (
     StageError,
@@ -21,10 +26,12 @@ from app.stages import (
 )
 from tests.helpers import (
     BROKEN_ISSUES,
+    CLARIFY_DE,
     FIXTURES,
     REAL_ISSUES,
     STEPS_DE,
     InstallResponses,
+    clarify_answer,
     decompose_answer,
     ok,
     real_issues,
@@ -444,8 +451,17 @@ def test_an_invented_ticket_key_gets_the_repair_and_is_dropped_if_it_stays(
     assert (task.ticket_key, task.ticket_url) == (None, "https://jira.example.com/browse/ABC-123")
 
 
+UNSET_PROJECT = project_snapshot(None, datetime(2026, 9, 17, 10, 2, tzinfo=UTC))
+PARTIAL_ANSWERS = (FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8")
+CLARIFY_INPUTS = {
+    "inputs/assignment.json": (FIXTURES / "assignment_de.json").read_text(encoding="utf-8"),
+    "inputs/project.md": UNSET_PROJECT,
+}
 ASSIGNMENT_INPUTS = {
-    "inputs/assignment.json": (FIXTURES / "assignment_de.json").read_text(encoding="utf-8")
+    "inputs/assignment.json": CLARIFY_INPUTS["inputs/assignment.json"],
+    "outputs/clarify.json": CLARIFY_DE,
+    "inputs/answers.md": PARTIAL_ANSWERS,
+    "inputs/project.md": UNSET_PROJECT,
 }
 
 
@@ -460,7 +476,11 @@ def test_steps_come_back_stamped_and_drawn_without_a_repair(llm: InstallResponse
 
     assert len(requests) == 1
     assert result.files["outputs/steps.json"] == STEPS_DE
-    assert result.files["outputs/steps.md"] == steps_markdown(Steps.model_validate_json(STEPS_DE))
+    assert result.files["outputs/steps.md"] == steps_markdown(
+        Steps.model_validate_json(STEPS_DE),
+        read_answers(PARTIAL_ANSWERS),
+        read_project(UNSET_PROJECT),
+    )
 
 
 def test_an_empty_step_translation_gets_the_one_repair_and_is_named_in_it(
@@ -487,14 +507,80 @@ def test_an_empty_step_translation_in_both_answers_fails_the_stage(
     assert len(requests) == 2
 
 
-def test_steps_do_not_pay_for_a_call_on_an_assignment_that_is_not_one(
+def untranslated_question(data: dict[str, Any]) -> None:
+    data["questions"][0]["translation"] = ""
+
+
+def test_questions_come_back_stamped_without_a_repair_and_see_the_project(
     llm: InstallResponses,
 ) -> None:
-    requests = llm([ok(steps_answer())])
+    requests = llm([ok(clarify_answer())])
+
+    result = run_stage("clarify", CLARIFY_INPUTS, RUN)
+
+    assert len(requests) == 1
+    assert set(result.files) == {"outputs/clarify.json"}
+    stamped = Clarify.model_validate_json(result.files["outputs/clarify.json"])
+    assert stamped == Clarify.model_validate_json(CLARIFY_DE)
+    assert '<file path="inputs/project.md">' in request_body(requests[0])["messages"][0]["content"]
+
+
+def test_an_empty_question_translation_gets_the_one_repair_and_is_named_in_it(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(clarify_answer(untranslated_question)), ok(clarify_answer())])
+
+    result = run_stage("clarify", CLARIFY_INPUTS, RUN)
+
+    assert len(requests) == 2
+    repair = request_body(requests[1])["messages"][-1]["content"]
+    assert "questions.0.translation: перевод пуст" in repair
+    assert result.files["outputs/clarify.json"] == CLARIFY_DE
+
+
+@pytest.mark.parametrize("stage", ["clarify", "steps"])
+def test_a_task_stage_does_not_pay_for_a_call_on_an_assignment_that_is_not_one(
+    llm: InstallResponses, stage: str
+) -> None:
+    requests = llm([])
     broken = json.loads(ASSIGNMENT_INPUTS["inputs/assignment.json"])
     del broken["owner_lang"]
+    inputs = {**ASSIGNMENT_INPUTS, "inputs/assignment.json": json.dumps(broken)}
 
     with pytest.raises(StageError, match="assignment.json не проходит схему"):
-        run_stage("steps", {"inputs/assignment.json": json.dumps(broken)}, RUN)
+        run_stage(stage, inputs, RUN)
 
     assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [
+        ("outputs/clarify.json", "{}"),
+        ("inputs/answers.md", "---\nstatus: answered\n---\n"),
+    ],
+)
+def test_steps_do_not_pay_for_a_call_on_questions_or_answers_that_are_not_them(
+    llm: InstallResponses, path: str, content: str
+) -> None:
+    """Ответ без времени и текста правили руками: какие вопросы он закрыл, судить не по чему."""
+    requests = llm([])
+
+    with pytest.raises(StageError, match=f"{path} не проходит схему"):
+        run_stage("steps", {**ASSIGNMENT_INPUTS, path: content}, RUN)
+
+    assert requests == []
+
+
+def test_an_unanswered_number_outside_the_questions_gets_the_one_repair(
+    llm: InstallResponses,
+) -> None:
+    def ninth(data: dict[str, Any]) -> None:
+        data["unanswered"] = [9]
+
+    requests = llm([ok(steps_answer(ninth)), ok(steps_answer())])
+
+    result = run_stage("steps", ASSIGNMENT_INPUTS, RUN)
+
+    assert "unanswered: вопроса 9 нет" in request_body(requests[1])["messages"][-1]["content"]
+    assert result.files["outputs/steps.json"] == STEPS_DE

@@ -408,6 +408,9 @@ def task_card_body(steps: Steps, task: TaskRef) -> str:
     """Описание карточки поручения над маркером: сказанное в оригинале, перевод блоком в конце.
 
     Перевода шагов здесь нет: он стоит парой в каждом пункте чек-листа, где по шагам и работают.
+    Открытые вопросы это вопросы для тимлида, оставшиеся без ответа, и затем вопросы самому
+    владельцу. Неясное из разбора отдельно не пишется: оно вошло в вопросы для тимлида, и
+    отвеченное на карточке выглядело бы открытым.
     """
     lines = [steps.summary.text]
     said: list[str] = []
@@ -424,15 +427,19 @@ def task_card_body(steps: Steps, task: TaskRef) -> str:
     ):
         if items:
             said += [heading, *(f"- {said_on_card(item)}" for item in items)]
-    if task.ask_back:
-        said += ["Ask back:", *(f"- {ask.question}" for ask in task.ask_back)]
-    if steps.open_questions:
-        said += ["Open questions:", *(f"- {question.text}" for question in steps.open_questions)]
+    unanswered = [
+        Pair(text=asked.text, translation=asked.translation)
+        for asked in steps.questions
+        if not asked.answered
+    ]
+    open_questions = [*unanswered, *steps.open_questions]
+    if open_questions:
+        said += ["Open questions:", *(f"- {question.text}" for question in open_questions)]
     if said:
         lines += ["", *said]
 
     translated = [pair.translation for pair in (steps.title, steps.summary) if pair.translation]
-    questions = [question.translation for question in steps.open_questions if question.translation]
+    questions = [question.translation for question in open_questions if question.translation]
     if translated or questions:
         lines += ["", f"Translation ({steps.owner_lang}):", *translated]
         if questions:

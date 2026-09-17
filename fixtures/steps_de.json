@@ -47,12 +47,12 @@
   },
   "steps": [
     {
-      "text": "Prüfregeln für E-Mail-Format und Pflichtfelder festlegen",
-      "translation": "Описать правила проверки для e-mail и обязательных полей"
+      "text": "Validierungsschema mit zod für E-Mail-Format und Pflichtfelder anlegen",
+      "translation": "Описать схему проверки на zod для e-mail и обязательных полей"
     },
     {
-      "text": "Prüfung an das Login-Formular anbinden und Absenden mit Fehlern verhindern",
-      "translation": "Подключить проверку к форме входа и не отправлять форму с ошибками"
+      "text": "Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern",
+      "translation": "Подключить схему к форме входа через React Hook Form и не отправлять форму с ошибками"
     },
     {
       "text": "Fehlermeldung unter dem jeweiligen Feld anzeigen",
@@ -63,5 +63,33 @@
       "translation": "Проверить, что с неверными полями запрос к API не уходит"
     }
   ],
-  "open_questions": []
+  "open_questions": [],
+  "unanswered": [
+    1,
+    3
+  ],
+  "approach": null,
+  "questions": [
+    {
+      "number": 1,
+      "text": "Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?",
+      "translation": "Проверка до отправки только для формы входа или и для формы регистрации?",
+      "origin": "clarify",
+      "answered": false
+    },
+    {
+      "number": 2,
+      "text": "Soll für die Prüfung des Login-Formulars eine bestimmte Bibliothek verwendet werden, oder ist die Wahl frei?",
+      "translation": "Нужна ли для проверки формы входа определённая библиотека, или выбор свободный?",
+      "origin": "clarify",
+      "answered": true
+    },
+    {
+      "number": 3,
+      "text": "Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?",
+      "translation": "Ждут ли для проверки формы входа ещё и автотесты?",
+      "origin": "clarify",
+      "answered": false
+    }
+  ]
 }
