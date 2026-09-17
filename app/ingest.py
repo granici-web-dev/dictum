@@ -13,8 +13,7 @@ import frontmatter
 # карточки двух прогонов — второй счёл бы чужие своими и не создал бы собственные.
 RUN_ID_BYTES = 8
 
-# Файл с диктофона (source: file) и согласие на запись к нему — P3-02.
-Source = Literal["text", "voice"]
+Source = Literal["text", "voice", "file"]
 
 
 def new_run_id() -> str:

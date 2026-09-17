@@ -395,7 +395,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             run = started_run(new_run_id(), message.chat_id, text=message.text)
             start, redo = FIRST_STAGE, None
             await asyncio.to_thread(
-                start_run, run.run_id, message.chat_id, run.source, run.lang, run.auto_approve
+                start_run,
+                run.run_id,
+                message.chat_id,
+                run.source,
+                run.lang,
+                run.auto_approve,
+                None,
             )
             logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
@@ -442,7 +448,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         audio = RUNS / run_id / VOICE_FILE
         run = started_run(run_id, message.chat_id, source="voice", audio=audio)
         await asyncio.to_thread(
-            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve
+            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve, None
         )
         logger.info(
             "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN

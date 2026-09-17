@@ -113,17 +113,17 @@ def db(migrated: None) -> Iterator[None]:
 
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "voice", "ru", True)
+    start_run(run_id, chat_id, "voice", "ru", True, None)
     stop_run(run_id, "choice", "intake", CANDIDATES)
 
 
 def a_gated_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "text", "ru", False)
+    start_run(run_id, chat_id, "text", "ru", False, None)
     stop_run(run_id, "gate", "brief", BRIEF)
 
 
 def an_asked_run(run_id: str = "прогон", chat_id: int = 12) -> None:
-    start_run(run_id, chat_id, "text", "ru", False)
+    start_run(run_id, chat_id, "text", "ru", False, None)
     stop_run(run_id, "answer", "brief", QUESTION)
 
 
@@ -188,7 +188,7 @@ def test_the_answer_moves_the_run_on_and_the_stop_is_gone(db: None) -> None:
 def test_a_chat_cannot_hold_two_stops_at_once(db: None) -> None:
     """Вторая остановка означала бы, что ответ человека уходит непонятно в какой прогон."""
     a_stopped_run("первый")
-    start_run("второй", 12, "voice", "ru", True)
+    start_run("второй", 12, "voice", "ru", True, None)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "choice", "intake", CANDIDATES)
@@ -197,7 +197,7 @@ def test_a_chat_cannot_hold_two_stops_at_once(db: None) -> None:
 def test_a_gate_stop_collides_with_a_choice_stop_in_the_same_chat(db: None) -> None:
     """Род остановки на счёт не влияет: ответ человека всё равно один, и прогон для него один."""
     a_stopped_run("первый")
-    start_run("второй", 12, "text", "ru", False)
+    start_run("второй", 12, "text", "ru", False, None)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "gate", "brief", BRIEF)
@@ -237,9 +237,9 @@ def test_leaving_a_gate_drops_the_stop_too(db: None) -> None:
 
 
 def test_orphans_are_named_and_closed_but_finished_runs_are_left_alone(db: None) -> None:
-    start_run("живой", 12, "voice", "ru", True)
+    start_run("живой", 12, "voice", "ru", True, None)
     mark_stage("живой", "brief", "ru")
-    start_run("готовый", 13, "text", "ru", True)
+    start_run("готовый", 13, "text", "ru", True, None)
     finish_run("готовый", PUBLISHED)
 
     orphans = fail_orphans()
@@ -313,7 +313,7 @@ def test_a_run_waiting_for_an_answer_waits_under_its_own_status(db: None) -> Non
 def test_a_question_stop_collides_with_a_gate_stop_in_the_same_chat(db: None) -> None:
     """Третий род остановки считается тем же индексом: ответ человека уходит в один прогон."""
     an_asked_run("первый")
-    start_run("второй", 12, "text", "ru", False)
+    start_run("второй", 12, "text", "ru", False, None)
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
         stop_run("второй", "gate", "brief", BRIEF)
@@ -340,3 +340,35 @@ def test_a_run_that_was_never_asked_anything_carries_an_empty_dialog(db: None) -
     stopped = waiting_for(12)
 
     assert stopped is not None and stopped.turns == ()
+
+
+def test_start_run_stores_consent_for_file(db: None) -> None:
+    start_run("файл", 12, "file", "ru", True, True)
+
+    with session() as opened:
+        assert opened.get(RunRow, "файл").consent_confirmed is True  # type: ignore[union-attr]
+
+
+def test_waiting_for_carries_consent(db: None) -> None:
+    """Без согласия продолженный файловый прогон был бы тем, что ingest считает незаконным."""
+    start_run("файл", 12, "file", "ru", False, True)
+    stop_run("файл", "gate", "brief", BRIEF)
+
+    stopped = waiting_for(12)
+
+    assert stopped is not None
+    assert (stopped.source, stopped.consent_confirmed) == ("file", True)
+
+
+@pytest.mark.parametrize("consent", [None, False])
+def test_check_rejects_file_run_without_consent(db: None, consent: bool | None) -> None:
+    """Файл без согласия обрабатывать нельзя (§ 201 StGB), и об этом говорит база, а не код."""
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
+        start_run("файл", 12, "file", "ru", True, consent)
+
+
+@pytest.mark.parametrize("consent", [True, False])
+def test_check_rejects_consent_on_voice_run(db: None, consent: bool) -> None:
+    """У голосового чужой записи нет: любое значение врало бы, что вопрос о согласии задавали."""
+    with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_consent_only_for_file"):
+        start_run("голос", 12, "voice", "ru", True, consent)

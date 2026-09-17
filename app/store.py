@@ -14,6 +14,7 @@ from functools import cache
 from pydantic import BaseModel
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Index,
     String,
@@ -83,12 +84,20 @@ class RunRow(Base):
     brief_dialog: Mapped[list[dict[str, str]]] = mapped_column(
         JSONB, server_default=text("'[]'::jsonb")
     )
+    # Есть только у файла с диктофона и только согласием (SPEC §4): у текста и голосового чужой
+    # записи нет, и вопроса о согласии им не задавали.
+    consent_confirmed: Mapped[bool | None]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     __table_args__ = (
+        CheckConstraint(
+            "(source = 'file' AND consent_confirmed IS TRUE)"
+            " OR (source <> 'file' AND consent_confirmed IS NULL)",
+            name="ck_runs_consent_only_for_file",
+        ),
         # Остановку ищут по чату и статусу: единственный запрос бота на горячем пути.
         Index("ix_runs_chat_status", "chat_id", "status"),
         # Остановка в чате одна, какого бы рода она ни была: вторая означала бы, что ответ
@@ -113,6 +122,7 @@ class Stopped(BaseModel):
     run_id: str
     lang: str
     source: Source
+    consent_confirmed: bool | None
     auto_approve: bool
     kind: StopKind
     stage: str
@@ -181,7 +191,14 @@ def one_bot_per_database() -> Iterator[bool]:
                 connection.scalar(select(func.pg_advisory_unlock(BOT_LOCK)))
 
 
-def start_run(run_id: str, chat_id: int, source: Source, lang: str, auto_approve: bool) -> None:
+def start_run(
+    run_id: str,
+    chat_id: int,
+    source: Source,
+    lang: str,
+    auto_approve: bool,
+    consent_confirmed: bool | None,
+) -> None:
     with session() as opened:
         opened.add(
             RunRow(
@@ -191,6 +208,7 @@ def start_run(run_id: str, chat_id: int, source: Source, lang: str, auto_approve
                 lang=lang,
                 status=FIRST_STATUS,
                 auto_approve=auto_approve,
+                consent_confirmed=consent_confirmed,
             )
         )
 
@@ -263,6 +281,7 @@ def waiting_for(chat_id: int) -> Stopped | None:
             run_id=row.id,
             lang=row.lang,
             source=row.source,
+            consent_confirmed=row.consent_confirmed,
             auto_approve=row.auto_approve,
             kind=KIND_OF_STOP[row.status],
             stage=row.stopped_stage,

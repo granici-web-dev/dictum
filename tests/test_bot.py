@@ -103,6 +103,7 @@ class FakeStore:
         self.chats: dict[str, int] = {}
         self.status: dict[str, str] = {}
         self.sources: dict[str, Source] = {}
+        self.consents: dict[str, bool | None] = {}
         self.approved: dict[str, bool] = {}
         self.started: list[tuple[str, int, str]] = []
         self.turns: dict[str, list[Turn]] = {}
@@ -112,6 +113,7 @@ class FakeStore:
         self.chats[stopped.run_id] = chat_id
         # Источник и режим ворот — колонки строки, а не свойства остановки: она их переживает.
         self.sources.setdefault(stopped.run_id, stopped.source)
+        self.consents.setdefault(stopped.run_id, stopped.consent_confirmed)
         self.approved.setdefault(stopped.run_id, stopped.auto_approve)
 
     def waiting_for(self, chat_id: int) -> Stopped | None:
@@ -121,12 +123,19 @@ class FakeStore:
         self.turns.setdefault(run_id, []).append(Turn(question=question, answer=answer))
 
     def start_run(
-        self, run_id: str, chat_id: int, source: Source, lang: str, auto_approve: bool
+        self,
+        run_id: str,
+        chat_id: int,
+        source: Source,
+        lang: str,
+        auto_approve: bool,
+        consent_confirmed: bool | None,
     ) -> None:
         self.started.append((run_id, chat_id, source))
         self.chats[run_id] = chat_id
         self.status[run_id] = NAMES[0]
         self.sources[run_id] = source
+        self.consents[run_id] = consent_confirmed
         self.approved[run_id] = auto_approve
 
     def mark_stage(self, run_id: str, status: str, lang: str) -> None:
@@ -140,6 +149,7 @@ class FakeStore:
                 run_id=run_id,
                 lang="ru",
                 source=self.sources[run_id],
+                consent_confirmed=self.consents[run_id],
                 auto_approve=self.approved[run_id],
                 kind=kind,
                 stage=stage,
@@ -574,6 +584,7 @@ def a_stopped_choice(
         run_id="прогон",
         lang="ru",
         source="voice",
+        consent_confirmed=None,
         auto_approve=auto_approve,
         kind="choice",
         stage="intake",
@@ -1050,6 +1061,7 @@ def a_stopped_gate(
         run_id="прогон",
         lang="ru",
         source=source,
+        consent_confirmed=None,
         auto_approve=auto_approve,
         kind="gate",
         stage=stage,
@@ -1809,6 +1821,7 @@ def a_stopped_question(
         run_id="прогон",
         lang="ru",
         source=source,
+        consent_confirmed=None,
         auto_approve=False,
         kind="answer",
         stage="brief",
