@@ -4,6 +4,6 @@
 
 Старт: `cp .env.example .env`, заполнить, `make up`, `uv sync`, `make db`, `make test`.
 Для голосовых и записей нужны ffmpeg и ffprobe, ставятся вместе: `brew install ffmpeg` на macOS, `apt install ffmpeg` на Debian.
-Локальный прогон без бота кончается разбором в `outputs/review.md`: `make run-text TEXT="Kannst du bis Freitag das Login-Formular prüfen? Bitte die API nicht anfassen."`. Путь до бэклога для отладки стадий: `make run-text ARGS="--from intake"` по лежащему `inputs/transcript.md`.
+Локальный прогон без бота кончается разбором в `outputs/review.md`: `make run-text TEXT="Kannst du bis Freitag das Login-Formular prüfen? Bitte die API nicht anfassen."`. Шаги поручения N из этого разбора: `make run-text ARGS="--task N"` пишет `outputs/steps.md`, а на доску их кладёт `python -m app.publish outputs/steps.json` одной карточкой в список `Assignments`. Путь до бэклога своей идеи для отладки стадий: `make run-text ARGS="--from intake"` по лежащему `inputs/transcript.md`.
 
 Архитектура — `SPEC.md`. Что делать сейчас — `PLAN.md`. Правила — `CLAUDE.md`.
