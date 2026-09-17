@@ -214,6 +214,13 @@ GATE_STOPPED = "Остановил прогон {run_id}. Пришлите но�
 
 STALE_BUTTON = "Эти кнопки от прогона, который уже не ждёт ответа."
 
+# Новая запись остановку не снимает: у одного человека остановка всегда его собственная и уже
+# оплачена. «Стоп» не назван: он есть только на воротах, а /start снимает остановку любого рода.
+STOP_ALIVE = (
+    "Прогон {run_id} ждёт вашего ответа выше. Ответьте там или пришлите /start, чтобы его снять, "
+    "затем повторите."
+)
+
 NEXT, EDIT, STOP = "next", "edit", "stop"
 
 # Прогона в строке лога нет: остановку не снимали. Пустое место читается как оборванная
@@ -509,9 +516,12 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
-        # Голосовое всегда начинает новый прогон и снимает остановку.
-        # TODO(P3-10): новая запись при живой остановке получает отказ, а не снимает её.
-        dropped = await asyncio.to_thread(drop_stop, message.chat_id)
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is not None:
+            await refuse(
+                message, "stop_alive", STOP_ALIVE.format(run_id=stopped.run_id), run=stopped.run_id
+            )
+            return
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
         run = started_run(run_id, message.chat_id, source="voice", audio=audio)
@@ -524,9 +534,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             run.auto_approve,
             run.consent_confirmed,
         )
-        logger.info(
-            "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN
-        )
+        logger.info("start=voice run=%s chat=%s", run_id, message.chat_id)
         # Сообщение о ходе — до скачивания: на мобильной сети голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
         note = await message.reply_text(progress_text(run, []))
@@ -709,6 +717,12 @@ async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             message, "file_too_long", FILE_TOO_LONG, seconds=reported_seconds(message.audio)
         )
         return
+    stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+    if stopped is not None:
+        await refuse(
+            message, "stop_alive", STOP_ALIVE.format(run_id=stopped.run_id), run=stopped.run_id
+        )
+        return
     # Ответом на сам файл: нажатие берёт запись из этого ответа, а в личном чате PTB без
     # do_quote не цитирует, и файла у кнопки не нашлось бы.
     await message.reply_text(CONSENT_QUESTION, reply_markup=consent_keyboard(), do_quote=True)
@@ -745,6 +759,19 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     async with running:
+        # Вопрос задан без остановки, но прогон, шедший в это время, мог встать на воротах.
+        # Клавиатура остаётся: на вопрос ответят, когда остановка будет решена.
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is not None:
+            await refuse(
+                message,
+                "stop_alive",
+                STOP_ALIVE.format(run_id=stopped.run_id),
+                run=stopped.run_id,
+                press="yes",
+                by=by,
+            )
+            return
         run_id = new_run_id()
         audio = RUNS / run_id / f"inputs/recording{Path(recording.file_name or '').suffix}"
         run = started_run(
@@ -788,10 +815,6 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 message, "file_too_long", FILE_TOO_LONG, note=note, run=run_id, seconds=seconds
             )
             return
-        # Остановку снимаем только теперь: отвергнутый файл не должен стоить человеку его
-        # ответа на воротах.
-        dropped = await asyncio.to_thread(drop_stop, message.chat_id)
-        logger.info("run=%s dropped=%s", run_id, dropped or NO_RUN)
         await follow(note, run, datetime.now(timezone.utc))
 
 

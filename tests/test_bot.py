@@ -46,6 +46,7 @@ from app.bot import (
     PICK_ONE,
     QUESTION_TAIL,
     STALE_BUTTON,
+    STOP_ALIVE,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
@@ -876,22 +877,55 @@ async def saved_empty(voice: Voice, target: Path) -> None:
     target.write_bytes(b"")
 
 
+def a_live_stop(kind: StopKind) -> Stopped:
+    stage, artifact = {
+        "choice": ("intake", CANDIDATES),
+        "answer": ("brief", BRIEF_QUESTION),
+        "gate": ("brief", BRIEF),
+    }[kind]
+    return Stopped(
+        run_id="ждущий",
+        lang="ru",
+        source="voice",
+        consent_confirmed=None,
+        auto_approve=False,
+        kind=kind,
+        stage=stage,
+        artifact=artifact,
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
-    """Голосовое начинает новый прогон и снимает остановку, а не становится правкой к выбору."""
+@pytest.mark.parametrize("kind", get_args(StopKind))
+async def test_voice_at_a_live_stop_is_refused_and_the_stop_stays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    kind: StopKind,
+) -> None:
+    """Остановка у одного человека всегда его собственная и уже оплачена: голосовое, посланное
+    мимо, не должно выбрасывать её молча."""
     listed(monkeypatch, "12")
-    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    store.stop(12, a_live_stop(kind))
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    monkeypatch.setattr(bot, "save_voice", saved_empty)
-    seen: list[tuple[str, str, Redo | None]] = []
-    monkeypatch.setattr(bot, "walk", walk_recording(seen))
 
-    await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
+    async def never_downloaded(voice: Voice, target: Path) -> None:
+        raise AssertionError("голосовое скачано при живой остановке")
 
-    assert 12 not in store.stops
-    assert store.status["прогон"] == DROPPED
-    assert [(start, redo) for _, start, redo in seen] == [("ingest", None)]
+    monkeypatch.setattr(bot, "save_voice", never_downloaded)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = VoiceChat(a_voice(3))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_voice(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="ждущий")]
+    assert "refusal=stop_alive chat=12 run=ждущий" in caplog.text
+    assert store.started == []
+    assert store.stops[12].run_id == "ждущий"
+    assert "ждущий" not in store.status
+    assert not (tmp_path / "runs").exists()
 
 
 @pytest.mark.asyncio
@@ -1430,27 +1464,6 @@ async def test_a_new_text_run_names_itself_in_the_log_before_it_starts_spending(
 
     run_id = store.started[0][0]
     assert f"start=text run={run_id} chat=12" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_voice_names_the_stop_it_took_away_from_the_chat(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Голосовое начинает новый прогон и снимает остановку.
-
-    Чей выбор при этом пропал — вопрос к логу.
-    """
-    listed(monkeypatch, "12")
-    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
-    monkeypatch.setattr(bot, "save_voice", saved_empty)
-    monkeypatch.setattr(bot, "walk", walk_recording([]))
-
-    with caplog.at_level(logging.INFO, logger="app.bot"):
-        await on_voice(an_update(VoiceChat(a_voice(3))), NO_CONTEXT)
-
-    started = store.started[0][0]
-    assert f"start=voice run={started} chat=12 dropped=прогон" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2262,7 +2275,7 @@ async def test_consent_yes_starts_file_run_from_replied_message(
 ) -> None:
     """Согласие называет нажавшего (99), а не приславшего файл (7): в группе это разные люди."""
     listed(monkeypatch, "12")
-    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
     seen: list[Run] = []
     monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
@@ -2286,8 +2299,6 @@ async def test_consent_yes_starts_file_run_from_replied_message(
     assert f"start=file run={run_id} chat=12" in caplog.text
     assert f"consent=yes chat=12 by=99 run={run_id}" in caplog.text
     assert "by=7" not in caplog.text
-    assert store.status["прогон"] == DROPPED
-    assert f"run={run_id} dropped=прогон" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2329,16 +2340,24 @@ async def test_audio_over_20_minutes_refused_before_consent(
 
 
 @pytest.mark.asyncio
-async def test_file_over_20_minutes_refused_after_download(
+async def test_file_longer_than_the_limit_no_longer_touches_the_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     store: FakeStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Длину документа клиент не называет, а у аудио она бывает неверной: мерит ffprobe."""
+    """Длину документа клиент не называет, а у аудио она бывает неверной: мерит ffprobe.
+
+    Остановку файл после замера больше не снимает: при живой остановке «Да» отказано раньше.
+    """
     listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     monkeypatch.setattr(settings, "keep_audio", True)
-    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+
+    def never_dropped(chat_id: int) -> str | None:
+        raise AssertionError("файл снял остановку")
+
+    monkeypatch.setattr(bot, "drop_stop", never_dropped)
     monkeypatch.setattr(bot, "recording_seconds", lambda path: MAX_FILE_SECONDS + 1)
     monkeypatch.setattr(bot, "walk", never_walks)
     press = ConsentPress(CONSENT_YES, SentRecording())
@@ -2349,7 +2368,6 @@ async def test_file_over_20_minutes_refused_after_download(
     [(run_id, _, _)] = store.started
     assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
     assert store.status[run_id] == REFUSED
-    assert store.stops[12].run_id == "прогон"
     assert press.edits == [FILE_TOO_LONG]
     assert (
         f"refusal=file_too_long chat=12 run={run_id} seconds={MAX_FILE_SECONDS + 1}"
@@ -2383,11 +2401,11 @@ async def test_consent_question_that_could_not_be_edited_is_logged_and_the_run_g
 
 
 @pytest.mark.asyncio
-async def test_recording_that_could_not_be_downloaded_fails_the_run_and_keeps_the_stop(
+async def test_recording_that_could_not_be_downloaded_fails_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
     listed(monkeypatch, "12")
-    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
     monkeypatch.setattr(bot, "walk", never_walks)
     press = ConsentPress(CONSENT_YES, LostRecording())
 
@@ -2396,7 +2414,6 @@ async def test_recording_that_could_not_be_downloaded_fails_the_run_and_keeps_th
     [(run_id, _, _)] = store.started
     assert press.edits == [FILE_NOT_TAKEN]
     assert store.status[run_id] == FAILED
-    assert store.stops[12].run_id == "прогон"
 
 
 @pytest.mark.asyncio
@@ -2420,6 +2437,60 @@ async def test_unreadable_file_is_deleted_after_download(
     assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
     assert store.status[run_id] == FAILED
     assert press.edits == ["ffprobe не смог прочитать recording.m4a: Invalid data found"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent", ["audio", "document"])
+async def test_file_at_a_live_stop_is_refused_before_the_consent_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    sent: str,
+) -> None:
+    """Вопрос о согласии при живой остановке позвал бы нажать «Да», которому всё равно откажут."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_live_stop("gate"))
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    chat = RecordingChat(an_audio()) if sent == "audio" else RecordingChat(document=a_document())
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_recording(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="ждущий")]
+    assert chat.markups == [None]
+    assert "refusal=stop_alive chat=12 run=ждущий" in caplog.text
+    assert store.started == []
+    assert store.stops[12].run_id == "ждущий"
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.asyncio
+async def test_consent_yes_is_refused_when_a_stop_appeared_after_the_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Вопрос задан без остановки, а к нажатию прогон, начатый раньше, встал на воротах."""
+    listed(monkeypatch, "12")
+    store.stop(12, a_live_stop("gate"))
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", never_walks)
+    recording = SentRecording()
+    press = ConsentPress(CONSENT_YES, recording)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    assert press.replies == [STOP_ALIVE.format(run_id="ждущий")]
+    assert "refusal=stop_alive chat=12 run=ждущий press=yes by=99" in caplog.text
+    assert "consent=yes" not in caplog.text
+    assert press.question_edits == []
+    assert recording.fetched == 0
+    assert store.started == []
+    assert store.stops[12].run_id == "ждущий"
+    assert not (tmp_path / "runs").exists()
 
 
 @pytest.mark.asyncio
