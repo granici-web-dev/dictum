@@ -13,6 +13,7 @@ import sys
 import time
 from typing import Any
 
+from app.config import settings
 from app.publish import MARKER
 from app.trello import Trello, open_trello
 
@@ -66,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--run", metavar="RUN_ID", help="только карточки одного прогона")
     args = parser.parse_args(argv)
 
-    board = open_trello()
+    board = open_trello(settings.trello_board_id, "TRELLO_BOARD_ID")
     try:
         cards = chosen(cards_of_board(board), args.run)
         if not cards:

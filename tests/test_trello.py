@@ -176,16 +176,15 @@ def test_an_error_names_the_call_without_the_credentials(
 def test_open_trello_refuses_without_allow_live_api(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "allow_live_api", False)
     with pytest.raises(LiveApiNotAllowed, match="ALLOW_LIVE_API is not true"):
-        open_trello()
+        open_trello("board1", "TRELLO_BOARD_ID")
 
 
 def test_open_trello_names_every_missing_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "allow_live_api", True)
     monkeypatch.setattr(settings, "trello_key", "test-key")
     monkeypatch.setattr(settings, "trello_token", "")
-    monkeypatch.setattr(settings, "trello_board_id", "")
-    with pytest.raises(MissingApiKey, match="TRELLO_TOKEN, TRELLO_BOARD_ID"):
-        open_trello()
+    with pytest.raises(MissingApiKey, match="TRELLO_TOKEN, TRELLO_IDEA_BOARD_ID"):
+        open_trello("", "TRELLO_IDEA_BOARD_ID")
 
 
 def test_the_pause_follows_retry_after_and_otherwise_doubles() -> None:

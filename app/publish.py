@@ -464,7 +464,7 @@ def publish_task(steps_path: Path) -> CardOutcome:
     local_id = f"A{steps.task.number}"
     log_path = journal_of(steps_path)
 
-    with closing(open_trello()) as board:
+    with closing(open_trello(settings.trello_board_id, "TRELLO_BOARD_ID")) as board:
         on_board = marked_cards(board.cards())
         known = next(
             (
@@ -512,7 +512,7 @@ def publish(issues_path: Path) -> list[CardOutcome]:
     run_id = issues.run_id
     log_path = journal_of(issues_path)
 
-    with closing(open_trello()) as board:
+    with closing(open_trello(settings.trello_idea_board_id, "TRELLO_IDEA_BOARD_ID")) as board:
         on_board = marked_cards(board.cards())
         next_card_number = next_number(on_board, prefix)
         cards_of_this_run = {found.local_id: found for found in on_board if found.run_id == run_id}

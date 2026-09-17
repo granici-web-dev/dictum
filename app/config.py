@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     trello_key: str = ""
     trello_token: str = ""
     trello_board_id: str = ""
+    # Доска пути идеи: фазы и по дюжине задач своей идеи не ложатся между рабочими колонками.
+    # Старт бота её не требует: без неё полезен разбор встречи, а кнопка идеи отказывает сама.
+    trello_idea_board_id: str = ""
     project_key: str = ""
     database_url: str = "postgresql+psycopg://dictum:dictum@localhost:5434/dictum"
     default_lang: str = "de"

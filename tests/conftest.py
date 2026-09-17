@@ -20,6 +20,7 @@ DISARMED = {
     "trello_key": "",
     "trello_token": "",
     "trello_board_id": "",
+    "trello_idea_board_id": "",
     "telegram_bot_token": "",
     "telegram_allowed_chat_ids": "",
     "openai_api_key": "",
@@ -93,5 +94,8 @@ def board(respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> Fake
     monkeypatch.setattr(settings, "trello_key", "test-key")
     monkeypatch.setattr(settings, "trello_token", "test-token")
     monkeypatch.setattr(settings, "trello_board_id", "board1")
+    # Двойник держит одну доску: путь идеи и путь поручения пишут на неё оба, а тест, которому
+    # важно, куда именно, разводит доски сам.
+    monkeypatch.setattr(settings, "trello_idea_board_id", "board1")
     monkeypatch.setattr(settings, "project_key", "DCT")
     return FakeBoard(respx_mock)

@@ -349,7 +349,8 @@ def test_the_progress_carries_the_run_id_so_the_log_can_be_found() -> None:
 def test_the_last_message_counts_the_cards_and_links_the_board(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(settings, "trello_board_id", "JcGpvPdx")
+    monkeypatch.setattr(settings, "trello_board_id", "рабочая")
+    monkeypatch.setattr(settings, "trello_idea_board_id", "JcGpvPdx")
     journal = tmp_path / "outputs/publish.json"
     journal.parent.mkdir(parents=True)
     journal.write_text(json.dumps({f"I-{n:03}": {} for n in range(1, 16)}), encoding="utf-8")

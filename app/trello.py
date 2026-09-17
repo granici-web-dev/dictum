@@ -206,7 +206,11 @@ class Trello:
         self.post(f"/cards/{card_id}/attachments", url=url, name=name)
 
 
-def open_trello() -> Trello:
+def open_trello(board_id: str, board_setting: str) -> Trello:
+    """Клиент одной доски. `board_setting` называет настройку, из которой взят `board_id`.
+
+    Досок две, у каждого пути своя, и отказ обязан назвать ту, что пуста, а не обе сразу.
+    """
     if not settings.allow_live_api:
         raise LiveApiNotAllowed(
             "ALLOW_LIVE_API is not true, nothing was sent. "
@@ -217,7 +221,7 @@ def open_trello() -> Trello:
         for name, value in (
             ("TRELLO_KEY", settings.trello_key),
             ("TRELLO_TOKEN", settings.trello_token),
-            ("TRELLO_BOARD_ID", settings.trello_board_id),
+            (board_setting, board_id),
         )
         if not value
     ]
@@ -229,5 +233,5 @@ def open_trello() -> Trello:
         httpx.Client(timeout=30),
         settings.trello_key,
         settings.trello_token,
-        settings.trello_board_id,
+        board_id,
     )

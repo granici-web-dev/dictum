@@ -358,7 +358,7 @@ def cards_published(root: Path) -> int:
 def finished_text(root: Path) -> str:
     return (
         f"Готово: {cards_published(root)} карточек.\n"
-        f"https://trello.com/b/{settings.trello_board_id}"
+        f"https://trello.com/b/{settings.trello_idea_board_id}"
     )
 
 

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 import respx
 
-from app.config import InvalidProjectKey, LiveApiNotAllowed, settings
+from app.config import InvalidProjectKey, LiveApiNotAllowed, MissingApiKey, settings
 from app.models import Issue, IssuesFile
 from app.publish import (
     CardOutcome,
@@ -884,3 +884,43 @@ def test_main_does_not_guess_the_form_of_a_file_with_another_name(
 
     assert main([str(path)]) == 64
     assert not respx_mock.calls
+
+
+def test_an_idea_lands_on_the_idea_board_and_a_task_on_the_work_board(
+    board: FakeBoard, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Фазы своей идеи и по дюжине её задач не ложатся между рабочими колонками поручений."""
+    monkeypatch.setattr(settings, "trello_idea_board_id", "ideas1")
+    board.board_id = "ideas1"
+    publish(issues_file(tmp_path))
+    ideas = len(board.posted("/1/cards"))
+    assert ideas > 0
+    assert {fields["idBoard"] for fields in board.posted("/1/lists")} == {"ideas1"}
+
+    board.board_id = "board1"
+    publish_task(steps_file(tmp_path))
+
+    assert len(board.posted("/1/cards")) == ideas + 1
+    assert board.posted("/1/lists")[-1]["idBoard"] == "board1"
+
+
+def test_an_idea_without_its_board_is_refused_by_name_before_any_request(
+    board: FakeBoard, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "trello_idea_board_id", "")
+    path = issues_file(tmp_path)
+
+    with pytest.raises(MissingApiKey, match="TRELLO_IDEA_BOARD_ID"):
+        publish(path)
+    assert main([str(path)]) == 1
+
+    assert board.posts == []
+    assert board.cards == []
+
+
+def test_a_task_does_not_need_the_idea_board(
+    board: FakeBoard, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "trello_idea_board_id", "")
+
+    assert publish_task(steps_file(tmp_path)).status == "created"
