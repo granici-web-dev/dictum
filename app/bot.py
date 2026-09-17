@@ -38,7 +38,7 @@ from telegram.ext import (
 from app.candidates import Candidates, Idea, parse_candidates
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.dialog import budget_spent
-from app.ingest import new_run_id
+from app.ingest import Source, new_run_id
 from app.models import IssuesFile
 from app.pipeline import (
     BRIEF,
@@ -246,11 +246,9 @@ def allowed_chats() -> frozenset[int]:
     return frozenset(int(part) for part in listed)
 
 
-def progress_text(run: Run, done: list[str], voice: bool) -> str:
-    # Голосовым прогон остаётся и после остановки, когда записи на диске уже нет: у
-    # продолженного это знает строка (`Stopped.source`), у нового — само сообщение.
+def progress_text(run: Run, done: list[str]) -> str:
     labels = dict(LABEL)
-    if voice:
+    if run.source == "voice":
         labels[FIRST_STAGE] = VOICE_INGEST_LABEL
     lines = [f"Прогон {run.run_id}", ""]
     marked_current = False
@@ -277,7 +275,7 @@ def finished_text(root: Path) -> str:
 
 
 def started_run(
-    run_id: str, chat_id: int, text: str = "", audio: Path | None = None
+    run_id: str, chat_id: int, source: Source = "text", text: str = "", audio: Path | None = None
 ) -> Run:
     """Новый прогон из чата. Ворота снимает режим чата (SPEC §3.2), а не отсутствие кнопок.
 
@@ -290,6 +288,7 @@ def started_run(
         lang=settings.default_lang,
         text=text,
         audio=audio,
+        source=source,
         auto_approve=auto_approve_for(chat_id),
     )
 
@@ -304,6 +303,7 @@ def continued(stopped: Stopped) -> Run:
         root=RUNS / stopped.run_id,
         run_id=stopped.run_id,
         lang=stopped.lang,
+        source=stopped.source,
         auto_approve=stopped.auto_approve,
     )
 
@@ -394,32 +394,31 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if stopped is None:
             run = started_run(new_run_id(), message.chat_id, text=message.text)
             start, redo = FIRST_STAGE, None
-            voice = False
             await asyncio.to_thread(
-                start_run, run.run_id, message.chat_id, "text", run.lang, run.auto_approve
+                start_run, run.run_id, message.chat_id, run.source, run.lang, run.auto_approve
             )
             logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
             # Текст на воротах и есть правка: тот же уговор, что и на выборе, и второго
             # состояния ожидания («нажал Править, теперь жду текст») он не заводит.
-            run, voice = continued(stopped), stopped.voice
+            run = continued(stopped)
             logger.info("answer=edit run=%s chat=%s", run.run_id, message.chat_id)
             start = stopped.stage
             redo = Redo(kind="gate", user_edit=message.text.strip(), artifact=stopped.artifact)
         elif stopped.kind == "answer":
-            run, voice = continued(stopped), stopped.voice
+            run = continued(stopped)
             redo = await brief_answer(message, run, stopped, message.text.strip())
             if redo is None:
                 return
             start = stopped.stage
         else:
-            run, voice = continued(stopped), stopped.voice
+            run = continued(stopped)
             redo = await choice_answer(message, run, stopped, message.text, "text")
             if redo is None:
                 return
             start = stopped.stage
-        note = await message.reply_text(progress_text(run, done_before(start), voice))
-        await follow(note, run, message.date, start, redo, voice)
+        note = await message.reply_text(progress_text(run, done_before(start)))
+        await follow(note, run, message.date, start, redo)
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -441,16 +440,16 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         dropped = await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
-        run = started_run(run_id, message.chat_id, audio=audio)
+        run = started_run(run_id, message.chat_id, source="voice", audio=audio)
         await asyncio.to_thread(
-            start_run, run_id, message.chat_id, "voice", run.lang, run.auto_approve
+            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve
         )
         logger.info(
             "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN
         )
         # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
-        note = await message.reply_text(progress_text(run, [], voice=True))
+        note = await message.reply_text(progress_text(run, []))
         try:
             await save_voice(message.voice, audio)
         except TelegramError:
@@ -460,7 +459,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.to_thread(finish_run, run_id, FAILED)
             await note.edit_text(VOICE_NOT_TAKEN)
             return
-        await follow(note, run, message.date, voice=True)
+        await follow(note, run, message.date)
 
 
 async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -518,12 +517,12 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if decision == EDIT:
             await message.reply_text(GATE_EDIT_ASKED)
             return
-        run, voice = continued(stopped), stopped.voice
+        run = continued(stopped)
         # Со следующей стадии, а не с той, что встала на воротах: подтверждённую переигрывать
         # значит оплатить её второй раз и получить другой артефакт вместо принятого.
         start = after(stopped.stage).name
-        note = await message.reply_text(progress_text(run, done_before(start), voice))
-        await follow(note, run, datetime.now(timezone.utc), start, voice=voice)
+        note = await message.reply_text(progress_text(run, done_before(start)))
+        await follow(note, run, datetime.now(timezone.utc), start)
 
 
 async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -555,14 +554,14 @@ async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # же прогон встать уже не может.
             await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
             return
-        run, voice = continued(stopped), stopped.voice
+        run = continued(stopped)
         redo = await choice_answer(message, run, stopped, number, "button")
         if redo is None:
             return
         # Клавиатуру не снимаем, как и «Править» на воротах: сорвавшийся повтор возвращает
         # остановку и просит ответить ещё раз, а снятая отняла бы у человека этот способ.
-        note = await message.reply_text(progress_text(run, done_before(stopped.stage), voice))
-        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo, voice)
+        note = await message.reply_text(progress_text(run, done_before(stopped.stage)))
+        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
 
 
 async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -600,10 +599,10 @@ async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             turns=stopped.turns,
             closes_branch=BRIEF_QUESTION,
         )
-        run, voice = continued(stopped), stopped.voice
+        run = continued(stopped)
         # Клавиатуру не снимаем, как и на «Править»: сорвавшийся повтор возвращает остановку.
-        note = await message.reply_text(progress_text(run, done_before(stopped.stage), voice))
-        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo, voice)
+        note = await message.reply_text(progress_text(run, done_before(stopped.stage)))
+        await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
 
 
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -619,7 +618,6 @@ async def follow(
     asked_at: datetime,
     start: str = FIRST_STAGE,
     redo: Redo | None = None,
-    voice: bool = False,
 ) -> None:
     """Гонит прогон в потоке, правит одно сообщение до конца и закрывает строку прогона.
 
@@ -646,7 +644,7 @@ async def follow(
             logger.exception("Прогон %s не записал стадию %s", run.run_id, stage.name)
         progress.append(
             asyncio.run_coroutine_threadsafe(
-                note.edit_text(progress_text(run, done, voice)), loop
+                note.edit_text(progress_text(run, done)), loop
             )
         )
 

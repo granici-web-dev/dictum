@@ -63,6 +63,7 @@ from app.bot import (
 )
 from app.candidates import parse_candidates
 from app.config import ConfigError, MissingApiKey, settings
+from app.ingest import Source
 from app.pipeline import (
     BRIEF,
     BRIEF_QUESTION,
@@ -101,7 +102,7 @@ class FakeStore:
         self.stops: dict[int, Stopped] = {}
         self.chats: dict[str, int] = {}
         self.status: dict[str, str] = {}
-        self.sources: dict[str, str] = {}
+        self.sources: dict[str, Source] = {}
         self.approved: dict[str, bool] = {}
         self.started: list[tuple[str, int, str]] = []
         self.turns: dict[str, list[Turn]] = {}
@@ -120,7 +121,7 @@ class FakeStore:
         self.turns.setdefault(run_id, []).append(Turn(question=question, answer=answer))
 
     def start_run(
-        self, run_id: str, chat_id: int, source: str, lang: str, auto_approve: bool
+        self, run_id: str, chat_id: int, source: Source, lang: str, auto_approve: bool
     ) -> None:
         self.started.append((run_id, chat_id, source))
         self.chats[run_id] = chat_id
@@ -174,8 +175,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
     return fake
 
 
-def a_run(run_id: str = "прогон", audio: Path | None = None) -> Run:
-    return Run(root=Path("."), run_id=run_id, lang="ru", audio=audio, auto_approve=True)
+def a_run(run_id: str = "прогон", source: Source = "text") -> Run:
+    return Run(root=Path("."), run_id=run_id, lang="ru", source=source, auto_approve=True)
 
 
 def a_voice(duration: int) -> Voice:
@@ -220,27 +221,27 @@ def test_something_that_is_not_an_id_is_named_in_the_refusal(
 
 
 def test_the_progress_shows_every_stage_of_the_walk_in_its_order() -> None:
-    text = progress_text(a_run(), [], voice=False)
+    text = progress_text(a_run(), [])
 
     printed = [line[2:] for line in text.splitlines()[2:]]
     assert printed == [LABEL[name] for name in NAMES]
 
 
 def test_the_progress_marks_what_is_done_and_what_runs_now() -> None:
-    text = progress_text(a_run(), ["ingest", "intake"], voice=False)
+    text = progress_text(a_run(), ["ingest", "intake"])
 
     marks = [line[0] for line in text.splitlines()[2:]]
     assert marks == ["✓", "✓", "▸", "·", "·", "·", "·"]
 
 
 def test_a_finished_walk_marks_everything_and_points_at_nothing() -> None:
-    text = progress_text(a_run(), list(NAMES), voice=False)
+    text = progress_text(a_run(), list(NAMES))
 
     assert [line[0] for line in text.splitlines()[2:]] == ["✓"] * len(NAMES)
 
 
 def test_the_progress_carries_the_run_id_so_the_log_can_be_found() -> None:
-    assert progress_text(a_run("a1b2c3d4"), [], voice=False).startswith("Прогон a1b2c3d4")
+    assert progress_text(a_run("a1b2c3d4"), []).startswith("Прогон a1b2c3d4")
 
 
 def test_the_last_message_counts_the_cards_and_links_the_board(
@@ -286,7 +287,7 @@ def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
 
 
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
-    printed = progress_text(a_run(), [], voice=True).splitlines()[2:]
+    printed = progress_text(a_run(source="voice"), []).splitlines()[2:]
 
     assert printed[0] == f"▸ {VOICE_INGEST_LABEL}"
     assert printed[1:] == [f"· {LABEL[name]}" for name in NAMES[1:]]
@@ -1037,7 +1038,7 @@ def a_stopped_gate(
     monkeypatch: pytest.MonkeyPatch,
     stage: str = "brief",
     artifact: str = BRIEF,
-    source: str = "text",
+    source: Source = "text",
     auto_approve: bool = False,
 ) -> Stopped:
     """Прогон, ждущий решения на воротах: артефакт лежит файлом, место помнит строка."""
@@ -1797,7 +1798,7 @@ def a_stopped_question(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     turns: tuple[Turn, ...] = (),
-    source: str = "text",
+    source: Source = "text",
 ) -> Stopped:
     """Прогон, ждущий ответа на вопрос брифа: вопрос лежит файлом, ходы помнит строка."""
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")

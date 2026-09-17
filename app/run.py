@@ -12,7 +12,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from app.dialog import Turn
-from app.ingest import build_transcript
+from app.ingest import Source, build_transcript
 from app.pipeline import (
     BRIEF_QUESTION,
     CANDIDATES,
@@ -45,6 +45,9 @@ class Run(BaseModel):
     lang: str
     text: str = ""
     audio: Path | None = None
+    # Откуда прогон, знает он сам, а не наличие записи: у продолженного записи на диске уже нет
+    # (её мог унести `KEEP_AUDIO=false`), а подписан прогресс по-прежнему по источнику.
+    source: Source = "text"
     # Ворота — норма, а демо — исключение (CLAUDE.md §1), поэтому снимает их тот, кто заводит
     # прогон, и делает это явно.
     auto_approve: bool = False
@@ -94,7 +97,7 @@ def ingest_body(run: Run) -> dict[str, str]:
     run.lang = heard.lang
     return {
         TRANSCRIPT: build_transcript(
-            heard.text, heard.lang, run.run_id, "voice", heard.duration_seconds
+            heard.text, heard.lang, run.run_id, run.source, heard.duration_seconds
         )
     }
 

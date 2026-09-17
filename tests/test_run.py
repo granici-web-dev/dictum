@@ -101,6 +101,7 @@ def a_voice_run(root: Path, monkeypatch: pytest.MonkeyPatch, lang: str = "ru") -
         run_id=RUN_ID,
         lang="de",
         audio=root / "inputs/voice.oga",
+        source="voice",
         auto_approve=True,
     )
 

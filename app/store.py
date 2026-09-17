@@ -30,6 +30,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from app.config import ConfigError, settings
 from app.dialog import Turn
+from app.ingest import Source
 from app.pipeline import NAMES, StopKind
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class RunRow(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger)
-    source: Mapped[str] = mapped_column(String(8))
+    source: Mapped[Source] = mapped_column(String(8))
     lang: Mapped[str] = mapped_column(String(8))
     status: Mapped[str] = mapped_column(String(16))
     auto_approve: Mapped[bool]
@@ -107,15 +108,11 @@ class RunRow(Base):
 
 
 class Stopped(BaseModel):
-    """Прогон, ждущий ответа из чата: всё, чтобы вернуться в него хоть после перезапуска.
-
-    `source` держится здесь, а не выводится из прогона: у продолженного `Run` записи уже нет
-    (её мог унести `KEEP_AUDIO=false`), а прогресс голосового подписан иначе, чем текстовый.
-    """
+    """Прогон, ждущий ответа из чата: всё, чтобы вернуться в него хоть после перезапуска."""
 
     run_id: str
     lang: str
-    source: str
+    source: Source
     auto_approve: bool
     kind: StopKind
     stage: str
@@ -123,10 +120,6 @@ class Stopped(BaseModel):
     # Пусто у всех остановок, кроме вопроса брифа, и у первого его вопроса тоже: отвечать не на
     # что было.
     turns: tuple[Turn, ...] = ()
-
-    @property
-    def voice(self) -> bool:
-        return self.source == "voice"
 
 
 class Orphan(BaseModel):
@@ -188,7 +181,7 @@ def one_bot_per_database() -> Iterator[bool]:
                 connection.scalar(select(func.pg_advisory_unlock(BOT_LOCK)))
 
 
-def start_run(run_id: str, chat_id: int, source: str, lang: str, auto_approve: bool) -> None:
+def start_run(run_id: str, chat_id: int, source: Source, lang: str, auto_approve: bool) -> None:
     with session() as opened:
         opened.add(
             RunRow(
