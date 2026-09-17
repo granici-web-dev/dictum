@@ -1,0 +1,96 @@
+{
+  "owner_lang": "ru",
+  "tasks": [
+    {
+      "title": "Проверка формы входа до отправки на сервер",
+      "summary": "Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. Зачем это нужно, на встрече не прозвучало. API не трогать, он принадлежит команде бэкенда.",
+      "assigned_by": "Teamlead",
+      "assignee": "[уточнить: кому]",
+      "status": "decision",
+      "deadline": {
+        "text": "до пятницы",
+        "original": "bis Freitag",
+        "in_transcript": true
+      },
+      "constraints": [
+        {
+          "text": "проверка в браузере, до отправки на сервер",
+          "original": "Die Felder sollen im Browser geprüft werden, bevor irgendwas an den Server geht",
+          "in_transcript": true
+        },
+        {
+          "text": "формат e-mail и обязательные поля",
+          "original": "also E-Mail-Format und Pflichtfelder",
+          "in_transcript": true
+        }
+      ],
+      "do_not": [
+        {
+          "text": "трогать API: он принадлежит команде бэкенда",
+          "original": "Bitte die API nicht anfassen, die gehört dem Backend-Team.",
+          "in_transcript": true
+        }
+      ],
+      "ask_back": [
+        {
+          "text": "касается ли проверка и регистрации: тимлид сам этого ещё не знает",
+          "question": "Gilt die Prüfung auch für die Registrierung?",
+          "translation": "Проверка касается и регистрации?"
+        }
+      ],
+      "quotes": [
+        {
+          "original": "Erstens das Login-Formular.",
+          "translation": "Во-первых, форма входа.",
+          "in_transcript": true
+        },
+        {
+          "original": "Kannst du das bis Freitag machen?",
+          "translation": "Сможешь сделать это до пятницы?",
+          "in_transcript": true
+        }
+      ]
+    },
+    {
+      "title": "Сообщения об ошибках на странице аккаунта на немецком",
+      "summary": "Перевести сообщения об ошибках на странице аккаунта с английского на немецкий; тексты пришлёт Julia из продуктовой команды. Зачем, на встрече не прозвучало. Срочность ниже, чем у проверки формы входа, срок не назван.",
+      "assigned_by": "Teamlead",
+      "assignee": "[уточнить: кому]",
+      "status": "decision",
+      "deadline": null,
+      "constraints": [
+        {
+          "text": "тексты пришлёт Julia из продуктовой команды",
+          "original": "die Texte schickt dir Julia aus dem Produktteam",
+          "in_transcript": true
+        },
+        {
+          "text": "в проекте уже есть i18next",
+          "original": "wir haben schon i18next im Projekt",
+          "in_transcript": true
+        }
+      ],
+      "do_not": [
+        {
+          "text": "брать для этого новую библиотеку",
+          "original": "Nimm dafür bitte keine neue Bibliothek",
+          "in_transcript": true
+        }
+      ],
+      "ask_back": [],
+      "quotes": [
+        {
+          "original": "Die Fehlermeldungen auf der Kontoseite sind noch auf Englisch.",
+          "translation": "Сообщения об ошибках на странице аккаунта всё ещё на английском.",
+          "in_transcript": false
+        },
+        {
+          "original": "das ist nicht so dringend … Die sollen auf Deutsch sein",
+          "translation": "это не так срочно … Они должны быть на немецком",
+          "in_transcript": true
+        }
+      ]
+    }
+  ],
+  "topics": []
+}

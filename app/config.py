@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     project_key: str = ""
     database_url: str = "postgresql+psycopg://dictum:dictum@localhost:5434/dictum"
     default_lang: str = "de"
+    # Язык владельца установки, на нём пишется разбор встречи. Язык записи называет Whisper, и
+    # живёт он в строке прогона; этот одинаков для всех прогонов (P3-08).
+    owner_lang: str = "ru"
     keep_audio: bool = False
     # Ворота — норма, а не опция (CLAUDE.md §1): снимает их явный true в .env или /gates off, а не
     # умолчание.
