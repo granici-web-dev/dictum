@@ -1,4 +1,4 @@
-"""Telegram-бот демо-пути: текст → весь пайплайн → карточки в Trello. См. SPEC.md §7.3.
+"""Telegram-бот: текст → весь пайплайн → карточки в Trello. См. SPEC.md §7.3.
 
 Единственный асинхронный модуль (CONVENTIONS): пайплайн синхронный и уходит в поток, а обратно
 докладывает через цикл событий. Решения, которые можно принять без Telegram, вынесены функциями —
@@ -91,8 +91,7 @@ FIRST_STAGE = "ingest"
 LAST_STAGE = "publish"
 VOICE_FILE = "inputs/voice.oga"
 
-# Ограничение стенда, а не Whisper: минута записи стоит копейки, а вот стадии за ней думают тем
-# дольше, чем длиннее идея, и очередь у стенда этого не прощает. Нарезка длинного — P3-03.
+# TODO(P3-09): одна граница длины для голосового и файла.
 # В минутах, потому что в минутах об этом говорят человеку: с секундами отказ однажды сказал бы
 # «длиннее 1 минут» на лимите в 90 с.
 MAX_VOICE_MINUTES = 2
@@ -324,7 +323,7 @@ def started_run(
     """Новый прогон из чата. Ворота снимает режим чата (SPEC §3.2), а не отсутствие кнопок.
 
     Режим чата — флаг из `.env`, пока `/gates` не сказал иначе; умолчание флага — «ворота
-    есть» (`CLAUDE.md` §1), и снимает их стенд своим файлом.
+    есть» (`CLAUDE.md` §1), и снимает их явный true в `.env`.
     """
     return Run(
         root=RUNS / run_id,
@@ -370,9 +369,9 @@ async def refuse(
 ) -> None:
     """Отвечает отказом и оставляет счётную запись.
 
-    Отчёт репетиции (P2-06) отвечает на вопрос «сколько человек упёрлось» числом, а не памятью,
-    поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ. Через одну дверь
-    ходят все отказы, иначе формат разъедется и считать придётся глазами.
+    Отчёт серии живых прогонов (P2-06) отвечает на вопрос «сколько человек упёрлось» числом, а
+    не памятью, поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ. Через
+    одну дверь ходят все отказы, иначе формат разъедется и считать придётся глазами.
 
     С `note` отказ правит сообщение о ходе прогона, а не отвечает новым: прогон уже начат, и
     оставленные под отказом галочки читались бы как прогон, который ещё идёт.
@@ -420,7 +419,7 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_gates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ворота включает и выключает ведущий, не гася бота. Идущий прогон это не трогает."""
+    """Ворота включает и выключает человек, не гася бота. Идущий прогон это не трогает."""
     message = update.message
     if message is None or not permitted(message):
         return
@@ -491,7 +490,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None or message.voice is None or not permitted(message):
         return
     if too_long(message.voice):
-        # Длительность в записи, а не только тег: на репетиции важно, насколько именно
+        # Длительность в записи, а не только тег: по логу видно, насколько именно
         # переговорили лимит, иначе непонятно, двигать его или оставить.
         await refuse(message, "too_long", TOO_LONG, seconds=reported_seconds(message.voice))
         return
@@ -500,8 +499,8 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
-        # Голосовое всегда начинает новый прогон и снимает остановку: на стенде следующий
-        # человек говорит голосом, и его запись не должна стать правкой к чужому выбору.
+        # Голосовое всегда начинает новый прогон и снимает остановку.
+        # TODO(P3-10): новая запись при живой остановке получает отказ, а не снимает её.
         dropped = await asyncio.to_thread(drop_stop, message.chat_id)
         run_id = new_run_id()
         audio = RUNS / run_id / VOICE_FILE
@@ -518,7 +517,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(
             "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN
         )
-        # Сообщение о ходе — до скачивания: на конференционном wi-fi голосовое едет секунды,
+        # Сообщение о ходе — до скачивания: на мобильной сети голосовое едет секунды,
         # и всё это время человек не должен смотреть в пустой чат.
         note = await message.reply_text(progress_text(run, []))
         try:
@@ -554,8 +553,8 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     run_id, stage, decision = pressed
     if running.locked():
-        # Решение называется и здесь, хотя до его разбора дело не дойдёт: репетиция 09.09.2026
-        # оставила в логе `refusal=busy` от кнопки, и по нему нельзя было сказать, нажали
+        # Решение называется и здесь, хотя до его разбора дело не дойдёт: серия живых прогонов
+        # 09.09.2026 оставила в логе `refusal=busy` от кнопки, и по нему нельзя было сказать, нажали
         # «Дальше», «Править» или «Стоп». Кнопки ворот живут в чате рядом, и разбор упирался
         # в память участников.
         await refuse(message, "busy", BUSY, run=run_id, gate=stage, press=decision)
@@ -872,8 +871,9 @@ async def follow(
         # без содержания, без кнопок и без единого способа понять, чего от него ждут.
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
-    # Сколько человек прождал ответа: отчёт репетиции (P2-06) отвечает на этот вопрос числом,
-    # а из длительностей стадий его не сложить — между ними скачивание, публикация и правки.
+    # Сколько человек прождал ответа: отчёт серии живых прогонов (P2-06) отвечает на этот вопрос
+    # числом, а из длительностей стадий его не сложить — между ними скачивание, публикация и
+    # правки.
     waited = datetime.now(timezone.utc) - asked_at
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
 
@@ -900,8 +900,8 @@ async def choice_answer(
     """Ответ на выбор как повтор стадии. None — повторять нечего, человеку уже сказано.
 
     Один уговор на два входа: номер кнопкой и то же самое сообщением — один ответ, и
-    расходиться им нечем. `by` идёт в лог: кнопку затевали ради того, чтобы у стенда не
-    набирали текст, и ответ на «пользовались ли ею» берётся из лога, а не из памяти.
+    расходиться им нечем. `by` идёт в лог: кнопку затевали ради того, чтобы не набирать
+    номер, и ответ на «пользовались ли ею» берётся из лога, а не из памяти.
     """
     try:
         found = await asyncio.to_thread(read_candidates, run, stopped.artifact)
@@ -917,7 +917,7 @@ async def choice_answer(
         await refuse(message, "unknown_number", out_of_range(found), run=run.run_id)
         return None
     # Второй половины воронки в логе не было: `stop=choice` считался, а ответы на него нет, и
-    # «сколько человек выбрало» отчёт репетиции (P2-06) взять было неоткуда.
+    # «сколько человек выбрало» отчёт серии живых прогонов (P2-06) взять было неоткуда.
     logger.info(
         "answer=%s by=%s run=%s chat=%s",
         "choice" if written.strip().isdecimal() else "edit",
@@ -1141,12 +1141,12 @@ async def outcome(
         return Ending(text=str(error), status=NO_TASK)
     except TranscriptionError as error:
         # Текст такой ошибки написан человеку, а не в лог: показываем как есть. Статус `failed`,
-        # а не `no_task`: сломанный ffmpeg — это поломка стенда, и отчёт репетиции не должен
-        # считать её записью без задания.
+        # а не `no_task`: сломанный ffmpeg — это поломка установки, и отчёт серии живых прогонов
+        # не должен считать её записью без задания.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
         return Ending(text=str(error), status=FAILED)
     except OSError:
-        # Файлы прогона мог унести `make clean-runs` между репетициями. Повторять нечего:
+        # Файлы прогона мог унести `make clean-runs` между прогонами. Повторять нечего:
         # остановка после этого копила бы один и тот же отказ на каждый ответ человека.
         logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
         return Ending(text=LOST.format(run_id=run.run_id), status=FAILED)
@@ -1166,7 +1166,7 @@ async def outcome(
 async def warn_orphans(application: BotApplication) -> None:
     """Прогоны, не пережившие прошлый процесс: закрыть и сказать людям, что они брошены.
 
-    Молчание тут дороже сообщения: человек у стенда ждёт ответа на голосовое, которого больше
+    Молчание тут дороже сообщения: человек ждёт ответа на голосовое, которого больше
     некому дождаться, и без строки бот об этих прогонах вообще ничего не знал.
     """
     for orphan in await asyncio.to_thread(fail_orphans):
@@ -1198,7 +1198,7 @@ def main() -> None:
     if not installed("ffprobe"):
         raise ConfigError(FFPROBE_MISSING)
     ensure_schema()
-    # Режим прогона — в лог одной строкой: утренний чек-лист стенда спрашивает, сняты ли
+    # Режим прогона — в лог одной строкой: перед работой важно знать, сняты ли
     # ворота, и ответ на это не должен зависеть от памяти о содержимом .env.
     logger.info("auto_approve=%s", settings.auto_approve)
 
@@ -1225,7 +1225,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
     application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
-    # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
+    # в команде человек читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не
     # попадают — им никто ничего не присылал.
     application.add_handler(MessageHandler(~filters.StatusUpdate.ALL, on_anything_else))
@@ -1240,7 +1240,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     # Время в каждой строке: без него по логу не сказать, сколько заняла публикация и сколько
-    # прогон простоял между стадиями, а репетиция спрашивает именно это.
+    # прогон простоял между стадиями, а разбор живого прогона спрашивает именно это.
     logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger("app").setLevel(logging.INFO)
     main()

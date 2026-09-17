@@ -21,10 +21,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://dictum:dictum@localhost:5434/dictum"
     default_lang: str = "de"
     keep_audio: bool = False
-    # Ворота — норма, а не опция (CLAUDE.md §1): снимает их стенд своим .env, а не умолчание.
+    # Ворота — норма, а не опция (CLAUDE.md §1): снимает их явный true в .env или /gates off, а не
+    # умолчание.
     auto_approve: bool = False
     # Сколько вопросов брифу позволено задать за прогон. Каждый — отдельный вызов модели и
-    # отдельное ожидание человека, поэтому на стенде число меньше, чем в спокойной работе.
+    # отдельное ожидание человека.
     max_brief_questions: int = 5
 
 
