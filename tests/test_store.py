@@ -4,7 +4,7 @@ SQLite подменил бы диалект и спрятал ровно то, �
 индекс и `timestamptz`. Базы нет — тесты пропускаются, а не падают: `make up` не у всех поднят.
 
 Работают тесты в отдельной базе `dictum_test`. Раньше они чистили ту, на которую смотрит
-`DATABASE_URL`, а это база стенда: `make test` после живого прогона стёр его строки, и разбирать
+`DATABASE_URL`, а это рабочая база: `make test` после живого прогона стёр его строки, и разбирать
 пропажу пришлось глазами.
 """
 
@@ -64,9 +64,9 @@ def address_of_test_database() -> str:
 
 
 def created_test_database() -> bool:
-    """Заводит `dictum_test` рядом со стендовой базой. False — сервера нет, тестам нечего ждать.
+    """Заводит `dictum_test` рядом с рабочей базой. False — сервера нет, тестам нечего ждать.
 
-    Подключается к стендовой базе, а не к служебной `postgres`: `CREATE DATABASE` можно послать
+    Подключается к рабочей базе, а не к служебной `postgres`: `CREATE DATABASE` можно послать
     из любой, а на этой машине служебная отвечает отказом в аутентификации.
     """
     server = sqlalchemy.create_engine(
@@ -93,19 +93,19 @@ def created_test_database() -> bool:
 def migrated() -> Iterator[None]:
     if not created_test_database():
         pytest.skip(f"Postgres недоступен на {settings.database_url}: сделайте make up")
-    stand = settings.database_url
+    working_database_url = settings.database_url
     settings.database_url = address_of_test_database()
     engine.cache_clear()
     command.upgrade(Config("alembic.ini"), "head")
     yield
     engine().dispose()
     engine.cache_clear()
-    settings.database_url = stand
+    settings.database_url = working_database_url
 
 
 @pytest.fixture
 def db(migrated: None) -> Iterator[None]:
-    # Проверка не церемония: строку `delete` без `where` отделяет от базы стенда одна настройка,
+    # Проверка не церемония: строку `delete` без `where` отделяет от рабочей базы одна настройка,
     # и однажды она уже смотрела не туда.
     assert settings.database_url.endswith(TEST_DATABASE)
     with session() as opened:

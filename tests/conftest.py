@@ -25,7 +25,7 @@ DISARMED = {
     "openai_api_key": "",
     # Не ключ, но тоже из .env: с KEEP_AUDIO=true у разработчика падал тест на удаление записи.
     "keep_audio": False,
-    # На стенде в .env стоит AUTO_APPROVE=true, и тест про ворота падал бы именно там.
+    # В локальном .env может стоять AUTO_APPROVE=true, и тест про ворота падал бы именно там.
     "auto_approve": False,
 }
 

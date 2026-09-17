@@ -29,7 +29,7 @@ def test_a_question_longer_than_a_message_is_sent_back_for_repair() -> None:
 def test_the_budget_of_questions_is_the_one_from_the_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """На стенде число меньше, чем в спокойной работе: человек ждёт у стола."""
+    """Бюджет вопросов берётся из настроек, а не из кода."""
     monkeypatch.setattr(settings, "max_brief_questions", 3)
 
     assert not budget_spent(2)

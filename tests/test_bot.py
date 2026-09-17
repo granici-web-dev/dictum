@@ -308,7 +308,7 @@ def test_every_stage_of_the_walk_has_something_to_show_a_person() -> None:
 def test_a_new_run_takes_the_gates_from_the_settings_and_not_from_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ворота — норма (CLAUDE.md §1), а стенд снимает их своим .env, а не умолчанием кода."""
+    """Ворота — норма (CLAUDE.md §1), а снимает их явный флаг в .env, а не умолчанием кода."""
     assert not started_run("прогон", 12, "text", text="Идея").auto_approve
 
     monkeypatch.setattr(settings, "auto_approve", True)
@@ -350,7 +350,7 @@ def ready_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Проверка на старте, а не на первом голосовом: у стенда это уже поздно."""
+    """Проверка на старте, а не на первом голосовом: на первом голосовом это уже поздно."""
     ready_to_start(monkeypatch)
     monkeypatch.setattr(bot, "installed", lambda tool: tool != "ffmpeg")
 
@@ -470,7 +470,7 @@ class QuietChat:
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_leaves_a_line_the_rehearsal_can_count(
+async def test_a_refusal_leaves_a_line_the_log_can_count(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Отчёт P2-06 считает отказы grep-ом, поэтому у каждого свой tag и id чата рядом."""
@@ -502,7 +502,10 @@ def test_the_bot_answers_while_a_run_is_walking(monkeypatch: pytest.MonkeyPatch)
 async def test_a_finished_run_reports_how_long_the_person_waited(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Репетиция (P2-06) спрашивает «сколько ждёт человек», и ответ идёт от отправки сообщения."""
+    """Отчёт серии живых прогонов (P2-06) спрашивает «сколько ждёт человек».
+
+    Ответ идёт от отправки сообщения.
+    """
     journal = tmp_path / "outputs/publish.json"
     journal.parent.mkdir(parents=True)
     journal.write_text('{"I-001": {}, "I-002": {}}', encoding="utf-8")
@@ -717,7 +720,7 @@ async def test_the_stop_is_answered_from_the_file_the_run_keeps(
 async def test_a_stop_whose_file_is_gone_says_so_and_closes_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
-    """`make clean-runs` между репетициями уносит расшифровку: повторять нечего, ждать тоже."""
+    """`make clean-runs` между прогонами уносит расшифровку: повторять нечего, ждать тоже."""
     listed(monkeypatch, "12")
     stopped = a_stopped_choice(tmp_path, monkeypatch)
     store.stop(12, stopped)
@@ -785,7 +788,7 @@ async def test_a_broken_redo_keeps_the_recording_and_the_stop(
 @pytest.mark.asyncio
 async def test_a_run_whose_files_are_gone_drops_the_stop_instead_of_looping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
-    """`make clean-runs` между репетициями уносит расшифровку: повторять станет нечего.
+    """`make clean-runs` между прогонами уносит расшифровку: повторять станет нечего.
 
     Остановка при этом копила бы один и тот же отказ на каждый следующий ответ человека.
     """
@@ -813,7 +816,10 @@ async def test_the_answer_to_a_choice_leaves_a_line_to_count(
     caplog: pytest.LogCaptureFixture,
     store: FakeStore,
 ) -> None:
-    """Отчёт репетиции (P2-06) считает воронку grep-ом: `stop=choice` был, ответов на него нет."""
+    """Отчёт серии живых прогонов (P2-06) считает воронку grep-ом.
+
+    `stop=choice` был, ответов на него нет.
+    """
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     seen: list[tuple[str, str, Redo | None]] = []
@@ -853,7 +859,7 @@ async def saved_empty(voice: Voice, target: Path) -> None:
 @pytest.mark.asyncio
 async def test_a_voice_always_starts_a_new_run_and_forgets_the_stopped_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
-    """На стенде следующий человек говорит голосом: его запись — не правка к чужому выбору."""
+    """Голосовое начинает новый прогон и снимает остановку, а не становится правкой к выбору."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
@@ -928,7 +934,7 @@ async def test_a_choice_after_a_voice_is_remembered_as_after_a_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore) -> None:
     """Живой прогон 664534620c9a1c10: остановку записывал только on_text, а голос её терял.
 
-    На стенде идею наговаривают, поэтому «1» после голосового уходило новым прогоном —
+    Идею наговаривают, поэтому «1» после голосового уходило новым прогоном —
     из одного слова, на чужом языке и без идеи внутри.
     """
     listed(monkeypatch, "12")
@@ -1350,7 +1356,7 @@ async def test_the_decision_on_a_gate_leaves_a_line_to_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Отчёт репетиции считает воронку grep-ом: сколько дошло до ворот и что там нажали."""
+    """Отчёт серии живых прогонов считает воронку grep-ом: сколько дошло до ворот и что нажали."""
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
 
@@ -1410,7 +1416,10 @@ async def test_a_voice_names_the_stop_it_took_away_from_the_chat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """На стенде следующий человек говорит голосом: чей выбор при этом пропал — вопрос к логу."""
+    """Голосовое начинает новый прогон и снимает остановку.
+
+    Чей выбор при этом пропал — вопрос к логу.
+    """
     listed(monkeypatch, "12")
     store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     monkeypatch.setattr(bot, "save_voice", saved_empty)
@@ -1462,7 +1471,7 @@ async def test_a_pressed_number_answers_the_choice_the_way_a_typed_one_does(
 ) -> None:
     """Кнопка и набранный номер — один ответ: та же стадия, тот же повтор, та же строка в логе.
 
-    `by=button` в ней и есть ответ на вопрос, ради которого кнопку заводили: у стенда перестали
+    `by=button` в ней и есть ответ на вопрос, ради которого кнопку заводили: перестали
     набирать текст или всё-таки набирают.
     """
     listed(monkeypatch, "12")
@@ -1756,7 +1765,7 @@ def forgotten_gates() -> Iterator[None]:
 async def test_gates_on_makes_the_next_run_stop_and_gates_off_makes_it_run_through(
     monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
-    """Ведущий переключает ворота, не гася бота: это второй акт показа."""
+    """Ворота переключаются, не гася бота."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(settings, "auto_approve", True)
 

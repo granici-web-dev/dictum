@@ -58,7 +58,7 @@ def nothing_around(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def a_run(root: Path, text: str = TEXT, auto_approve: bool = False) -> Run:
     """Прогон с воротами, как в продакшене: авто-подтверждение тест просит сам.
 
-    Дефолт `Run` повторён нарочно: с обратным тест молча уезжал бы в демо-режим и проходил
+    Дефолт `Run` повторён нарочно: с обратным тест молча уезжал бы в режим без ворот и проходил
     ворота, которые собирался проверить.
     """
     return Run(
@@ -66,7 +66,7 @@ def a_run(root: Path, text: str = TEXT, auto_approve: bool = False) -> Run:
     )
 
 
-def a_demo_run(root: Path, text: str = TEXT) -> Run:
+def an_auto_approved_run(root: Path, text: str = TEXT) -> Run:
     return a_run(root, text, auto_approve=True)
 
 
@@ -188,7 +188,7 @@ def test_a_full_walk_writes_every_artifact_under_its_own_root(
     root = tmp_path / "runs" / RUN_ID
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert walk(a_demo_run(root), "ingest", "decompose") is None
+    assert walk(an_auto_approved_run(root), "ingest", "decompose") is None
 
     for path in (TRANSCRIPT, IDEA, BRIEF, RESEARCH, PRD, ISSUES_JSON):
         assert (root / path).is_file(), path
@@ -201,7 +201,7 @@ def test_the_walk_stamps_the_run_id_it_was_given_into_the_issues(
 ) -> None:
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    walk(a_demo_run(tmp_path), "ingest", "decompose")
+    walk(an_auto_approved_run(tmp_path), "ingest", "decompose")
 
     issues = json.loads((tmp_path / ISSUES_JSON).read_text(encoding="utf-8"))
     assert issues["run_id"] == RUN_ID
@@ -214,7 +214,9 @@ def test_every_stage_reports_itself_once_and_in_order(
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     seen: list[str] = []
 
-    walk(a_demo_run(tmp_path), "ingest", "decompose", lambda stage: seen.append(stage.name))
+    walk(
+        an_auto_approved_run(tmp_path), "ingest", "decompose", lambda stage: seen.append(stage.name)
+    )
 
     assert seen == ["ingest", "intake", "brief", "research", "prd", "decompose"]
 
@@ -225,7 +227,7 @@ def test_a_walk_that_reaches_publish_puts_the_cards_on_the_board(
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     issues = real_issues()
 
-    assert walk(a_demo_run(tmp_path), "ingest", "publish") is None
+    assert walk(an_auto_approved_run(tmp_path), "ingest", "publish") is None
 
     made = board.posted("/1/cards")
     assert len(made) == len(issues.issues) + len(issues.deferred)
@@ -371,7 +373,7 @@ def test_an_auto_approved_run_walks_past_every_gate(
     """До publish, а не до decompose: иначе последние ворота гасит конец обхода, а не флаг."""
     llm([ok(IDEA_BLOCK), ok(BRIEF_BLOCK), ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
 
-    assert walk(a_demo_run(tmp_path), "ingest", "publish") is None
+    assert walk(an_auto_approved_run(tmp_path), "ingest", "publish") is None
 
     assert (tmp_path / "outputs/publish.json").is_file()
 
@@ -397,7 +399,7 @@ def test_candidates_stop_even_an_auto_approved_run(
     """Выбор — не ворота: подтверждать нечего, идею из нескольких выбирает человек."""
     llm([ok(CANDIDATES_BLOCK), ok(BRIEF_BLOCK)])
 
-    waiting = walk(a_demo_run(tmp_path), "ingest", "decompose")
+    waiting = walk(an_auto_approved_run(tmp_path), "ingest", "decompose")
 
     assert waiting is not None and waiting.kind == "choice"
 
@@ -421,7 +423,7 @@ def test_research_keeps_the_file_it_finds_and_writes_one_when_it_does_not(
     llm([ok(PRD_BLOCK), ok(ISSUES_BLOCKS)])
     (tmp_path / BRIEF).write_text("# Бриф\n", encoding="utf-8")
 
-    walk(a_demo_run(tmp_path), "research", "decompose")
+    walk(an_auto_approved_run(tmp_path), "research", "decompose")
 
     assert (tmp_path / RESEARCH).read_text(encoding="utf-8") == "Настоящий ресёрч.\n"
 
