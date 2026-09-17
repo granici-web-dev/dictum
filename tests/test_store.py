@@ -29,6 +29,7 @@ from app.store import (
     AWAITING_GATE,
     FAILED,
     PUBLISHED,
+    REFUSED,
     STATUS_OF_STOP,
     Base,
     RunRow,
@@ -250,6 +251,16 @@ def test_orphans_are_named_and_closed_but_finished_runs_are_left_alone(db: None)
     with session() as opened:
         assert opened.get(RunRow, "живой").status == FAILED  # type: ignore[union-attr]
         assert opened.get(RunRow, "готовый").status == PUBLISHED  # type: ignore[union-attr]
+
+
+def test_fail_orphans_ignores_refused(db: None) -> None:
+    """Отвергнутая запись закрыта: уборка на старте не должна объявить её прерванной."""
+    start_run("отвергнутый", 12, "file", "ru", False, True)
+    finish_run("отвергнутый", REFUSED)
+
+    assert fail_orphans() == []
+    with session() as opened:
+        assert opened.get(RunRow, "отвергнутый").status == REFUSED  # type: ignore[union-attr]
 
 
 def test_moving_on_forgets_where_the_run_had_stopped(db: None) -> None:

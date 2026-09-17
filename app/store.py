@@ -44,6 +44,9 @@ AWAITING_GATE = "awaiting_gate"
 AWAITING_ANSWER = "awaiting_answer"
 PUBLISHED = "published"
 NO_TASK = "no_task"
+# Запись отвергнута до расшифровки: её никто не слушал. `no_task` сказал бы о её содержимом, что
+# задания в ней нет, а этого никто не знает.
+REFUSED = "refused"
 DROPPED = "dropped"
 FAILED = "failed"
 

@@ -17,7 +17,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 from telegram import (
+    Audio,
     CallbackQuery,
+    Document,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -56,6 +58,7 @@ from app.run import Pause, Redo, Run, read_artifact, walk
 from app.store import (
     FAILED,
     NO_TASK,
+    REFUSED,
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
@@ -69,7 +72,14 @@ from app.store import (
     stop_run,
     waiting_for,
 )
-from app.transcribe import FFMPEG_MISSING, NothingHeard, TranscriptionError, ffmpeg_installed
+from app.transcribe import (
+    FFMPEG_MISSING,
+    FFPROBE_MISSING,
+    NothingHeard,
+    TranscriptionError,
+    installed,
+    recording_seconds,
+)
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
 # "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
@@ -87,6 +97,12 @@ VOICE_FILE = "inputs/voice.oga"
 # «длиннее 1 минут» на лимите в 90 с.
 MAX_VOICE_MINUTES = 2
 MAX_VOICE_SECONDS = MAX_VOICE_MINUTES * 60
+# Запись созвона длиннее голосового, но расшифровывается одним запросом: нарезки ещё нет (P3-03).
+MAX_FILE_MINUTES = 20
+MAX_FILE_SECONDS = MAX_FILE_MINUTES * 60
+# Предел getFile у Bot API: файл крупнее бот скачать не может, и спрашивать о нём согласие незачем.
+MAX_FILE_MEGABYTES = 20
+MAX_FILE_BYTES = MAX_FILE_MEGABYTES * 1024 * 1024
 
 LABEL = {
     "ingest": "принял идею",
@@ -101,6 +117,8 @@ LABEL = {
 # Голосовое расшифровывается на той же стадии, что принимает текст, а метка стадии живёт в
 # сообщении и с «▸», и с «✓»: отглагольное существительное читается верно в обоих.
 VOICE_INGEST_LABEL = "расшифровка голосового"
+FILE_INGEST_LABEL = "расшифровка записи"
+INGEST_LABEL: dict[Source, str] = {"voice": VOICE_INGEST_LABEL, "file": FILE_INGEST_LABEL}
 
 GATES_ON, GATES_OFF = "on", "off"
 
@@ -129,12 +147,32 @@ TOO_LONG = (
     "Наговорите покороче или пришлите текстом."
 )
 
-UNSUPPORTED = (
-    "Принимаю голосовое и текст. Файл с диктофона будет позже: к нему нужно подтверждение, "
-    "что все участники записи согласны."
-)
+UNSUPPORTED = "Принимаю голосовое, текст и запись с диктофона (mp3, m4a, wav)."
 
 VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
+
+FILE_TOO_BIG = (
+    f"Файл больше {MAX_FILE_MEGABYTES} МБ: такой Telegram боту не отдаёт. "
+    "Пересохраните запись в mp3 или пришлите её частями."
+)
+
+FILE_TOO_LONG = (
+    f"Запись длиннее {MAX_FILE_MINUTES} минут я пока не расшифровываю. Пришлите её частями."
+)
+
+FILE_NOT_TAKEN = "Не смог забрать запись из Telegram. Пришлите её ещё раз."
+
+# Согласие спрашивается до скачивания (SPEC §3.1): чужая запись без согласия не должна лежать у
+# нас даже на диске. Куда уходит запись, сказано в самом вопросе: соглашаются на это, а не на
+# абстрактную «обработку».
+CONSENT_QUESTION = (
+    "Запись уйдёт на расшифровку в OpenAI, за пределы EU. Все, чьи голоса в ней есть, знали о "
+    "записи и согласны на это?"
+)
+
+CONSENT_YES, CONSENT_NO = "consent:yes", "consent:no"
+
+CONSENT_BUTTONS = ((CONSENT_YES, "Да, все согласны"), (CONSENT_NO, "Нет"))
 
 HEARD = "Вот что я услышал:"
 
@@ -248,8 +286,7 @@ def allowed_chats() -> frozenset[int]:
 
 def progress_text(run: Run, done: list[str]) -> str:
     labels = dict(LABEL)
-    if run.source == "voice":
-        labels[FIRST_STAGE] = VOICE_INGEST_LABEL
+    labels[FIRST_STAGE] = INGEST_LABEL.get(run.source, LABEL[FIRST_STAGE])
     lines = [f"Прогон {run.run_id}", ""]
     marked_current = False
     for stage in stages_between(FIRST_STAGE, LAST_STAGE):
@@ -275,7 +312,12 @@ def finished_text(root: Path) -> str:
 
 
 def started_run(
-    run_id: str, chat_id: int, source: Source = "text", text: str = "", audio: Path | None = None
+    run_id: str,
+    chat_id: int,
+    source: Source = "text",
+    text: str = "",
+    audio: Path | None = None,
+    consent_confirmed: bool | None = None,
 ) -> Run:
     """Новый прогон из чата. Ворота снимает режим чата (SPEC §3.2), а не отсутствие кнопок.
 
@@ -289,6 +331,7 @@ def started_run(
         text=text,
         audio=audio,
         source=source,
+        consent_confirmed=consent_confirmed,
         auto_approve=auto_approve_for(chat_id),
     )
 
@@ -320,33 +363,46 @@ def permitted(message: Message) -> bool:
     return False
 
 
-async def refuse(message: Message, tag: str, text: str, **facts: object) -> None:
+async def refuse(
+    message: Message, tag: str, text: str, note: Message | None = None, **facts: object
+) -> None:
     """Отвечает отказом и оставляет счётную запись.
 
     Отчёт репетиции (P2-06) отвечает на вопрос «сколько человек упёрлось» числом, а не памятью,
     поэтому у каждого отказа свой tag: `grep -c "refusal=busy"` и есть ответ. Через одну дверь
     ходят все отказы, иначе формат разъедется и считать придётся глазами.
+
+    С `note` отказ правит сообщение о ходе прогона, а не отвечает новым: прогон уже начат, и
+    оставленные под отказом галочки читались бы как прогон, который ещё идёт.
     """
     written = "".join(f" {name}={value}" for name, value in facts.items())
     logger.info("refusal=%s chat=%s%s", tag, message.chat_id, written)
-    await message.reply_text(text)
+    if note is None:
+        await message.reply_text(text)
+    else:
+        await note.edit_text(text)
 
 
-def voice_seconds(voice: Voice) -> int:
+def reported_seconds(recording: Voice | Audio) -> int:
     # Сегодня PTB отдаёт число при любом входе, и ветка с timedelta недостижима. Она стоит
     # потому, что тип объявлен `int | timedelta`, а с флагом PTB_TIMEDELTA (который станет
     # умолчанием) станет достижимой. Тест на неё написать нечем: флаг читается при импорте.
-    duration = voice.duration
+    duration = recording.duration
     return round(duration.total_seconds()) if isinstance(duration, timedelta) else duration
 
 
 def too_long(voice: Voice) -> bool:
-    return voice_seconds(voice) > MAX_VOICE_SECONDS
+    return reported_seconds(voice) > MAX_VOICE_SECONDS
 
 
 async def save_voice(voice: Voice, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     await (await voice.get_file()).download_to_drive(target)
+
+
+async def save_recording(recording: Audio | Document, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    await (await recording.get_file()).download_to_drive(target)
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -435,7 +491,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if too_long(message.voice):
         # Длительность в записи, а не только тег: на репетиции важно, насколько именно
         # переговорили лимит, иначе непонятно, двигать его или оставить.
-        await refuse(message, "too_long", TOO_LONG, seconds=voice_seconds(message.voice))
+        await refuse(message, "too_long", TOO_LONG, seconds=reported_seconds(message.voice))
         return
     if running.locked():
         await refuse(message, "busy", BUSY)
@@ -610,6 +666,105 @@ async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Клавиатуру не снимаем, как и на «Править»: сорвавшийся повтор возвращает остановку.
         note = await message.reply_text(progress_text(run, done_before(stopped.stage)))
         await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
+
+
+async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запись с диктофона: сначала вопрос о согласии, и больше ничего (SPEC §3.1).
+
+    Замок здесь не проверяется: вопрос ничего не стоит, а прогон начинает нажатие, и замок
+    проверит оно.
+    """
+    message = update.message
+    if message is None or not permitted(message):
+        return
+    recording = message.audio or message.document
+    if recording is None:
+        return
+    if recording.file_size is not None and recording.file_size > MAX_FILE_BYTES:
+        await refuse(message, "too_big", FILE_TOO_BIG, bytes=recording.file_size)
+        return
+    if message.audio and reported_seconds(message.audio) > MAX_FILE_SECONDS:
+        await refuse(
+            message, "file_too_long", FILE_TOO_LONG, seconds=reported_seconds(message.audio)
+        )
+        return
+    # Ответом на сам файл: нажатие берёт запись из этого ответа, а в личном чате PTB без
+    # do_quote не цитирует, и файла у кнопки не нашлось бы.
+    await message.reply_text(CONSENT_QUESTION, reply_markup=consent_keyboard(), do_quote=True)
+
+
+async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ответ на вопрос о согласии. Только «Да» скачивает запись и начинает прогон."""
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("consent=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    # Согласие даёт тот, кто нажал, а не тот, кто прислал файл: в группе это разные люди.
+    by = query.from_user.id
+    if query.data == CONSENT_NO:
+        logger.info("consent=no chat=%s by=%s", message.chat_id, by)
+        with suppress(TelegramError):
+            await query.edit_message_reply_markup(reply_markup=None)
+        return
+    if query.data != CONSENT_YES:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    if running.locked():
+        await refuse(message, "busy", BUSY, consent="yes", by=by)
+        return
+    sent = message.reply_to_message
+    recording = sent and (sent.audio or sent.document)
+    if not recording:
+        # Файл удалили из чата: скачивать нечего, а в данных кнопки его нет (64 байта).
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+
+    async with running:
+        with suppress(TelegramError):
+            await query.edit_message_reply_markup(reply_markup=None)
+        run_id = new_run_id()
+        audio = RUNS / run_id / f"inputs/recording{Path(recording.file_name or '').suffix}"
+        run = started_run(
+            run_id, message.chat_id, source="file", audio=audio, consent_confirmed=True
+        )
+        await asyncio.to_thread(
+            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve, True
+        )
+        logger.info("start=file run=%s chat=%s", run_id, message.chat_id)
+        logger.info("consent=yes chat=%s by=%s run=%s", message.chat_id, by, run_id)
+        note = await message.reply_text(progress_text(run, []))
+        try:
+            await save_recording(recording, audio)
+        except TelegramError:
+            logger.exception("Прогон %s не забрал запись", run_id)
+            await asyncio.to_thread(finish_run, run_id, FAILED)
+            await note.edit_text(FILE_NOT_TAKEN)
+            return
+        try:
+            seconds = await asyncio.to_thread(recording_seconds, audio)
+        except TranscriptionError as error:
+            logger.warning("Прогон %s не узнал длину записи: %s", run_id, error)
+            await asyncio.to_thread(finish_run, run_id, FAILED)
+            await note.edit_text(str(error))
+            return
+        if seconds > MAX_FILE_SECONDS:
+            # Удаляется при любом KEEP_AUDIO: расшифровывать её никто не будет, а чужая запись
+            # не должна лежать у нас дольше, чем нужна.
+            audio.unlink()
+            await asyncio.to_thread(finish_run, run_id, REFUSED)
+            await refuse(message, "file_too_long", FILE_TOO_LONG, note=note, seconds=seconds)
+            return
+        # Остановку снимаем только теперь: отвергнутый файл не должен стоить человеку его
+        # ответа на воротах.
+        dropped = await asyncio.to_thread(drop_stop, message.chat_id)
+        logger.info("run=%s dropped=%s", run_id, dropped or NO_RUN)
+        await follow(note, run, datetime.now(timezone.utc))
 
 
 async def on_anything_else(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -810,6 +965,14 @@ def assemble_keyboard(run_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def consent_keyboard() -> InlineKeyboardMarkup:
+    # Запись в данных кнопки не лежит: file_id не влезает в 64 байта callback_data. Её берут из
+    # сообщения, на которое отвечает вопрос.
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(title, callback_data=data) for data, title in CONSENT_BUTTONS]]
+    )
+
+
 def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
     # Кнопка называет и прогон, и ворота, на которых она выросла. Одного прогона мало: «Править»
     # кнопок не снимает, поэтому у прогона в чате остаётся живое сообщение прошлых ворот, и
@@ -988,15 +1151,17 @@ def main() -> None:
             "он отвечал бы отказом на каждое сообщение."
         )
     allowed_chats()
-    # Ключ и ffmpeg — на старте по одной причине: без любого из них голосовое не расшифровать, а
-    # узнать об этом на первом сообщении со стенда значит показать людям «прогон сорвался».
+    # Ключ, ffmpeg и ffprobe — на старте по одной причине: без любого из них запись не
+    # расшифровать, а узнать об этом на первой записи значит получить «прогон сорвался».
     if not settings.openai_api_key:
         raise MissingApiKey(
             "OPENAI_API_KEY не задан, а без него голосовое не расшифровать. "
             "Скопируйте .env.example в .env и заполните."
         )
-    if not ffmpeg_installed():
+    if not installed("ffmpeg"):
         raise ConfigError(FFMPEG_MISSING)
+    if not installed("ffprobe"):
+        raise ConfigError(FFPROBE_MISSING)
     ensure_schema()
     # Режим прогона — в лог одной строкой: утренний чек-лист стенда спрашивает, сняты ли
     # ворота, и ответ на это не должен зависеть от памяти о содержимом .env.
@@ -1017,9 +1182,13 @@ def main() -> None:
     application.add_handler(CommandHandler("gates", on_gates))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
+    application.add_handler(
+        MessageHandler(filters.AUDIO | filters.Document.AUDIO, on_recording)
+    )
     application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
     application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
     application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
+    application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек у стенда читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не

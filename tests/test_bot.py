@@ -10,7 +10,7 @@ from typing import Any, cast, get_args
 
 import pytest
 from sqlalchemy.exc import OperationalError
-from telegram import InlineKeyboardMarkup, Message, Update, Voice
+from telegram import Audio, Document, InlineKeyboardMarkup, Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
@@ -21,7 +21,15 @@ from app.bot import (
     ASSEMBLE_BUTTON,
     BROKEN_REDO,
     BUSY,
+    CONSENT_NO,
+    CONSENT_QUESTION,
+    CONSENT_YES,
     EMPTY,
+    FILE_INGEST_LABEL,
+    FILE_TOO_BIG,
+    FILE_TOO_LONG,
+    MAX_FILE_BYTES,
+    MAX_FILE_SECONDS,
     FIRST_STAGE,
     GATE_EDIT_ASKED,
     GATE_STOPPED,
@@ -46,6 +54,8 @@ from app.bot import (
     main,
     on_assemble_button,
     on_choice_button,
+    on_consent_button,
+    on_recording,
     on_gate_button,
     on_start,
     on_text,
@@ -84,6 +94,7 @@ from app.store import (
     FAILED,
     NO_TASK,
     PUBLISHED,
+    REFUSED,
     STATUS_OF_STOP,
     Stopped,
 )
@@ -159,7 +170,11 @@ class FakeStore:
 
     def finish_run(self, run_id: str, status: str) -> None:
         self.status[run_id] = status
-        self.stops.pop(self.chats.get(run_id, 0), None)
+        # Как и настоящий `finish_run`, закрывает строку своего прогона: остановку другого
+        # прогона в том же чате он не трогает.
+        chat_id = self.chats.get(run_id, 0)
+        if chat_id in self.stops and self.stops[chat_id].run_id == run_id:
+            del self.stops[chat_id]
 
     def drop_stop(self, chat_id: int) -> str | None:
         left = self.stops.pop(chat_id, None)
@@ -319,7 +334,7 @@ def ready_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "allow_live_api", True)
     monkeypatch.setattr(settings, "openai_api_key", "test")
     listed(monkeypatch, "12")
-    monkeypatch.setattr(bot, "ffmpeg_installed", lambda: True)
+    monkeypatch.setattr(bot, "installed", lambda tool: True)
     monkeypatch.setattr(bot, "ensure_schema", lambda: None)
     monkeypatch.setattr(bot, "one_bot_per_database", database_of_nobody)
 
@@ -327,9 +342,18 @@ def ready_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_bot_does_not_start_without_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
     """Проверка на старте, а не на первом голосовом: у стенда это уже поздно."""
     ready_to_start(monkeypatch)
-    monkeypatch.setattr(bot, "ffmpeg_installed", lambda: False)
+    monkeypatch.setattr(bot, "installed", lambda tool: tool != "ffmpeg")
 
-    with pytest.raises(ConfigError, match="ffmpeg"):
+    with pytest.raises(ConfigError, match="ffmpeg не найден"):
+        main()
+
+
+def test_bot_does_not_start_without_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без ffprobe длину записи с диктофона не узнать, и лимит в 20 минут стоял бы на словах."""
+    ready_to_start(monkeypatch)
+    monkeypatch.setattr(bot, "installed", lambda tool: tool != "ffprobe")
+
+    with pytest.raises(ConfigError, match="ffprobe"):
         main()
 
 
@@ -2018,3 +2042,261 @@ async def test_a_broken_answer_keeps_the_question_so_it_can_be_answered_again(
 def test_every_kind_of_stop_has_something_to_say_when_the_redo_falls() -> None:
     """Забытый род оставил бы человека без единого слова о сорвавшемся повторе."""
     assert set(BROKEN_REDO) == set(get_args(StopKind))
+
+
+class RecordingChat(TextChat):
+    """Присланная запись: аудио или документ, и вопрос, которым бот на неё отвечает."""
+
+    def __init__(self, audio: Audio | None = None, document: Document | None = None) -> None:
+        super().__init__("")
+        self.audio = audio
+        self.document = document
+        self.markups: list[object] = []
+        self.quoted: list[bool | None] = []
+
+    async def reply_text(
+        self, text: str, reply_markup: object = None, do_quote: bool | None = None
+    ) -> Message:
+        self.markups.append(reply_markup)
+        self.quoted.append(do_quote)
+        return await super().reply_text(text)
+
+
+class SentRecording:
+    """Запись в сообщении, на которое отвечает вопрос: скачивается в файл и помнит, что скачана."""
+
+    def __init__(self, file_name: str | None = "созвон.m4a") -> None:
+        self.file_name = file_name
+        self.fetched = 0
+
+    async def get_file(self) -> "SentRecording":
+        self.fetched += 1
+        return self
+
+    async def download_to_drive(self, target: Path) -> Path:
+        target.write_bytes(b"m4a")
+        return target
+
+
+class ConsentPress(ButtonChat):
+    """Нажатие под вопросом о согласии: нажимает человек 99, файл лежит в сообщении выше."""
+
+    def __init__(self, data: str, recording: SentRecording | None) -> None:
+        super().__init__(data)
+        self.from_user = SimpleNamespace(id=99)
+        self.reply_to_message = (
+            None
+            if recording is None
+            else SimpleNamespace(audio=None, document=recording, from_user=SimpleNamespace(id=7))
+        )
+
+
+def an_audio(seconds: int = 60, size: int = 1024) -> Audio:
+    return Audio(
+        file_id="f", file_unique_id="u", duration=seconds, file_name="созвон.mp3", file_size=size
+    )
+
+
+def a_document(size: int = 1024) -> Document:
+    return Document(
+        file_id="f",
+        file_unique_id="u",
+        file_name="созвон.wav",
+        mime_type="audio/x-wav",
+        file_size=size,
+    )
+
+
+def walk_remembering_runs(seen: list[Run]) -> Walking:
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append(run)
+        return Pause(stage="intake", artifact=CANDIDATES, kind="choice")
+
+    return walking
+
+
+def never_walks(
+    run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+) -> Pause | None:
+    raise AssertionError("прогон пошёл без согласия")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent", ["audio", "document"])
+async def test_recording_asks_consent_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, sent: str
+) -> None:
+    """mp3 приходит аудио, wav документом: оба спрашивают, и ни один ещё ничего не стоит."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = RecordingChat(an_audio()) if sent == "audio" else RecordingChat(document=a_document())
+
+    await on_recording(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [CONSENT_QUESTION]
+    assert chat.quoted == [True]
+    keyboard = cast(InlineKeyboardMarkup, chat.markups[0])
+    assert [button.callback_data for button in keyboard.inline_keyboard[0]] == [
+        CONSENT_YES,
+        CONSENT_NO,
+    ]
+    assert store.started == []
+    assert not (tmp_path / "runs").exists()
+
+
+@pytest.mark.asyncio
+async def test_gate_blocks_audio_without_consent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", never_walks)
+    recording = SentRecording()
+    press = ConsentPress(CONSENT_NO, recording)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    assert recording.fetched == 0
+    assert store.started == []
+    assert not (tmp_path / "runs").exists()
+    assert press.markups == [None]
+    assert "consent=no chat=12 by=99" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_consent_yes_starts_file_run_from_replied_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Согласие называет нажавшего (99), а не приславшего файл (7): в группе это разные люди."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
+    seen: list[Run] = []
+    monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
+    recording = SentRecording()
+    press = ConsentPress(CONSENT_YES, recording)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, chat_id, source)] = store.started
+    assert (chat_id, source, store.consents[run_id]) == (12, "file", True)
+    assert press.markups == [None]
+    assert press.replies[0].splitlines()[2] == f"▸ {FILE_INGEST_LABEL}"
+    [run] = seen
+    assert (run.run_id, run.source, run.consent_confirmed) == (run_id, "file", True)
+    assert run.audio == tmp_path / "runs" / run_id / "inputs/recording.m4a"
+    assert run.audio.exists()
+    assert f"start=file run={run_id} chat=12" in caplog.text
+    assert f"consent=yes chat=12 by=99 run={run_id}" in caplog.text
+    assert "by=7" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sent", ["audio", "document"])
+async def test_recording_over_20_mb_refused_before_consent(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture, sent: str
+) -> None:
+    listed(monkeypatch, "12")
+    size = MAX_FILE_BYTES + 1
+    chat = (
+        RecordingChat(an_audio(size=size))
+        if sent == "audio"
+        else RecordingChat(document=a_document(size=size))
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_recording(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [FILE_TOO_BIG]
+    assert f"refusal=too_big chat=12 bytes={size}" in caplog.text
+    assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_audio_over_20_minutes_refused_before_consent(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    listed(monkeypatch, "12")
+    at_limit = RecordingChat(an_audio(seconds=MAX_FILE_SECONDS))
+    over = RecordingChat(an_audio(seconds=MAX_FILE_SECONDS + 1))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_recording(an_update(at_limit), NO_CONTEXT)
+        await on_recording(an_update(over), NO_CONTEXT)
+
+    assert at_limit.replies == [CONSENT_QUESTION]
+    assert over.replies == [FILE_TOO_LONG]
+    assert f"refusal=file_too_long chat=12 seconds={MAX_FILE_SECONDS + 1}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_file_over_20_minutes_refused_after_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Длину документа клиент не называет, а у аудио она бывает неверной: мерит ffprobe."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(settings, "keep_audio", True)
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "recording_seconds", lambda path: MAX_FILE_SECONDS + 1)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    press = ConsentPress(CONSENT_YES, SentRecording())
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, _, _)] = store.started
+    assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
+    assert store.status[run_id] == REFUSED
+    assert store.stops[12].run_id == "прогон"
+    assert press.edits == [FILE_TOO_LONG]
+    assert f"refusal=file_too_long chat=12 seconds={MAX_FILE_SECONDS + 1}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_consent_press_during_run_is_busy_and_keeps_keyboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    recording = SentRecording()
+    press = ConsentPress(CONSENT_YES, recording)
+    await bot.running.acquire()
+    try:
+        await on_consent_button(a_press(press), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert press.replies == [BUSY]
+    assert press.markups == []
+    assert recording.fetched == 0
+    assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_consent_press_without_replied_message_is_stale(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Файл удалили из чата: кнопка его не помнит, и скачивать нечего."""
+    listed(monkeypatch, "12")
+    press = ConsentPress(CONSENT_YES, None)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_consent_button(a_press(press), NO_CONTEXT)
+
+    assert press.replies == [STALE_BUTTON]
+    assert "refusal=stale_button chat=12" in caplog.text
+    assert store.started == []

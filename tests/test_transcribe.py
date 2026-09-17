@@ -6,7 +6,7 @@ import pytest
 
 from app import transcribe
 from app.config import LiveApiNotAllowed, settings
-from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3
+from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3, recording_seconds
 from tests.helpers import InstallResponses, heard
 
 RUN = "прогон-для-теста"
@@ -177,3 +177,41 @@ def test_an_mp3_recording_is_not_recoded_onto_itself(
     source = tmp_path / "recording.mp3"
 
     assert convert_to_mp3(source) != source
+
+
+def test_recording_seconds_reads_ffprobe_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[list[str]] = []
+
+    def probed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(command)
+        return subprocess.CompletedProcess(command, 0, "1201.48\n", "")
+
+    monkeypatch.setattr(subprocess, "run", probed)
+    recording = tmp_path / "recording.m4a"
+
+    assert recording_seconds(recording) == 1201
+    assert asked[0][0] == "ffprobe"
+    assert asked[0][-1] == str(recording)
+
+
+def unreadable(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise subprocess.CalledProcessError(1, command, stderr="recording.m4a: Invalid data found\n")
+
+
+def without_duration(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(command, 0, "N/A\n", "")
+
+
+@pytest.mark.parametrize("probe", [unreadable, without_duration])
+def test_recording_seconds_raises_on_unreadable_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: object,
+) -> None:
+    """Сбой ffprobe называет файл: человек увидит этот текст вместо расшифровки."""
+    monkeypatch.setattr(subprocess, "run", probe)
+
+    with pytest.raises(TranscriptionError, match="recording.m4a"):
+        recording_seconds(tmp_path / "recording.m4a")

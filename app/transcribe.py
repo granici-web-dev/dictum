@@ -37,6 +37,11 @@ FFMPEG_MISSING = (
     "brew install ffmpeg на macOS, apt install ffmpeg на Debian."
 )
 
+FFPROBE_MISSING = (
+    "ffprobe не найден, а без него не узнать длину записи с диктофона. Он ставится вместе с "
+    "ffmpeg: brew install ffmpeg на macOS, apt install ffmpeg на Debian."
+)
+
 NOTHING_HEARD = "В записи не разобрать речи. Наговорите ещё раз, поближе к микрофону."
 
 # Хвост stderr, а не весь вывод: ffmpeg печатает баннер сборки на десяток строк, а причина
@@ -54,21 +59,59 @@ class TranscriptionError(RuntimeError):
     """Сообщение пишется человеку: бот показывает его как есть, не пряча в лог."""
 
 
-
-
 class NothingHeard(TranscriptionError):
     """Расшифровка удалась, а говорить было нечего: пустая запись, не поломка.
 
     Разные вещи и по строке в `runs`: сломанный ffmpeg — `failed`, тишина — `no_task`.
     """
-def ffmpeg_installed() -> bool:
+
+
+def installed(tool: str) -> bool:
     # OSError, а не только FileNotFoundError: файл бывает на месте, но без права на запуск, и
     # тогда старт должен назвать причину, а не упасть трассировкой.
     try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        subprocess.run([tool, "-version"], capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError):
         return False
     return True
+
+
+def recording_seconds(recording: Path) -> int:
+    """Длительность записи, прочитанная из самого файла.
+
+    Длительность у присланного аудио называет клиент Telegram, и она бывает неверной: лимит,
+    поставленный по ней, пропускал бы длинную запись на расшифровку.
+    """
+    try:
+        probed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(recording),
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise TranscriptionError(FFPROBE_MISSING) from error
+    except subprocess.CalledProcessError as error:
+        raise TranscriptionError(
+            f"ffprobe не смог прочитать {recording.name}: {error.stderr.strip()[-STDERR_TAIL:]}"
+        ) from error
+    # У потока без длительности ffprobe печатает «N/A» и выходит с нулём.
+    try:
+        return round(float(probed.stdout.strip()))
+    except ValueError as error:
+        raise TranscriptionError(
+            f"ffprobe не назвал длительность {recording.name}. Пересохраните запись "
+            "в mp3, m4a или wav и пришлите ещё раз."
+        ) from error
 
 
 def convert_to_mp3(source: Path) -> Path:
