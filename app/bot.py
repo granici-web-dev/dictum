@@ -1,4 +1,5 @@
-"""Telegram-бот: запись, голосовое или текст → разбор встречи. См. SPEC.md §7.3.
+"""Telegram-бот: запись, голосовое или текст → разбор встречи, а кнопками под ним поручение или
+вся запись как идея до карточек. См. SPEC.md §7.3.
 
 Единственный асинхронный модуль (CONVENTIONS): пайплайн синхронный и уходит в поток, а обратно
 докладывает через цикл событий. Решения, которые можно принять без Telegram, вынесены функциями —
@@ -108,6 +109,9 @@ logger = logging.getLogger("app.bot")
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 TASK_ROUTE_START, TASK_ROUTE_END = "assignment", "card"
+IDEA_ROUTE_START = "handoff"
+# Журнал публикации лежит рядом с файлом, который путь кладёт на доску: у каждого пути свой.
+BOARD_CONTRACT = {TASK_ROUTE_START: STEPS_JSON, IDEA_ROUTE_START: ISSUES_JSON}
 VOICE_FILE = "inputs/voice.oga"
 
 # TODO(P3-09): одна граница длины для голосового и файла.
@@ -123,7 +127,7 @@ MAX_FILE_MEGABYTES = 20
 MAX_FILE_BYTES = MAX_FILE_MEGABYTES * 1024 * 1024
 
 LABEL = {
-    "ingest": "принял идею",
+    "ingest": "принял текст",
     "review": "разбор встречи",
     "handoff": "взял расшифровку разбора",
     "intake": "выделил суть",
@@ -146,8 +150,11 @@ INGEST_LABEL: dict[Source, str] = {"voice": VOICE_INGEST_LABEL, "file": FILE_ING
 GATES_ON, GATES_OFF = "on", "off"
 
 GATES_STATE = {
-    False: "Ворота включены: поручение встанет на шагах, прежде чем попасть на доску.",
-    True: "Ворота выключены: поручение идёт до доски без подтверждения шагов.",
+    False: (
+        "Ворота включены. Своя идея встанет на вопросы брифа, на бриф и на задачи, поручение "
+        "встанет на шаги, прежде чем попасть на доску."
+    ),
+    True: "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов.",
 }
 
 GATES_FROM_NEXT_RUN = " Это со следующего прогона, идущий доходит со своим режимом."
@@ -160,12 +167,14 @@ GREETING = (
     "Пришлите запись встречи файлом, голосовое или текст. Я выпишу все поручения: кто поручил, "
     "срок, что не надо и что переспросить, со сказанным в оригинале и переводом.\n"
     "Кнопка «Разложить на шаги» под поручением разложит его на шаги и положит карточкой в Trello.\n"
+    "Кнопка «Проработать как идею» под оглавлением разбора проведёт всю запись путём своей идеи: "
+    "вопросы, бриф, задачи и карточки на доске идей.\n"
     "Это займёт пару минут, я буду писать после каждого шага."
 )
 
 BUSY = "Прогон уже идёт, дождитесь его конца."
 
-EMPTY = "Пустое сообщение. Пришлите идею словами или номер из списка."
+EMPTY = "Пустое сообщение. Пришлите текст словами."
 
 TOO_LONG = (
     f"Голосовое длиннее {MAX_VOICE_MINUTES} минут я пока не расшифровываю. "
@@ -228,7 +237,7 @@ GATE_TAIL = "Дальше — кнопкой. Правку пришлите те
 
 GATE_EDIT_ASKED = "Пришлите правку одним сообщением: что поменять в этом шаге."
 
-GATE_STOPPED = "Остановил прогон {run_id}. Пришлите новую идею, когда будет готово."
+GATE_STOPPED = "Остановил прогон {run_id}."
 
 STALE_BUTTON = "Эти кнопки от прогона, который уже не ждёт ответа."
 
@@ -241,6 +250,17 @@ STOP_ALIVE = (
 
 TASK_BUTTON = "Разложить на шаги"
 
+IDEA = "idea"
+
+IDEA_BUTTON = "Проработать как идею"
+
+# Отказ до замка и до строки: без доски путь идеи оплатил бы бриф, PRD и декомпозицию, чтобы
+# упасть на публикации.
+IDEA_BOARD_MISSING = (
+    "Доска для идей не настроена: впишите TRELLO_IDEA_BOARD_ID в .env и перезапустите бота. "
+    "Без неё путь идеи дойдёт до публикации и там упадёт."
+)
+
 PARENT_GONE = (
     "Файлы этого разбора удалены с диска, кнопка больше не работает. Пришлите запись заново."
 )
@@ -250,6 +270,10 @@ ALREADY_PUBLISHED = "Поручение {number} уже на доске: кар�
 TASK_FILES_GONE = (
     "Поручение {number} уже на доске, но файлы его прогона удалены с диска, и ссылки на карточку "
     "у меня нет. Ищите её в списке Assignments по строке run:{run_id} в описании."
+)
+
+IDEA_ALREADY_PUBLISHED = (
+    "Эта запись уже проработана как идея, прогон {run_id}: карточки на доске идей.\n{url}"
 )
 
 CARD_FINISHED = f"Готово: карточка {{key}} в списке {ASSIGNMENTS_LIST}.\n{{url}}"
@@ -279,7 +303,8 @@ ASSEMBLE_ASKED = (
 LOST = "Файлы прогона {run_id} не нашлись. Пришлите запись заново."
 
 ORPHANED = (
-    "Бот перезапустился, прогон {run_id} прерван на стадии {stage} — пришлите идею заново."
+    "Бот перезапустился, прогон {run_id} прерван на стадии {stage}. Пришлите запись заново или "
+    "нажмите кнопку под разбором ещё раз."
 )
 
 # PTB типизирует Application шестью параметрами; здесь важен только сам объект.
@@ -355,11 +380,12 @@ def cards_published(root: Path) -> int:
     return len(json.loads(journal_of(root / ISSUES_JSON).read_text(encoding="utf-8")))
 
 
+def idea_board_url() -> str:
+    return f"https://trello.com/b/{settings.trello_idea_board_id}"
+
+
 def finished_text(root: Path) -> str:
-    return (
-        f"Готово: {cards_published(root)} карточек.\n"
-        f"https://trello.com/b/{settings.trello_idea_board_id}"
-    )
+    return f"Готово: {cards_published(root)} карточек.\n{idea_board_url()}"
 
 
 def task_card(root: Path) -> PublishedCard:
@@ -394,28 +420,34 @@ def started_run(
     )
 
 
-def child_run(run_id: str, parent: Parent, number: int, auto_approve: bool) -> Run:
-    """Прогон по поручению из разбора: язык и источник записи — факты родителя (§4.1)."""
+def child_run(run_id: str, parent: Parent, number: int | None, auto_approve: bool) -> Run:
+    """Прогон по выбору из разбора: поручение `number` или, при None, вся запись как идея.
+
+    Язык и источник записи — факты родителя (§4.1). Вопросы брифа идут там же, где ворота: кто
+    готов подтверждать, готов и отвечать (§3.2).
+    """
     return Run(
         root=RUNS / run_id,
         run_id=run_id,
         lang=parent.lang,
         source=parent.source,
         auto_approve=auto_approve,
+        interactive=not auto_approve,
         parent_root=RUNS / parent.run_id,
         parent_run_id=parent.run_id,
         assignment=number,
     )
 
 
-def resumed_start(root: Path) -> str:
-    """Откуда вести сорванный прогон поручения.
+def resumed_start(root: Path, first: str) -> str:
+    """Откуда вести сорванный прогон, начатый кнопкой: с публикации или с начала маршрута.
 
-    Журнал рядом с шагами значит, что публикация начиналась: карточка может стоять на доске, и
-    пересобирать шаги значило бы оплатить их второй раз и дособирать карточку другим набором.
-    Без журнала до доски дело не дошло, и шаги собираются заново с поручения.
+    Журнал рядом с файлом для доски значит, что публикация начиналась: карточки могут стоять на
+    доске, и собирать их заново значило бы оплатить стадии второй раз и дособирать карточки
+    другим набором. Без журнала до доски дело не дошло, и маршрут идёт с первой стадии.
     """
-    return TASK_ROUTE_END if journal_of(root / STEPS_JSON).exists() else TASK_ROUTE_START
+    published = journal_of(root / BOARD_CONTRACT[first]).exists()
+    return route_end(first) if published else first
 
 
 def continued(stopped: Stopped) -> Run:
@@ -431,6 +463,7 @@ def continued(stopped: Stopped) -> Run:
         source=stopped.source,
         consent_confirmed=stopped.consent_confirmed,
         auto_approve=stopped.auto_approve,
+        interactive=not stopped.auto_approve,
     )
 
 
@@ -764,28 +797,34 @@ async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопка под поручением: шаги и карточка дочерним прогоном разбора (SPEC §7.3).
+    """Кнопки под разбором: поручение до карточки или вся запись путём идеи (SPEC §7.3).
 
-    Нажатие не снимает клавиатуру: сообщения разбора живут в чате вечно, и повторное нажатие
-    отвечает по состоянию прогона, а не по тому, осталась ли кнопка.
+    Оба пути после разбора одинаково ребёнок разбора, поэтому порядок отказов, возобновление и
+    индексы у них одни. Нажатие не снимает клавиатуру: сообщения разбора живут в чате вечно, и
+    повторное нажатие отвечает по состоянию прогона, а не по тому, осталась ли кнопка.
     """
     query, message = update.callback_query, update.effective_message
     if query is None:
         return
     if message is None:
-        logger.warning("task=lost: колбэк пришёл без доступного сообщения")
+        kind = IDEA if (query.data or "").startswith(f"{IDEA}:") else "task"
+        logger.warning("%s=lost: колбэк пришёл без доступного сообщения", kind)
         await query.answer()
         return
     if not permitted(message):
         return
     await query.answer()
-    pressed = task_of(query)
+    pressed = chosen_of(query)
     if pressed is None:
         await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
         return
     parent_id, number = pressed
+    task = NO_RUN if number is None else number
+    if number is None and not settings.trello_idea_board_id:
+        await refuse(message, "idea_board_missing", IDEA_BOARD_MISSING, run=parent_id)
+        return
     if running.locked():
-        await refuse(message, "busy", BUSY, run=parent_id, task=number)
+        await refuse(message, "busy", BUSY, run=parent_id, task=task)
         return
 
     async with running:
@@ -796,45 +835,26 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "stop_alive",
                 STOP_ALIVE.format(run_id=stopped.run_id),
                 run=stopped.run_id,
-                task=number,
+                task=task,
             )
             return
         parent = await asyncio.to_thread(parent_of, parent_id, message.chat_id)
-        if parent is None or parent.status != REVIEWED:
-            await refuse(message, "stale_button", STALE_BUTTON, run=parent_id, task=number)
+        # Идея берёт и разбор без поручений: своя идея часто его и даёт.
+        if parent is None or (number is not None and parent.status != REVIEWED):
+            await refuse(message, "stale_button", STALE_BUTTON, run=parent_id, task=task)
             return
-        if not (RUNS / parent_id / REVIEW_JSON).exists():
-            await refuse(message, "parent_gone", PARENT_GONE, run=parent_id, task=number)
+        needed = (REVIEW_JSON,) if number is not None else (REVIEW_JSON, TRANSCRIPT)
+        if not all((RUNS / parent_id / path).exists() for path in needed):
+            await refuse(message, "parent_gone", PARENT_GONE, run=parent_id, task=task)
             return
         child = await asyncio.to_thread(child_of, parent_id, number)
         if child is not None and child.status == PUBLISHED:
-            try:
-                card = await asyncio.to_thread(task_card, RUNS / child.run_id)
-            except OSError:
-                # Каталог ребёнка убран руками, а разбор остался. Новый прогон тут неверен: он
-                # поставил бы вторую карточку рядом с первой, а маркер её всё ещё найдёт.
-                await refuse(
-                    message,
-                    "already_published",
-                    TASK_FILES_GONE.format(number=number, run_id=child.run_id),
-                    run=child.run_id,
-                    parent=parent_id,
-                    task=number,
-                    journal="gone",
-                )
-                return
-            await refuse(
-                message,
-                "already_published",
-                ALREADY_PUBLISHED.format(number=number, key=card.key, url=card.url),
-                run=child.run_id,
-                parent=parent_id,
-                task=number,
-            )
+            await refuse_published(message, child.run_id, parent_id, number)
             return
+        first = IDEA_ROUTE_START if number is None else TASK_ROUTE_START
         if child is None:
             run = child_run(new_run_id(), parent, number, auto_approve_for(message.chat_id))
-            start, resume = TASK_ROUTE_START, NO_RUN
+            start, resume = first, NO_RUN
             await asyncio.to_thread(
                 start_run,
                 run.run_id,
@@ -851,22 +871,62 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Тот же run_id, а не новый: карточка сорванной публикации несёт его в маркере, и
             # только с ним повтор найдёт её на доске, а не поставит вторую рядом (§6).
             run = child_run(child.run_id, parent, number, child.auto_approve)
-            start = resume = await asyncio.to_thread(resumed_start, run.root)
+            start = resume = await asyncio.to_thread(resumed_start, run.root, first)
             await asyncio.to_thread(reopen_run, run.run_id, start)
         logger.info(
-            "start=task run=%s parent=%s task=%s chat=%s resume=%s",
+            "start=%s run=%s parent=%s task=%s chat=%s resume=%s",
+            "task" if number is not None else IDEA,
             run.run_id,
             parent_id,
-            number,
+            task,
             message.chat_id,
             resume,
         )
-        # Ответом на само поручение: под разбором их несколько, и ход прогона должен называть,
-        # какое из них раскладывается. В личном чате PTB без do_quote не цитирует.
+        # Ответом на нажатое сообщение: под разбором поручений несколько, и ход прогона должен
+        # называть, что из разбора пошло в работу. В личном чате PTB без do_quote не цитирует.
         note = await message.reply_text(
             progress_text(run, done_before(start), start), do_quote=True
         )
         await follow(note, run, datetime.now(timezone.utc), start)
+
+
+async def refuse_published(
+    message: Message, child_id: str, parent_id: str, number: int | None
+) -> None:
+    """Выбор из разбора уже на доске: ссылка вместо второго прогона."""
+    if number is None:
+        await refuse(
+            message,
+            "already_published",
+            IDEA_ALREADY_PUBLISHED.format(run_id=child_id, url=idea_board_url()),
+            run=child_id,
+            parent=parent_id,
+            task=NO_RUN,
+        )
+        return
+    try:
+        card = await asyncio.to_thread(task_card, RUNS / child_id)
+    except OSError:
+        # Каталог ребёнка убран руками, а разбор остался. Новый прогон тут неверен: он
+        # поставил бы вторую карточку рядом с первой, а маркер её всё ещё найдёт.
+        await refuse(
+            message,
+            "already_published",
+            TASK_FILES_GONE.format(number=number, run_id=child_id),
+            run=child_id,
+            parent=parent_id,
+            task=number,
+            journal="gone",
+        )
+        return
+    await refuse(
+        message,
+        "already_published",
+        ALREADY_PUBLISHED.format(number=number, key=card.key, url=card.url),
+        run=child_id,
+        parent=parent_id,
+        task=number,
+    )
 
 
 async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1255,6 +1315,12 @@ def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
     )
 
 
+def idea_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(IDEA_BUTTON, callback_data=f"{IDEA}:{run_id}")]]
+    )
+
+
 def task_keyboard(run_id: str, number: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}")]]
@@ -1337,6 +1403,14 @@ def task_of(query: CallbackQuery) -> tuple[str, int] | None:
     return parts[1], int(parts[2])
 
 
+def chosen_of(query: CallbackQuery) -> tuple[str, int | None] | None:
+    """Разбор и выбор из него: номер поручения у `task:`, None у `idea:`, то есть вся запись."""
+    if (query.data or "").startswith(f"{IDEA}:"):
+        parts = button_of(query, 2)
+        return (parts[1], None) if parts else None
+    return task_of(query)
+
+
 def assembling_run(query: CallbackQuery) -> str | None:
     """Прогон, которому сказали кончать спрашивать."""
     parts = button_of(query, 2)
@@ -1365,8 +1439,12 @@ def review_ending(run: Run) -> Ending:
     """Разбор готов: оглавление встаёт в сообщение о ходе прогона, строка закрывается."""
     review = Review.model_validate_json(read_artifact(run.root, REVIEW_JSON))
     logger.info("run=%s reviewed tasks=%d", run.run_id, len(review.tasks))
+    # Кнопка идеи под оглавлением и при пустом разборе: своя идея часто поручений не даёт.
     return Ending(
-        text=review_lead(review), status=REVIEWED if review.tasks else NO_TASK, review=review
+        text=review_lead(review),
+        status=REVIEWED if review.tasks else NO_TASK,
+        keyboard=idea_keyboard(run.run_id),
+        review=review,
     )
 
 
@@ -1494,7 +1572,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
     application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
     application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
-    application.add_handler(CallbackQueryHandler(on_child_button, pattern=r"^task:"))
+    application.add_handler(
+        CallbackQueryHandler(on_child_button, pattern=rf"^(task|{IDEA}):")
+    )
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не

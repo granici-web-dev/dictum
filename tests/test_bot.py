@@ -53,6 +53,9 @@ from app.bot import (
     PARENT_GONE,
     TASK_BUTTON,
     TASK_FILES_GONE,
+    IDEA_ALREADY_PUBLISHED,
+    IDEA_BOARD_MISSING,
+    IDEA_BUTTON,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
@@ -3209,3 +3212,349 @@ async def test_a_published_task_whose_run_folder_is_gone_still_answers(
         in caplog.text
     )
     assert list(store.children) == ["ребёнок"]
+
+
+# Путь идеи (P3-08, фаза 2, часть E): кнопка под оглавлением ведёт всю запись путём идеи.
+
+
+def an_idea_review_in_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, status: str = REVIEWED
+) -> Path:
+    """Разбор с расшифровкой на диске и доска идей в настройках: кнопке идеи есть с чего начать."""
+    root = a_review_in_chat(tmp_path, monkeypatch, store, status=status)
+    (root / "inputs").mkdir()
+    (root / TRANSCRIPT).write_text("---\nrun_id: \"разбор\"\n---\n\nИдея\n", encoding="utf-8")
+    monkeypatch.setattr(settings, "trello_idea_board_id", "ideas1")
+    return root
+
+
+def an_idea_button(parent: str = PARENT) -> ButtonChat:
+    return ButtonChat(f"idea:{parent}")
+
+
+def walk_idea(seen: list[tuple[Run, str, str, str]], store: FakeStore) -> Walking:
+    """Обход идеи: с воротами встаёт на вопросе брифа, без них кладёт журнал публикации."""
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((run.model_copy(), start, stop, store.status[run.run_id]))
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        if run.interactive:
+            (run.root / BRIEF_QUESTION).write_text(QUESTION_ASKED, encoding="utf-8")
+            return Pause(stage="brief", artifact=BRIEF_QUESTION, kind="answer")
+        (run.root / "outputs/publish.json").write_text('{"I-001": {}}', encoding="utf-8")
+        return None
+
+    return walking
+
+
+def buttons_of(markup: object) -> list[tuple[str, str]]:
+    return [
+        (button.text, str(button.callback_data))
+        for row in cast(InlineKeyboardMarkup, markup).inline_keyboard
+        for button in row
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("review_json", [REVIEW_DE, REVIEW_NONE])
+async def test_the_review_lead_carries_the_idea_button_with_tasks_and_without(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, review_json: str
+) -> None:
+    """Своя идея часто даёт разбор без поручений: кнопка нужна и там."""
+    root = reviewing_in(tmp_path, monkeypatch, review_json)
+    chat = DeliveryChat("Встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == review_lead(Review.model_validate_json(review_json))
+    assert buttons_of(chat.keyboards[-1]) == [(IDEA_BUTTON, f"idea:{root.name}")]
+    under_messages = [buttons_of(markup) for markup in chat.reply_markups if markup is not None]
+    assert all(IDEA_BUTTON not in dict(buttons) for buttons in under_messages)
+
+
+@pytest.mark.asyncio
+async def test_idea_button_without_the_idea_board_is_refused_before_any_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Без доски путь идеи оплатил бы бриф, PRD и декомпозицию, чтобы упасть на публикации.
+
+    Замок занят нарочно: отказ приходит раньше него, и `busy` здесь значил бы, что проверка стоит
+    не там.
+    """
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(settings, "trello_idea_board_id", "")
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = an_idea_button()
+
+    await bot.running.acquire()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_child_button(a_press(chat), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert chat.replies == [IDEA_BOARD_MISSING]
+    assert "TRELLO_IDEA_BOARD_ID" in chat.replies[0]
+    assert "refusal=idea_board_missing chat=12 run=разбор" in caplog.text
+    assert store.children == {}
+    assert chat.answered == 1
+
+
+@pytest.mark.asyncio
+async def test_task_button_does_not_need_the_idea_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    assert [start for _, start, _ in seen] == ["assignment"]
+
+
+def test_the_bot_starts_without_the_idea_board(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Разбор встречи полезен и без пути идеи: отказ кнопки называет настройку, когда она нужна."""
+    started: list[Application[Any, Any, Any, Any, Any, Any]] = []
+    ready_to_start(monkeypatch)
+    monkeypatch.setattr(Application, "run_polling", lambda self, **kwargs: started.append(self))
+
+    main()
+
+    assert len(started) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [REVIEWED, NO_TASK])
+async def test_idea_button_starts_a_child_run_that_asks_brief_questions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    status: str,
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store, status=status)
+    gates_on(monkeypatch)
+    seen: list[tuple[Run, str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_idea(seen, store))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "идея")
+    chat = an_idea_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    ((run, start, stop, status_at_start),) = seen
+    assert (start, stop, status_at_start) == ("handoff", "publish", "handoff")
+    assert run.interactive and not run.auto_approve
+    assert (run.parent_root, run.parent_run_id, run.assignment) == (
+        tmp_path / "runs" / PARENT,
+        PARENT,
+        None,
+    )
+    assert store.children == {"идея": (PARENT, None)}
+    assert (store.sources["идея"], store.langs["идея"], store.consents["идея"]) == (
+        "voice",
+        "de",
+        None,
+    )
+    assert chat.reply_quoted[0] is True
+    assert chat.replies[0].splitlines()[2] == f"▸ {LABEL['handoff']}"
+    assert chat.edits[-1] == f"{QUESTION_ASKED.strip()}\n\n{QUESTION_TAIL}"
+    assert store.status["идея"] == AWAITING_ANSWER
+    assert "start=idea run=идея parent=разбор task=- chat=12 resume=-" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_idea_button_with_gates_off_runs_to_the_board_without_questions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    await on_gates(an_update(TextChat("/gates off")), NO_CONTEXT)
+    seen: list[tuple[Run, str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_idea(seen, store))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "идея")
+    chat = an_idea_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    ((run, _, _, _),) = seen
+    assert not run.interactive and run.auto_approve
+    assert store.status["идея"] == PUBLISHED
+    assert chat.edits[-1] == "Готово: 1 карточек.\nhttps://trello.com/b/ideas1"
+
+
+def test_a_continued_run_asks_questions_exactly_when_it_stops_at_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Обещано с P2-04 и не сделано: бот не задал ни одного вопроса брифа (SPEC §3.2)."""
+    stopped = a_stopped_question(tmp_path, monkeypatch)
+
+    assert bot.continued(stopped).interactive
+    assert not bot.continued(stopped.model_copy(update={"auto_approve": True})).interactive
+
+
+@pytest.mark.asyncio
+async def test_a_published_idea_answers_with_the_idea_board_and_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    store.start_run("идея", 12, "voice", "de", True, None, "handoff", PARENT, None)
+    store.status["идея"] = PUBLISHED
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = an_idea_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [
+        IDEA_ALREADY_PUBLISHED.format(run_id="идея", url="https://trello.com/b/ideas1")
+    ]
+    assert "refusal=already_published chat=12 run=идея parent=разбор task=-" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_task_and_the_idea_of_one_review_do_not_stand_in_each_others_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    bot.AUTO_APPROVE_BY_CHAT[12] = True
+    ids = iter(["поручение", "идея"])
+    monkeypatch.setattr(bot, "new_run_id", lambda: next(ids))
+    tasks: list[tuple[str, str, str]] = []
+    ideas: list[tuple[Run, str, str, str]] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        chosen = walk_task(tasks) if run.assignment is not None else walk_idea(ideas, store)
+        return chosen(run, start, stop, on_done, redo)
+
+    monkeypatch.setattr(bot, "walk", walking)
+
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    await on_child_button(a_press(an_idea_button()), NO_CONTEXT)
+
+    assert store.children == {"поручение": (PARENT, 1), "идея": (PARENT, None)}
+    assert store.status["поручение"] == store.status["идея"] == PUBLISHED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("journal", "start"), [(True, "publish"), (False, "handoff")])
+async def test_a_broken_idea_resumes_under_the_same_run_from_where_the_board_was_reached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    journal: bool,
+    start: str,
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    store.start_run("идея", 12, "voice", "de", True, None, "handoff", PARENT, None)
+    store.status["идея"] = FAILED
+    root = tmp_path / "runs" / "идея"
+    (root / "outputs").mkdir(parents=True)
+    if journal:
+        (root / "outputs/publish.json").write_text('{"I-001": {}}', encoding="utf-8")
+    seen: list[tuple[Run, str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_idea(seen, store))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(an_idea_button()), NO_CONTEXT)
+
+    ((run, started, _, _),) = seen
+    assert (run.run_id, started) == ("идея", start)
+    assert list(store.children) == ["идея"]
+    assert f"start=idea run=идея parent=разбор task=- chat=12 resume={start}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_idea_button_of_a_review_whose_transcript_is_gone_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    root = an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    (root / TRANSCRIPT).unlink()
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = an_idea_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [PARENT_GONE]
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", get_args(StopKind))
+async def test_idea_button_at_a_live_stop_is_refused_like_a_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    kind: StopKind,
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    store.stop(12, a_live_stop(kind))
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = an_idea_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="ждущий")]
+    assert "refusal=stop_alive chat=12 run=ждущий task=-" in caplog.text
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", ["idea:", "idea:разбор:1"])
+async def test_idea_button_of_another_shape_is_refused_like_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, data: str
+) -> None:
+    an_idea_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = ButtonChat(data)
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+async def test_idea_button_without_a_message_still_leaves_a_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat = an_idea_button()
+    update = cast(Update, SimpleNamespace(callback_query=chat, effective_message=None))
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await on_child_button(update, NO_CONTEXT)
+
+    assert "idea=lost" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gates_speak_of_both_paths(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    on, off = TextChat("/gates on"), TextChat("/gates off")
+
+    await on_gates(an_update(on), NO_CONTEXT)
+    await on_gates(an_update(off), NO_CONTEXT)
+
+    assert on.replies == [
+        "Ворота включены. Своя идея встанет на вопросы брифа, на бриф и на задачи, поручение "
+        "встанет на шаги, прежде чем попасть на доску." + GATES_FROM_NEXT_RUN
+    ]
+    assert off.replies == [
+        "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов."
+        + GATES_FROM_NEXT_RUN
+    ]
