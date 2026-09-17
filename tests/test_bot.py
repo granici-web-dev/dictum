@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -51,6 +52,7 @@ from app.bot import (
     CARD_FINISHED,
     PARENT_GONE,
     TASK_BUTTON,
+    TASK_FILES_GONE,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
@@ -3177,3 +3179,30 @@ async def test_stop_at_the_steps_gate_lets_the_next_press_start_over(
     assert store.status["первый"] == DROPPED
     assert seen[-1] == ("второй", "assignment", "card")
     assert store.stops[12].run_id == "второй"
+
+
+@pytest.mark.asyncio
+async def test_a_published_task_whose_run_folder_is_gone_still_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Разбор на диске, а каталог ребёнка убран: карточка на доске, ссылки на неё у бота нет.
+
+    Новый прогон поставил бы вторую карточку, а молчание человек прочтёт как поломку.
+    """
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    shutil.rmtree(a_child_in(tmp_path, store, PUBLISHED, journal=False))
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [TASK_FILES_GONE.format(number=1, run_id="ребёнок")]
+    assert (
+        "refusal=already_published chat=12 run=ребёнок parent=разбор task=1 journal=gone"
+        in caplog.text
+    )
+    assert list(store.children) == ["ребёнок"]

@@ -246,6 +246,11 @@ PARENT_GONE = (
 
 ALREADY_PUBLISHED = "Поручение {number} уже на доске: карточка {key}.\n{url}"
 
+TASK_FILES_GONE = (
+    "Поручение {number} уже на доске, но файлы его прогона удалены с диска, и ссылки на карточку "
+    "у меня нет. Ищите её в списке Assignments по строке run:{run_id} в описании."
+)
+
 CARD_FINISHED = f"Готово: карточка {{key}} в списке {ASSIGNMENTS_LIST}.\n{{url}}"
 
 NEXT, EDIT, STOP = "next", "edit", "stop"
@@ -802,7 +807,21 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         child = await asyncio.to_thread(child_of, parent_id, number)
         if child is not None and child.status == PUBLISHED:
-            card = await asyncio.to_thread(task_card, RUNS / child.run_id)
+            try:
+                card = await asyncio.to_thread(task_card, RUNS / child.run_id)
+            except OSError:
+                # Каталог ребёнка убран руками, а разбор остался. Новый прогон тут неверен: он
+                # поставил бы вторую карточку рядом с первой, а маркер её всё ещё найдёт.
+                await refuse(
+                    message,
+                    "already_published",
+                    TASK_FILES_GONE.format(number=number, run_id=child.run_id),
+                    run=child.run_id,
+                    parent=parent_id,
+                    task=number,
+                    journal="gone",
+                )
+                return
             await refuse(
                 message,
                 "already_published",
