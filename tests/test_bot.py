@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, cast, get_args
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from telegram import Audio, Document, InlineKeyboardMarkup, Message, Update, Voice
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
@@ -27,6 +27,7 @@ from app.bot import (
     CONSENT_YES,
     EMPTY,
     FILE_INGEST_LABEL,
+    FILE_NOT_TAKEN,
     FILE_TOO_BIG,
     FILE_TOO_LONG,
     MAX_FILE_BYTES,
@@ -144,6 +145,13 @@ class FakeStore:
         auto_approve: bool,
         consent_confirmed: bool | None,
     ) -> None:
+        # Правило базы `ck_runs_consent_only_for_file`: без него двойник принял бы строку, которую
+        # Postgres отвергнет, и обработчик с перепутанным согласием прошёл бы тесты зелёным.
+        allowed = consent_confirmed is True if source == "file" else consent_confirmed is None
+        if not allowed:
+            raise IntegrityError(
+                "INSERT INTO runs", {}, Exception("ck_runs_consent_only_for_file")
+            )
         self.started.append((run_id, chat_id, source))
         self.chats[run_id] = chat_id
         self.status[run_id] = NAMES[0]
@@ -2101,6 +2109,11 @@ class SentRecording:
         return target
 
 
+class LostRecording(SentRecording):
+    async def download_to_drive(self, target: Path) -> Path:
+        raise TelegramError("Timed out")
+
+
 class ConsentPress(ButtonChat):
     """Нажатие под вопросом о согласии: нажимает человек 99, файл лежит в сообщении выше."""
 
@@ -2214,7 +2227,7 @@ async def test_consent_yes_starts_file_run_from_replied_message(
 ) -> None:
     """Согласие называет нажавшего (99), а не приславшего файл (7): в группе это разные люди."""
     listed(monkeypatch, "12")
-    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
     monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
     seen: list[Run] = []
     monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
@@ -2238,6 +2251,8 @@ async def test_consent_yes_starts_file_run_from_replied_message(
     assert f"start=file run={run_id} chat=12" in caplog.text
     assert f"consent=yes chat=12 by=99 run={run_id}" in caplog.text
     assert "by=7" not in caplog.text
+    assert store.status["прогон"] == DROPPED
+    assert f"run={run_id} dropped=прогон" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2330,6 +2345,23 @@ async def test_consent_question_that_could_not_be_edited_is_logged_and_the_run_g
     [warning] = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert f"consent_question=kept chat=12 run={run_id}" in warning.getMessage()
     assert [run.run_id for run in seen] == [run_id]
+
+
+@pytest.mark.asyncio
+async def test_recording_that_could_not_be_downloaded_fails_the_run_and_keeps_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    listed(monkeypatch, "12")
+    store.stop(12, a_stopped_choice(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "walk", never_walks)
+    press = ConsentPress(CONSENT_YES, LostRecording())
+
+    await on_consent_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, _, _)] = store.started
+    assert press.edits == [FILE_NOT_TAKEN]
+    assert store.status[run_id] == FAILED
+    assert store.stops[12].run_id == "прогон"
 
 
 @pytest.mark.asyncio
