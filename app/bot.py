@@ -50,6 +50,8 @@ from app.pipeline import (
     Stage,
     StopKind,
     after,
+    route_end,
+    route_of,
     stages_between,
 )
 from app.publish import journal_of
@@ -88,7 +90,6 @@ logger = logging.getLogger("app.bot")
 
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
-LAST_STAGE = "publish"
 VOICE_FILE = "inputs/voice.oga"
 
 # TODO(P3-09): одна граница длины для голосового и файла.
@@ -285,12 +286,12 @@ def allowed_chats() -> frozenset[int]:
     return frozenset(int(part) for part in listed)
 
 
-def progress_text(run: Run, done: list[str]) -> str:
+def progress_text(run: Run, done: list[str], start: str = FIRST_STAGE) -> str:
     labels = dict(LABEL)
     labels[FIRST_STAGE] = INGEST_LABEL.get(run.source, LABEL[FIRST_STAGE])
     lines = [f"Прогон {run.run_id}", ""]
     marked_current = False
-    for stage in stages_between(FIRST_STAGE, LAST_STAGE):
+    for stage in stages_between(*route_of(start)):
         if stage.name in done:
             mark = "✓"
         elif not marked_current:
@@ -481,7 +482,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if redo is None:
                 return
             start = stopped.stage
-        note = await message.reply_text(progress_text(run, done_before(start)))
+        note = await message.reply_text(progress_text(run, done_before(start), start))
         await follow(note, run, message.date, start, redo)
 
 
@@ -591,7 +592,7 @@ async def on_gate_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Со следующей стадии, а не с той, что встала на воротах: подтверждённую переигрывать
         # значит оплатить её второй раз и получить другой артефакт вместо принятого.
         start = after(stopped.stage).name
-        note = await message.reply_text(progress_text(run, done_before(start)))
+        note = await message.reply_text(progress_text(run, done_before(start), start))
         await follow(note, run, datetime.now(timezone.utc), start)
 
 
@@ -630,7 +631,9 @@ async def on_choice_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         # Клавиатуру не снимаем, как и «Править» на воротах: сорвавшийся повтор возвращает
         # остановку и просит ответить ещё раз, а снятая отняла бы у человека этот способ.
-        note = await message.reply_text(progress_text(run, done_before(stopped.stage)))
+        note = await message.reply_text(
+            progress_text(run, done_before(stopped.stage), stopped.stage)
+        )
         await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
 
 
@@ -671,7 +674,9 @@ async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         run = continued(stopped)
         # Клавиатуру не снимаем, как и на «Править»: сорвавшийся повтор возвращает остановку.
-        note = await message.reply_text(progress_text(run, done_before(stopped.stage)))
+        note = await message.reply_text(
+            progress_text(run, done_before(stopped.stage), stopped.stage)
+        )
         await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
 
 
@@ -840,7 +845,7 @@ async def follow(
             logger.exception("Прогон %s не записал стадию %s", run.run_id, stage.name)
         progress.append(
             asyncio.run_coroutine_threadsafe(
-                note.edit_text(progress_text(run, done)), loop
+                note.edit_text(progress_text(run, done, start)), loop
             )
         )
 
@@ -880,7 +885,8 @@ async def follow(
 
 def done_before(start: str) -> list[str]:
     """Стадии, пройденные до start: продолженный прогон не показывает их незаконченными."""
-    return list(NAMES[: NAMES.index(start)])
+    first, _ = route_of(start)
+    return list(NAMES[NAMES.index(first) : NAMES.index(start)])
 
 
 def chosen_edit(text: str, found: Candidates) -> str | None:
@@ -1115,7 +1121,7 @@ async def outcome(
     # уже после обхода, а сбой такого чтения оставлял человека со списком галочек без
     # концовки — прогон выглядел незаконченным, хотя карточки стояли на доске.
     try:
-        waiting = await asyncio.to_thread(walk, run, start, LAST_STAGE, report, redo)
+        waiting = await asyncio.to_thread(walk, run, start, route_end(start), report, redo)
         if waiting and waiting.kind == "choice":
             logger.info("stop=choice run=%s", run.run_id)
             return choice_ending(run, waiting)

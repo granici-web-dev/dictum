@@ -105,6 +105,11 @@ STAGES: tuple[Stage, ...] = (
 
 NAMES = tuple(stage.name for stage in STAGES)
 
+# Маршруты: отрезки списка от первой стадии до последней включительно, у каждого свой результат.
+# Обход идёт до конца маршрута, в котором стоит стартовая стадия: так продолженный прогон доходит
+# до того же результата, к которому шёл, а не до конца всего списка (P3-08).
+ROUTES: tuple[tuple[str, str], ...] = (("ingest", "publish"),)
+
 
 def stage_named(name: str) -> Stage:
     for stage in STAGES:
@@ -124,6 +129,18 @@ def stages_between(start: str, stop: str) -> tuple[Stage, ...]:
     first = NAMES.index(stage_named(start).name)
     last = NAMES.index(stage_named(stop).name)
     return STAGES[first : last + 1]
+
+
+def route_of(name: str) -> tuple[str, str]:
+    position = NAMES.index(stage_named(name).name)
+    for first, last in ROUTES:
+        if NAMES.index(first) <= position <= NAMES.index(last):
+            return first, last
+    raise ValueError(f"стадия {name} не входит ни в один маршрут")
+
+
+def route_end(name: str) -> str:
+    return route_of(name)[1]
 
 
 def after(name: str) -> Stage:

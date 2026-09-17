@@ -1,6 +1,14 @@
 import pytest
 
-from app.pipeline import NAMES, STAGES, after, stage_named, stages_between
+from app.pipeline import (
+    NAMES,
+    ROUTES,
+    STAGES,
+    after,
+    route_end,
+    stage_named,
+    stages_between,
+)
 from app.run import BODIES
 from app.stages import COMMANDS_DIR
 
@@ -48,3 +56,15 @@ def test_there_is_nothing_after_the_last_stage() -> None:
     """Ворот после publish не бывает: вопрос может задать только ошибка в данных."""
     with pytest.raises(ValueError, match="после стадии publish"):
         after("publish")
+
+
+def test_every_stage_belongs_to_exactly_one_route() -> None:
+    """Маршруты режут список без дыр и нахлёстов: иначе обход не знал бы, где ему кончаться."""
+    covered = [stage.name for first, last in ROUTES for stage in stages_between(first, last)]
+    assert covered == list(NAMES)
+
+
+def test_a_walk_from_any_stage_ends_where_its_route_ends() -> None:
+    for first, last in ROUTES:
+        for stage in stages_between(first, last):
+            assert route_end(stage.name) == last
