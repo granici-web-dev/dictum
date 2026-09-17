@@ -1,10 +1,12 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.review import Review, check_review, stamp_review, unmatched_originals
+from app.stages import COMMANDS_DIR
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 MEETING_DE = (FIXTURES / "transcript_meeting_de.md").read_text(encoding="utf-8")
@@ -184,3 +186,14 @@ def test_the_stamp_marks_unmatched_fragments_and_overwrites_what_the_model_claim
 def test_the_fixture_is_what_the_stamp_writes() -> None:
     """review_de.json лежит в том виде, в каком его оставляет стадия: пометки поставила сверка."""
     assert stamp_review(REVIEW_DE, MEETING_DE, "ru") == REVIEW_DE
+
+
+def test_the_example_in_the_prompt_passes_the_schema_without_the_fields_the_code_writes() -> None:
+    """Пример в /review показывает форму: разойдись он со схемой, модель училась бы на отказе."""
+    prompt = (COMMANDS_DIR / "review.md").read_text(encoding="utf-8")
+    example = re.search(r"```json\n(.*?)```", prompt, re.DOTALL)
+
+    assert example is not None
+    assert "owner_lang" not in example.group(1)
+    assert "in_transcript" not in example.group(1)
+    Review.model_validate_json(example.group(1))
