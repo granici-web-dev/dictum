@@ -1,0 +1,29 @@
+{
+  "run_id": "7b2e0d91c4a3f615",
+  "meeting_lang": "de",
+  "owner_lang": "ru",
+  "title": {
+    "text": "Login-Formular vor dem Absenden im Browser prüfen",
+    "translation": "Проверять форму входа в браузере до отправки"
+  },
+  "address": "neutral",
+  "address_quote": null,
+  "address_in_text": false,
+  "questions": [
+    {
+      "text": "Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?",
+      "translation": "Проверка до отправки только для формы входа или и для формы регистрации?",
+      "why": "от этого зависит, одна форма в шагах или две: на встрече тимлид сам этого ещё не знал"
+    },
+    {
+      "text": "Soll für die Prüfung des Login-Formulars eine bestimmte Bibliothek verwendet werden, oder ist die Wahl frei?",
+      "translation": "Нужна ли для проверки формы входа определённая библиотека, или выбор свободный?",
+      "why": "стандарты проекта не заданы, поручение библиотеку не называет, а от неё зависят шаги"
+    },
+    {
+      "text": "Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?",
+      "translation": "Ждут ли для проверки формы входа ещё и автотесты?",
+      "why": "критериев приёмки у поручения нет, и неясно, входят ли тесты в работу"
+    }
+  ]
+}

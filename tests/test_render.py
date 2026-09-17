@@ -1,6 +1,11 @@
+import re
+from datetime import UTC, datetime
+
 import pytest
 
+from app.clarify import Clarify
 from app.models import Deferred
+from app.project import project_snapshot, read_project, read_standards
 from app.render import (
     MAX_MESSAGE_CHARACTERS,
     NOT_FOUND_IN_MESSAGE,
@@ -10,12 +15,17 @@ from app.render import (
     review_lead,
     review_markdown,
     review_messages,
+    questions_copy_text,
+    questions_note,
+    standards_line,
     steps_digest,
     steps_markdown,
     task_in_message,
 )
 from app.review import Quote, Review
 from app.steps import Steps
+from pathlib import Path
+
 from tests.helpers import FIXTURES, REAL_BRIEF, real_issues
 
 
@@ -288,3 +298,82 @@ def test_the_ticket_and_the_acceptance_criteria_reach_the_review_file() -> None:
         "- пустое обязательное поле показывает ошибку под полем "
         "(*Ein leeres Pflichtfeld zeigt eine Fehlermeldung unter dem Feld.*)"
     )
+
+
+def clarify_de() -> Clarify:
+    return Clarify.model_validate_json((FIXTURES / "clarify_de.json").read_text(encoding="utf-8"))
+
+
+TAKEN_AT = datetime(2026, 9, 17, 10, 2, tzinfo=UTC)
+UNSET = read_project(project_snapshot(None, TAKEN_AT))
+
+
+def test_the_copy_text_matches_the_snapshot() -> None:
+    expected = (FIXTURES / "questions_de_copy.txt").read_text(encoding="utf-8")
+
+    assert questions_copy_text(clarify_de()) + "\n" == expected
+
+
+def test_the_copy_text_holds_the_numbered_questions_and_nothing_of_the_bot() -> None:
+    """Текст уходит тимлиду как есть: ни русской буквы, ни подписи, ни названия поручения."""
+    clarify = clarify_de()
+    copy = questions_copy_text(clarify)
+    note = questions_note(clarify, 1, UNSET)
+
+    assert re.search(r"[А-Яа-яЁё]", copy) is None
+    assert [line for line in copy.splitlines() if line] == [
+        f"{number}. {question.text}" for number, question in enumerate(clarify.questions, start=1)
+    ]
+    assert clarify.title.text not in copy
+    assert "reply" not in copy
+    bot_lines = {line.strip() for line in note.splitlines()} - {""}
+    assert not bot_lines & set(copy.splitlines())
+
+
+def test_the_note_matches_the_snapshot() -> None:
+    expected = (FIXTURES / "questions_de_note.txt").read_text(encoding="utf-8")
+
+    assert questions_note(clarify_de(), 1, UNSET) + "\n" == expected
+
+
+@pytest.mark.parametrize(
+    ("address", "quote", "found", "line"),
+    [
+        ("formal", None, False, "Обращение: формальное (Sie): по записи не понять."),
+        ("formal", "Können Sie", True, "Обращение: формальное (Sie)."),
+        ("informal", "kannst du", True, "Обращение: неформальное (du), в записи: «kannst du»."),
+        (
+            "informal",
+            "kannst du",
+            False,
+            "Обращение: неформальное (du): в записи не найдено, проверьте перед отправкой.",
+        ),
+    ],
+)
+def test_the_note_names_the_address_and_whether_it_was_heard(
+    address: str, quote: str | None, found: bool, line: str
+) -> None:
+    clarify = clarify_de().model_copy(
+        update={"address": address, "address_quote": quote, "address_in_text": found}
+    )
+
+    assert line in questions_note(clarify, 1, UNSET).splitlines()
+
+
+def test_unset_standards_are_named_with_their_consequence(tmp_path: Path) -> None:
+    empty = read_project(project_snapshot(read_standards(tmp_path), TAKEN_AT))
+
+    assert standards_line(UNSET) == (
+        "Стандарты проекта не заданы: шаги пишутся без стандартов проекта"
+    )
+    assert standards_line(empty) == (
+        f"Стандарты проекта не заданы: в каталоге {tmp_path.name} нет STACK.md, PRINCIPLES.md, "
+        "TESTING.md, шаги пишутся без стандартов проекта"
+    )
+
+
+def test_found_standards_are_named_by_the_directory_and_the_files() -> None:
+    standards = read_standards(FIXTURES / "project_frontend")
+    frontend = read_project(project_snapshot(standards, TAKEN_AT))
+
+    assert standards_line(frontend) == "Стандарты проекта: project_frontend (STACK.md, TESTING.md)"

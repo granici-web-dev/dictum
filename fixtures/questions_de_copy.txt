@@ -1,0 +1,5 @@
+1. Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?
+
+2. Soll für die Prüfung des Login-Formulars eine bestimmte Bibliothek verwendet werden, oder ist die Wahl frei?
+
+3. Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?

@@ -1,7 +1,8 @@
 """outputs/issues.md — тот же бэклог для чтения человеком на воротах. См. SPEC.md §7.
 
-Здесь же разбор встречи из review.json: outputs/review.md и сообщения бота (P3-08), и шаги
-поручения из steps.json: outputs/steps.md для ворот.
+Здесь же разбор встречи из review.json: outputs/review.md и сообщения бота (P3-08), вопросы для
+тимлида из clarify.json двумя сообщениями (P3-11) и шаги поручения из steps.json:
+outputs/steps.md для ворот.
 
 Раньше его писала модель вторым файлом: половина выхода стадии уходила на копию, потолок
 токенов срезал ответ, и две копии могли разойтись, не поспорив об этом вслух.
@@ -13,7 +14,9 @@
 
 import frontmatter
 
+from app.clarify import Clarify
 from app.models import Issue, IssuesFile
+from app.project import STANDARD_ALIASES, Project
 from app.review import AskBack, Quote, Review, Said, Task
 from app.steps import Pair, Steps
 
@@ -330,3 +333,77 @@ def steps_digest(steps: Steps) -> str:
         f"Поручение{number} «{title}»: {steps_count(len(steps.steps))}, "
         f"открытых вопросов {len(steps.open_questions)}."
     )
+
+
+def questions_count(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        word = "вопрос"
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = "вопроса"
+    else:
+        word = "вопросов"
+    return f"{count} {word}"
+
+
+def questions_copy_text(clarify: Clarify) -> str:
+    """Текст для копирования: только вопросы на языке встречи, по абзацу на вопрос.
+
+    Ни подписи бота, ни названия поручения: вопрос уходит тимлиду как есть. Номер ставит код, по
+    нему владелец сверяет вопрос с переводом в следующем сообщении.
+    """
+    return "\n\n".join(
+        f"{number}. {question.text}"
+        for number, question in enumerate(clarify.questions, start=1)
+    )
+
+
+# Последствие незаданных стандартов называется до того, как за него заплачено. Пока ресёрча в
+# маршруте нет, платят за него шаги.
+MISSING_STANDARDS_CONSEQUENCE = "шаги пишутся без стандартов проекта"
+
+
+def standards_line(project: Project) -> str:
+    if not project.configured:
+        return f"Стандарты проекта не заданы: {MISSING_STANDARDS_CONSEQUENCE}"
+    found = [name for name in STANDARD_ALIASES if name in project.texts]
+    if not found:
+        return (
+            f"Стандарты проекта не заданы: в каталоге {project.source} нет "
+            f"{', '.join(STANDARD_ALIASES)}, {MISSING_STANDARDS_CONSEQUENCE}"
+        )
+    return f"Стандарты проекта: {project.source} ({', '.join(found)})"
+
+
+def address_line(clarify: Clarify) -> str:
+    if clarify.address == "neutral":
+        return "Обращение: нейтральное."
+    if clarify.address == "formal":
+        found = " (Sie)" if clarify.address_in_text else " (Sie): по записи не понять"
+        return f"Обращение: формальное{found}."
+    if clarify.address_in_text:
+        return f"Обращение: неформальное (du), в записи: «{clarify.address_quote}»."
+    return "Обращение: неформальное (du): в записи не найдено, проверьте перед отправкой."
+
+
+def questions_note(clarify: Clarify, number: int, project: Project) -> str:
+    """Перевод, зачем спрашивать, обращение и стандарты: сообщение владельцу рядом с вопросами."""
+    title = clarify.title.translation or clarify.title.text
+    lines = [
+        f"Поручение {number} «{title}»: {questions_count(len(clarify.questions))}. Отберите "
+        "нужные и отправьте тимлиду сами, каждый понятен без соседних.",
+        "",
+    ]
+    for index, question in enumerate(clarify.questions, start=1):
+        lines += [
+            f"{index}. {question.translation or question.text}",
+            f"   Зачем: {question.why}",
+        ]
+    lines += [
+        "",
+        address_line(clarify),
+        standards_line(project),
+        "",
+        "Ответ пришлите ответом (reply) на это сообщение или на вопросы выше. Можно частично: "
+        "вопросы без ответа останутся открытыми на шагах и на карточке.",
+    ]
+    return "\n".join(lines)
