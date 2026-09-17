@@ -47,7 +47,14 @@ LAST_STAGE_OF_A_LOCAL_RUN = "decompose"
 
 
 def start_pipeline(start: str, text: str, lang: str, run_id: str, auto_approve: bool) -> int:
-    run = Run(root=Path("."), run_id=run_id, lang=lang, text=text, auto_approve=auto_approve)
+    run = Run(
+        root=Path("."),
+        run_id=run_id,
+        lang=lang,
+        text=text,
+        source="text",
+        auto_approve=auto_approve,
+    )
     try:
         waiting = walk(run, start, LAST_STAGE_OF_A_LOCAL_RUN)
     except (StageError, ConfigError, anthropic.APIError) as error:

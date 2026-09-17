@@ -47,7 +47,7 @@ class Run(BaseModel):
     audio: Path | None = None
     # Откуда прогон, знает он сам, а не наличие записи: у продолженного записи на диске уже нет
     # (её мог унести `KEEP_AUDIO=false`), а подписан прогресс по-прежнему по источнику.
-    source: Source = "text"
+    source: Source
     # Согласие участников чужой записи (CLAUDE.md §8). Факт строки прогона, а не кнопки: у
     # продолженного прогона его приносит `Stopped`.
     consent_confirmed: bool | None = None
@@ -102,7 +102,11 @@ def ingest_body(run: Run) -> dict[str, str]:
     if run.source == "file" and run.consent_confirmed is not True:
         raise ConsentMissing(f"Прогон {run.run_id}: файл без подтверждённого согласия на запись")
     if run.audio is None:
-        return {TRANSCRIPT: build_transcript(run.text, run.lang, run.run_id, "text", None, None)}
+        return {
+            TRANSCRIPT: build_transcript(
+                run.text, run.lang, run.run_id, run.source, None, run.consent_confirmed
+            )
+        }
     heard = transcribe(run.audio, run.run_id)
     # Язык прогона задаёт голос, а не DEFAULT_LANG: brief и стадии за ним читают уже его.
     run.lang = heard.lang

@@ -61,7 +61,9 @@ def a_run(root: Path, text: str = TEXT, auto_approve: bool = False) -> Run:
     Дефолт `Run` повторён нарочно: с обратным тест молча уезжал бы в демо-режим и проходил
     ворота, которые собирался проверить.
     """
-    return Run(root=root, run_id=RUN_ID, lang="ru", text=text, auto_approve=auto_approve)
+    return Run(
+        root=root, run_id=RUN_ID, lang="ru", text=text, source="text", auto_approve=auto_approve
+    )
 
 
 def a_demo_run(root: Path, text: str = TEXT) -> Run:
@@ -70,7 +72,7 @@ def a_demo_run(root: Path, text: str = TEXT) -> Run:
 
 def an_asking_run(root: Path) -> Run:
     """Прогон, у которого есть кому отвечать: только такому стадия задаёт вопросы (SPEC §3.3)."""
-    return Run(root=root, run_id=RUN_ID, lang="ru", text=TEXT, interactive=True)
+    return Run(root=root, run_id=RUN_ID, lang="ru", text=TEXT, source="text", interactive=True)
 
 
 def an_answer(written: str, turns: tuple[Turn, ...] = (), closing: bool = False) -> Redo:

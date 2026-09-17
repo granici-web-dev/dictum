@@ -316,7 +316,7 @@ def finished_text(root: Path) -> str:
 def started_run(
     run_id: str,
     chat_id: int,
-    source: Source = "text",
+    source: Source,
     text: str = "",
     audio: Path | None = None,
     consent_confirmed: bool | None = None,
@@ -451,7 +451,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with running:
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
-            run = started_run(new_run_id(), message.chat_id, text=message.text)
+            run = started_run(new_run_id(), message.chat_id, source="text", text=message.text)
             start, redo = FIRST_STAGE, None
             await asyncio.to_thread(
                 start_run,
@@ -460,7 +460,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 run.source,
                 run.lang,
                 run.auto_approve,
-                None,
+                run.consent_confirmed,
             )
             logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
@@ -507,7 +507,13 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         audio = RUNS / run_id / VOICE_FILE
         run = started_run(run_id, message.chat_id, source="voice", audio=audio)
         await asyncio.to_thread(
-            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve, None
+            start_run,
+            run_id,
+            message.chat_id,
+            run.source,
+            run.lang,
+            run.auto_approve,
+            run.consent_confirmed,
         )
         logger.info(
             "start=voice run=%s chat=%s dropped=%s", run_id, message.chat_id, dropped or NO_RUN
@@ -680,8 +686,8 @@ async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None or not permitted(message):
         return
     recording = message.audio or message.document
-    if recording is None:
-        return
+    # Фильтр обработчика `AUDIO | Document.AUDIO`: одно из двух есть всегда.
+    assert recording is not None
     if recording.file_size is not None and recording.file_size > MAX_FILE_BYTES:
         await refuse(message, "too_big", FILE_TOO_BIG, bytes=recording.file_size)
         return
@@ -713,9 +719,6 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.info("consent=no chat=%s by=%s", message.chat_id, by)
         await close_consent_question(query, message.chat_id, CONSENT_NO, NO_RUN)
         return
-    if query.data != CONSENT_YES:
-        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
-        return
     if running.locked():
         # Нажатие называется `press`, а не `consent`: `grep "consent=yes"` считает данные согласия,
         # а при занятом боте его никто не дал.
@@ -735,7 +738,13 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             run_id, message.chat_id, source="file", audio=audio, consent_confirmed=True
         )
         await asyncio.to_thread(
-            start_run, run_id, message.chat_id, run.source, run.lang, run.auto_approve, True
+            start_run,
+            run_id,
+            message.chat_id,
+            run.source,
+            run.lang,
+            run.auto_approve,
+            run.consent_confirmed,
         )
         logger.info("start=file run=%s chat=%s", run_id, message.chat_id)
         logger.info("consent=yes chat=%s by=%s run=%s", message.chat_id, by, run_id)

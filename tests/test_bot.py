@@ -301,11 +301,11 @@ def test_a_new_run_takes_the_gates_from_the_settings_and_not_from_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ворота — норма (CLAUDE.md §1), а стенд снимает их своим .env, а не умолчанием кода."""
-    assert not started_run("прогон", 12, text="Идея").auto_approve
+    assert not started_run("прогон", 12, "text", text="Идея").auto_approve
 
     monkeypatch.setattr(settings, "auto_approve", True)
 
-    assert started_run("прогон", 12, text="Идея").auto_approve
+    assert started_run("прогон", 12, "text", text="Идея").auto_approve
 
 
 def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
@@ -415,7 +415,14 @@ async def test_the_link_is_the_last_thing_the_message_shows(
 
     await follow(
         cast(Message, note),
-        Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+        Run(
+            root=tmp_path,
+            run_id="прогон",
+            lang="ru",
+            text="Идея",
+            source="text",
+            auto_approve=True,
+        ),
         datetime.now(timezone.utc),
     )
 
@@ -438,7 +445,7 @@ def walk_stopping_on_choice(
 
 def a_stopped_run(root: Path, monkeypatch: pytest.MonkeyPatch, candidates: str) -> Run:
     monkeypatch.setattr(bot, "walk", walk_stopping_with(candidates))
-    return Run(root=root, run_id="прогон", lang="ru", text="…", auto_approve=True)
+    return Run(root=root, run_id="прогон", lang="ru", text="…", source="text", auto_approve=True)
 
 
 class QuietChat:
@@ -497,7 +504,14 @@ async def test_a_finished_run_reports_how_long_the_person_waited(
     with caplog.at_level("INFO", logger="app.bot"):
         await follow(
             cast(Message, SlowNote()),
-            Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+            Run(
+            root=tmp_path,
+            run_id="прогон",
+            lang="ru",
+            text="Идея",
+            source="text",
+            auto_approve=True,
+        ),
             datetime.now(timezone.utc) - timedelta(seconds=42),
         )
 
@@ -525,7 +539,7 @@ async def test_a_missing_candidates_file_names_the_cause_it_knows(
 ) -> None:
     """Чтение артефакта идёт после обхода: без перехвата человек остался бы без концовки."""
     monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
-    run = Run(root=tmp_path, run_id="прогон", lang="ru", text="…", auto_approve=True)
+    run = Run(root=tmp_path, run_id="прогон", lang="ru", text="…", source="text", auto_approve=True)
 
     said = (await outcome(run, lambda stage: None, FIRST_STAGE, None)).text
 
@@ -866,7 +880,14 @@ async def test_a_database_that_breaks_mid_run_does_not_take_the_cards_away(
 
     await follow(
         cast(Message, chat),
-        Run(root=tmp_path, run_id="прогон", lang="ru", text="Идея", auto_approve=True),
+        Run(
+            root=tmp_path,
+            run_id="прогон",
+            lang="ru",
+            text="Идея",
+            source="text",
+            auto_approve=True,
+        ),
         datetime.now(timezone.utc),
     )
 
@@ -1665,7 +1686,7 @@ async def test_start_from_a_stranger_gets_silence_like_every_other_message(
 
 def test_a_gate_that_no_digest_knows_about_falls_instead_of_lying(tmp_path: Path) -> None:
     """Ворота объявляет список стадий, содержание пишет код: третьи ворота обязаны упереться."""
-    run = Run(root=tmp_path, run_id="прогон", lang="ru")
+    run = Run(root=tmp_path, run_id="прогон", lang="ru", source="text")
 
     with pytest.raises(ValueError, match="у ворот после prd"):
         bot.gate_text(run, Pause(stage="prd", artifact=BRIEF, kind="gate"))
@@ -1733,11 +1754,11 @@ async def test_gates_on_makes_the_next_run_stop_and_gates_off_makes_it_run_throu
 
     await on_gates(an_update(TextChat("/gates on")), NO_CONTEXT)
 
-    assert not started_run("прогон", 12).auto_approve
+    assert not started_run("прогон", 12, "text").auto_approve
 
     await on_gates(an_update(TextChat("/gates off")), NO_CONTEXT)
 
-    assert started_run("прогон", 12).auto_approve
+    assert started_run("прогон", 12, "text").auto_approve
 
 
 @pytest.mark.asyncio
