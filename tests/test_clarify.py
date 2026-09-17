@@ -5,11 +5,13 @@
 """
 
 import json
+import re
 from typing import Any
 
 import pytest
 
 from app.clarify import MAX_QUESTIONS, Clarify, check_clarify, has_questions, stamp_clarify
+from app.stages import COMMANDS_DIR
 from app.steps import Assignment
 from tests.helpers import FIXTURES
 
@@ -169,3 +171,14 @@ def test_the_stamp_writes_the_run_and_the_languages_over_the_model() -> None:
         "ru",
     )
     assert stamped.address_in_text is False
+
+
+def test_the_example_in_the_prompt_passes_the_schema_without_the_fields_the_code_writes() -> None:
+    """Пример в /clarify показывает форму: разойдись он со схемой, модель училась бы на отказе."""
+    prompt = (COMMANDS_DIR / "clarify.md").read_text(encoding="utf-8")
+    example = re.search(r"```json\n(.*?)```", prompt, re.DOTALL)
+
+    assert example is not None
+    for stamped in ("run_id", "meeting_lang", "owner_lang", "address_in_text"):
+        assert f'"{stamped}"' not in example.group(1)
+    Clarify.model_validate_json(example.group(1))
