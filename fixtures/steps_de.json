@@ -1,0 +1,67 @@
+{
+  "run_id": "7b2e0d91c4a3f615",
+  "owner_lang": "ru",
+  "meeting_lang": "de",
+  "task": {
+    "parent_run_id": "3f9c1a7e5b2d8c40",
+    "number": 1,
+    "deadline": {
+      "text": "до пятницы",
+      "original": "bis Freitag",
+      "in_transcript": true
+    },
+    "constraints": [
+      {
+        "text": "проверка в браузере, до отправки на сервер",
+        "original": "Die Felder sollen im Browser geprüft werden, bevor irgendwas an den Server geht",
+        "in_transcript": true
+      },
+      {
+        "text": "формат e-mail и обязательные поля",
+        "original": "also E-Mail-Format und Pflichtfelder",
+        "in_transcript": true
+      }
+    ],
+    "do_not": [
+      {
+        "text": "трогать API: он принадлежит Backend-Team",
+        "original": "Bitte die API nicht anfassen, die gehört dem Backend-Team.",
+        "in_transcript": true
+      }
+    ],
+    "ask_back": [
+      {
+        "text": "касается ли проверка и регистрации: тимлид сам этого ещё не знает",
+        "question": "Gilt die Prüfung auch für die Registrierung?",
+        "translation": "Проверка касается и регистрации?"
+      }
+    ]
+  },
+  "title": {
+    "text": "Login-Formular vor dem Absenden im Browser prüfen",
+    "translation": "Проверять форму входа в браузере до отправки"
+  },
+  "summary": {
+    "text": "Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geht: E-Mail-Format und Pflichtfelder. Die API bleibt unverändert.",
+    "translation": "Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не меняется."
+  },
+  "steps": [
+    {
+      "text": "Prüfregeln für E-Mail-Format und Pflichtfelder festlegen",
+      "translation": "Описать правила проверки для e-mail и обязательных полей"
+    },
+    {
+      "text": "Prüfung an das Login-Formular anbinden und Absenden mit Fehlern verhindern",
+      "translation": "Подключить проверку к форме входа и не отправлять форму с ошибками"
+    },
+    {
+      "text": "Fehlermeldung unter dem jeweiligen Feld anzeigen",
+      "translation": "Показывать сообщение об ошибке под полем"
+    },
+    {
+      "text": "Prüfen, dass bei ungültigen Feldern keine Anfrage an die API geht",
+      "translation": "Проверить, что с неверными полями запрос к API не уходит"
+    }
+  ],
+  "open_questions": []
+}

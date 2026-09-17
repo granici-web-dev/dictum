@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +21,15 @@ from app.publish import (
     main,
     phase_list_name,
     publish,
+    publish_task,
     report,
 )
+from app.steps import Pair, Steps
 from app.trello import TrelloCard, TrelloError
 from tests.helpers import (
     BROKEN_ISSUES,
     DEPENDENCY_BELOW,
+    FIXTURES,
     FakeBoard,
     issues_file,
     real_issues,
@@ -659,3 +663,224 @@ def test_main_reports_a_board_that_fell_over(board: FakeBoard, tmp_path: Path) -
 def test_main_without_a_readable_file_is_a_usage_error(tmp_path: Path) -> None:
     assert main([]) == 64
     assert main([str(tmp_path / "нет-такого.json")]) == 64
+
+
+STEPS_DE = (FIXTURES / "steps_de.json").read_text(encoding="utf-8")
+STEPS_RUN = "7b2e0d91c4a3f615"
+
+
+def steps_file(directory: Path, change: Callable[[Steps], None] = lambda steps: None) -> Path:
+    steps = Steps.model_validate_json(STEPS_DE)
+    change(steps)
+    path = directory / "steps.json"
+    path.write_text(steps.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def snapshot_lines(name: str) -> list[str]:
+    return (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+
+
+def task_card(board: FakeBoard) -> dict[str, Any]:
+    [card] = board.cards
+    return card
+
+
+def put_task_on_board(board: FakeBoard, items: list[str] | None) -> dict[str, Any]:
+    """Карточка поручения, какой её оставил прошлый прогон: имя и описание по снимку."""
+    steps = Steps.model_validate_json(STEPS_DE)
+    card = board.add_card(
+        f"[DCT-1] {steps.title.text}",
+        (FIXTURES / "steps_de_card.txt").read_text(encoding="utf-8").strip(),
+        board.list_named("Assignments")["id"],
+    )
+    if items is not None:
+        board.put_checklist(card, "Steps", items)
+    return card
+
+
+def checklist_posts(board: FakeBoard, card: dict[str, Any]) -> list[str]:
+    checklist_id = card["checklists"][0]["id"]
+    return [fields["name"] for fields in board.posted(f"/1/checklists/{checklist_id}/checkItems")]
+
+
+def test_task_lands_as_one_card_with_the_steps_as_a_checklist(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    outcome = publish_task(steps_file(tmp_path))
+
+    card = task_card(board)
+    steps = Steps.model_validate_json(STEPS_DE)
+    assert card["name"] == f"[DCT-1] {steps.title.text}"
+    assert [item["name"] for item in card["checklists"]] == ["Steps"]
+    assert checklist_posts(board, card) == snapshot_lines("steps_de_checklist.txt")
+    assert card["idLabels"] == []
+    assert board.posted("/1/labels") == []
+    assert "due" not in board.posted("/1/cards")[0]
+    assert (outcome.key, outcome.local_id, outcome.status) == ("DCT-1", "A1", "created")
+
+
+def test_the_task_card_description_matches_the_snapshot(board: FakeBoard, tmp_path: Path) -> None:
+    publish_task(steps_file(tmp_path))
+
+    assert task_card(board)["desc"].splitlines() == snapshot_lines("steps_de_card.txt")
+
+
+def test_task_creates_the_assignments_list_on_the_left_and_nothing_else(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    board.add_list("To Do")
+
+    publish_task(steps_file(tmp_path))
+
+    assert [(fields["name"], fields["pos"]) for fields in board.posted("/1/lists")] == [
+        ("Assignments", "top")
+    ]
+    assert board.list_names() == ["Assignments", "To Do"]
+
+
+def test_task_reuses_an_existing_assignments_list(board: FakeBoard, tmp_path: Path) -> None:
+    assignments = board.add_list("Assignments")
+
+    publish_task(steps_file(tmp_path))
+
+    assert board.posted("/1/lists") == []
+    assert task_card(board)["idList"] == assignments["id"]
+
+
+def test_a_task_without_a_deadline_has_no_deadline_line_and_unconfirmed_words_are_marked(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    def spoken_loosely(steps: Steps) -> None:
+        assert steps.task is not None
+        steps.task.deadline = None
+        steps.task.do_not[0].in_transcript = False
+
+    publish_task(steps_file(tmp_path, spoken_loosely))
+
+    description = task_card(board)["desc"]
+    assert "Deadline:" not in description
+    assert (
+        "- Bitte die API nicht anfassen, die gehört dem Backend-Team. "
+        "(not found verbatim in transcript)"
+    ) in description.splitlines()
+
+
+def test_a_task_without_translations_has_no_translation_block_and_plain_items(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    def untranslated(steps: Steps) -> None:
+        for pair in (steps.title, steps.summary, *steps.steps):
+            pair.translation = None
+
+    publish_task(steps_file(tmp_path, untranslated))
+
+    card = task_card(board)
+    assert "Translation" not in card["desc"]
+    items = checklist_posts(board, card)
+    assert items == [step.text for step in Steps.model_validate_json(STEPS_DE).steps]
+    assert all(" / " not in item for item in items)
+
+
+def test_the_translation_block_keeps_the_open_questions(board: FakeBoard, tmp_path: Path) -> None:
+    def asked(steps: Steps) -> None:
+        steps.open_questions = [Pair(text="Wo liegt das Formular?", translation="Где форма?")]
+
+    publish_task(steps_file(tmp_path, asked))
+
+    lines = task_card(board)["desc"].splitlines()
+    translation = lines.index("Translation (ru):")
+    assert lines[translation + 3 : translation + 5] == ["Open questions:", "- Где форма?"]
+    assert "- Wo liegt das Formular?" in lines[:translation]
+
+
+def test_publishing_the_same_task_again_finds_its_card(board: FakeBoard, tmp_path: Path) -> None:
+    path = steps_file(tmp_path)
+    publish_task(path)
+
+    again = publish_task(path)
+
+    assert len(board.posted("/1/cards")) == 1
+    assert (again.key, again.status) == ("DCT-1", "existing")
+    journal = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
+    assert list(journal) == ["A1"]
+
+
+def test_a_task_card_without_its_checklist_gets_every_paired_item(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    card = put_task_on_board(board, None)
+
+    outcome = publish_task(steps_file(tmp_path))
+
+    assert board.posted("/1/cards") == []
+    assert [item["name"] for item in card["checklists"]] == ["Steps"]
+    assert checklist_posts(board, card) == snapshot_lines("steps_de_checklist.txt")
+    assert outcome.status == "completed"
+
+
+def test_publish_task_adds_the_paired_items_a_broken_run_never_wrote(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    items = snapshot_lines("steps_de_checklist.txt")
+    card = put_task_on_board(board, items[:2])
+
+    outcome = publish_task(steps_file(tmp_path))
+
+    assert checklist_posts(board, card) == items[2:]
+    assert outcome.status == "completed"
+
+
+def test_publish_task_leaves_a_checklist_built_from_other_steps_alone(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """Тот же немецкий шаг с другим переводом: чек-лист собран из другого steps.json."""
+    items = snapshot_lines("steps_de_checklist.txt")
+    retranslated = items[0].split(" / ")[0] + " / Задать правила проверки e-mail и полей"
+    card = put_task_on_board(board, [retranslated])
+
+    outcome = publish_task(steps_file(tmp_path))
+
+    assert checklist_posts(board, card) == []
+    assert outcome.status == "differs"
+
+
+def test_a_task_card_moved_to_the_owners_list_differs_and_is_left_alone(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    card = put_task_on_board(board, snapshot_lines("steps_de_checklist.txt"))
+    card["idList"] = board.add_list("In Progress")["id"]
+
+    outcome = publish_task(steps_file(tmp_path))
+
+    assert board.posted("/1/cards") == []
+    assert outcome.status == "differs"
+
+
+@pytest.mark.parametrize("missing", ["run_id", "task"])
+def test_main_refuses_steps_without_what_the_stage_stamps(
+    board: FakeBoard, tmp_path: Path, missing: str
+) -> None:
+    path = steps_file(tmp_path, lambda steps: setattr(steps, missing, None))
+
+    assert main([str(path)]) == 1
+    assert board.posted("/1/cards") == []
+
+
+def test_main_publishes_steps_and_prints_one_card(
+    board: FakeBoard, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([str(steps_file(tmp_path))]) == 0
+
+    printed = capsys.readouterr().out.split()
+    assert printed[:2] == ["Assignments", "DCT-1"]
+
+
+def test_main_does_not_guess_the_form_of_a_file_with_another_name(
+    respx_mock: respx.MockRouter, tmp_path: Path
+) -> None:
+    path = tmp_path / "other.json"
+    path.write_text(STEPS_DE, encoding="utf-8")
+
+    assert main([str(path)]) == 64
+    assert not respx_mock.calls

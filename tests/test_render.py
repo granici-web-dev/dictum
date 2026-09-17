@@ -10,9 +10,12 @@ from app.render import (
     review_lead,
     review_markdown,
     review_messages,
+    steps_digest,
+    steps_markdown,
     task_in_message,
 )
 from app.review import Quote, Review
+from app.steps import Steps
 from tests.helpers import FIXTURES, REAL_BRIEF, real_issues
 
 
@@ -142,9 +145,9 @@ def test_every_task_gets_its_own_message_with_the_summary_second() -> None:
 
     messages = review_messages(review)
 
-    assert len(messages) == len(review.tasks)
-    for number, (message, task) in enumerate(zip(messages, review.tasks, strict=True), start=1):
-        assert message.splitlines()[:2] == [f"{number}. {task.title}", task.summary]
+    assert [len(parts) for parts in messages] == [1] * len(review.tasks)
+    for number, (parts, task) in enumerate(zip(messages, review.tasks, strict=True), start=1):
+        assert parts[0].splitlines()[:2] == [f"{number}. {task.title}", task.summary]
 
 
 @pytest.mark.parametrize(("in_transcript", "marked"), [(False, True), (None, True), (True, False)])
@@ -156,7 +159,7 @@ def test_a_quote_is_marked_in_the_message_unless_the_check_confirmed_it(
     review.tasks = review.tasks[:1]
     review.tasks[0].quotes = [Quote(original="bis Freitag", in_transcript=in_transcript)]
 
-    lines = review_messages(review)[0].splitlines()
+    lines = review_messages(review)[0][0].splitlines()
 
     assert (NOT_FOUND_IN_MESSAGE in lines) is marked
 
@@ -170,11 +173,11 @@ def test_a_long_task_is_split_between_lines_and_no_part_is_over_the_limit() -> N
         for _ in range(3)
     ]
 
-    messages = review_messages(review)
+    [parts] = review_messages(review)
 
-    assert len(messages) > 1
-    assert all(len(message) <= MAX_MESSAGE_CHARACTERS for message in messages)
-    assert "\n".join(messages) == "\n".join(task_in_message(1, review.tasks[0]))
+    assert len(parts) > 1
+    assert all(len(part) <= MAX_MESSAGE_CHARACTERS for part in parts)
+    assert "\n".join(parts) == "\n".join(task_in_message(1, review.tasks[0]))
 
 
 def test_a_single_line_over_the_limit_is_cut_without_losing_text() -> None:
@@ -183,10 +186,10 @@ def test_a_single_line_over_the_limit_is_cut_without_losing_text() -> None:
     review.tasks = review.tasks[:1]
     review.tasks[0].summary = "Суть. " * 1000
 
-    messages = review_messages(review)
+    [parts] = review_messages(review)
 
-    assert all(len(message) <= MAX_MESSAGE_CHARACTERS for message in messages)
-    assert "".join(messages).count("Суть.") == 1000
+    assert all(len(part) <= MAX_MESSAGE_CHARACTERS for part in parts)
+    assert "".join(parts).count("Суть.") == 1000
 
 
 def test_a_quote_without_translation_has_no_arrow_line() -> None:
@@ -195,7 +198,7 @@ def test_a_quote_without_translation_has_no_arrow_line() -> None:
     review.tasks[0].quotes = [Quote(original="bis Freitag", in_transcript=True)]
     review.tasks[0].ask_back = []
 
-    lines = review_messages(review)[0].splitlines()
+    lines = review_messages(review)[0][0].splitlines()
 
     assert not any(line.lstrip().startswith("→") for line in lines)
 
@@ -220,3 +223,33 @@ def test_the_lead_of_a_meeting_without_tasks_names_its_topics() -> None:
     assert lead.startswith("Разбор встречи: поручений нет.")
     assert all(f"• {topic}" in lead for topic in review.topics)
     assert review_messages(review) == []
+
+
+def steps_de() -> Steps:
+    return Steps.model_validate_json((FIXTURES / "steps_de.json").read_text(encoding="utf-8"))
+
+
+def test_the_rendered_steps_match_the_snapshot() -> None:
+    expected = (FIXTURES / "steps_de.md").read_text(encoding="utf-8")
+
+    assert steps_markdown(steps_de()) == expected
+
+
+def test_the_steps_digest_names_the_task_the_steps_and_the_open_questions() -> None:
+    steps = steps_de()
+
+    assert steps_digest(steps) == (
+        "Поручение 1 «Проверять форму входа в браузере до отправки»: 4 шага, "
+        "открытых вопросов 0."
+    )
+
+
+def test_steps_without_translation_show_no_arrows_and_a_title_in_the_meeting_language() -> None:
+    steps = steps_de()
+    for pair in (steps.title, steps.summary, *steps.steps):
+        pair.translation = None
+
+    rendered = steps_markdown(steps)
+
+    assert "→" not in rendered.split("## Ask back")[0]
+    assert steps_digest(steps).startswith(f"Поручение 1 «{steps.title.text}»: 4 шага")

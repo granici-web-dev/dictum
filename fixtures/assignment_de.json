@@ -1,0 +1,57 @@
+{
+  "run_id": "7b2e0d91c4a3f615",
+  "parent_run_id": "3f9c1a7e5b2d8c40",
+  "number": 1,
+  "meeting_lang": "de",
+  "owner_lang": "ru",
+  "task": {
+    "title": "Проверка формы входа до отправки на сервер",
+    "summary": "Проверять поля формы входа в браузере, пока ничего не ушло на сервер: формат e-mail и обязательные поля. API не трогать, он принадлежит Backend-Team.",
+    "assigned_by": "Teamlead",
+    "assignee": "du (имя не названо)",
+    "status": "decision",
+    "deadline": {
+      "text": "до пятницы",
+      "original": "bis Freitag",
+      "in_transcript": true
+    },
+    "constraints": [
+      {
+        "text": "проверка в браузере, до отправки на сервер",
+        "original": "Die Felder sollen im Browser geprüft werden, bevor irgendwas an den Server geht",
+        "in_transcript": true
+      },
+      {
+        "text": "формат e-mail и обязательные поля",
+        "original": "also E-Mail-Format und Pflichtfelder",
+        "in_transcript": true
+      }
+    ],
+    "do_not": [
+      {
+        "text": "трогать API: он принадлежит Backend-Team",
+        "original": "Bitte die API nicht anfassen, die gehört dem Backend-Team.",
+        "in_transcript": true
+      }
+    ],
+    "ask_back": [
+      {
+        "text": "касается ли проверка и регистрации: тимлид сам этого ещё не знает",
+        "question": "Gilt die Prüfung auch für die Registrierung?",
+        "translation": "Проверка касается и регистрации?"
+      }
+    ],
+    "quotes": [
+      {
+        "original": "Erstens das Login-Formular.",
+        "translation": "Во-первых, форма входа.",
+        "in_transcript": true
+      },
+      {
+        "original": "Kannst du das bis Freitag machen?",
+        "translation": "Сможешь сделать это до пятницы?",
+        "in_transcript": true
+      }
+    ]
+  }
+}

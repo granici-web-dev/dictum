@@ -1,9 +1,13 @@
 """publish: issues.json → списки, карточки, чеклисты DoD и лейблы Trello. См. SPEC.md §6.
 
 python -m app.publish outputs/issues.json
+python -m app.publish outputs/steps.json
+
+Путь идеи ложится фазами в списки, а поручение одной карточкой в список Assignments, с шагами
+чек-листом. Форму выбирает стадия, а у ручной команды имя файла-контракта, но не его содержимое.
 
 Что уже опубликовано, знает доска: в description каждой карточки стоит маркер
-dictum:<KEY-N> run:<run_id> local:<I-00N|S<N>>. Рядом с issues.json пишется publish.json —
+dictum:<KEY-N> run:<run_id> local:<I-00N|S<N>|A<N>>. Рядом с файлом пишется publish.json —
 кэш этого отображения для человека, не источник.
 """
 
@@ -20,6 +24,8 @@ from pydantic import BaseModel
 
 from app.config import ConfigError, InvalidProjectKey, settings
 from app.models import Area, Issue, IssuesFile, Phase
+from app.review import Said
+from app.steps import Pair, Steps, TaskRef, schema_problems
 from app.trello import Trello, TrelloCard, TrelloChecklist, TrelloError, open_trello
 from app.validate import check_issues
 
@@ -30,6 +36,13 @@ logger = logging.getLogger("app.publish")
 
 BACKLOG = "Backlog"
 DOD = "DoD"
+# Входной список поручений: отсюда владелец двигает карточки по своим колонкам, а бот в его
+# колонки не пишет.
+ASSIGNMENTS_LIST = "Assignments"
+STEPS_CHECKLIST = "Steps"
+ISSUES_FILE = "issues.json"
+STEPS_FILE = "steps.json"
+NOT_FOUND_ON_CARD = "(not found verbatim in transcript)"
 
 LabelName = Area | Literal["deferred"]
 DEFERRED: LabelName = "deferred"
@@ -69,15 +82,30 @@ EXIT_USAGE = 64
 
 
 class MissingRunId(ValueError):
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, stamped_by: str = "decompose из transcript.md") -> None:
         super().__init__(
-            f"в {path} нет run_id. Его проставляет decompose из transcript.md (SPEC §3.1); "
+            f"в {path} нет run_id. Его проставляет {stamped_by} (SPEC §3.1); "
             "publish своего не выдаёт, иначе у прогона было бы два разных номера. "
             "Если карточки этого прогона уже на доске, возьмите run: из маркера любой из них."
         )
 
 
+class MissingTask(ValueError):
+    def __init__(self, path: Path) -> None:
+        super().__init__(
+            f"в {path} нет task: срок, условия и «не надо» вписывает стадия steps из "
+            "assignment.json, и без них карточка потеряла бы сказанное на встрече. "
+            "Повторите стадию: make run-text ARGS=\"--from steps\"."
+        )
+
+
 class InvalidIssues(ValueError):
+    def __init__(self, problems: list[str]) -> None:
+        super().__init__(f"проблем {len(problems)}")
+        self.problems = problems
+
+
+class InvalidSteps(ValueError):
     def __init__(self, problems: list[str]) -> None:
         super().__init__(f"проблем {len(problems)}")
         self.problems = problems
@@ -372,6 +400,106 @@ def journal_of(issues_path: Path) -> Path:
     return issues_path.parent / JOURNAL_NAME
 
 
+def said_on_card(said: Said) -> str:
+    return said.original if said.in_transcript is True else f"{said.original} {NOT_FOUND_ON_CARD}"
+
+
+def task_card_body(steps: Steps, task: TaskRef) -> str:
+    """Описание карточки поручения над маркером: сказанное в оригинале, перевод блоком в конце.
+
+    Перевода шагов здесь нет: он стоит парой в каждом пункте чек-листа, где по шагам и работают.
+    """
+    lines = [steps.summary.text]
+    said: list[str] = []
+    if task.deadline:
+        said.append(f"Deadline: {said_on_card(task.deadline)}")
+    for heading, items in (("Constraints:", task.constraints), ("Do not:", task.do_not)):
+        if items:
+            said += [heading, *(f"- {said_on_card(item)}" for item in items)]
+    if task.ask_back:
+        said += ["Ask back:", *(f"- {ask.question}" for ask in task.ask_back)]
+    if steps.open_questions:
+        said += ["Open questions:", *(f"- {question.text}" for question in steps.open_questions)]
+    if said:
+        lines += ["", *said]
+
+    translated = [pair.translation for pair in (steps.title, steps.summary) if pair.translation]
+    questions = [question.translation for question in steps.open_questions if question.translation]
+    if translated or questions:
+        lines += ["", f"Translation ({steps.owner_lang}):", *translated]
+        if questions:
+            lines += ["Open questions:", *(f"- {question}" for question in questions)]
+    lines += ["", f"From review: {task.parent_run_id}, task {task.number}"]
+    return "\n".join(lines)
+
+
+def step_item(pair: Pair) -> str:
+    """Пункт чек-листа: шаг на языке встречи и перевод через косую черту в одном пункте."""
+    text = pair.text.strip()
+    translation = (pair.translation or "").strip()
+    return f"{text} / {translation}" if translation else text
+
+
+def ensure_assignments_list(board: Trello) -> str:
+    for item in board.lists():
+        if item.name == ASSIGNMENTS_LIST:
+            return item.id
+    # Слева: это вход, из которого карточки разбирают по колонкам.
+    return board.create_list(ASSIGNMENTS_LIST, "top").id
+
+
+def publish_task(steps_path: Path) -> CardOutcome:
+    """Поручение одной карточкой: суть и сказанное в описании, шаги чек-листом Steps."""
+    text = steps_path.read_text(encoding="utf-8")
+    problems = schema_problems(text)
+    if problems:
+        raise InvalidSteps(problems)
+    steps = Steps.model_validate_json(text)
+    prefix = project_key()
+    if not steps.run_id:
+        raise MissingRunId(steps_path, "стадия steps из assignment.json")
+    if steps.task is None:
+        raise MissingTask(steps_path)
+    run_id = steps.run_id
+    local_id = f"A{steps.task.number}"
+    log_path = journal_of(steps_path)
+
+    with closing(open_trello()) as board:
+        on_board = marked_cards(board.cards())
+        known = next(
+            (
+                found
+                for found in on_board
+                if found.run_id == run_id and found.local_id == local_id
+            ),
+            None,
+        )
+        published = (
+            {local_id: PublishedCard(key=known.key, card_id=known.card.id, url=known.card.url)}
+            if known
+            else {}
+        )
+        planned = PlannedCard(
+            local_id=local_id,
+            phase=None,
+            list_id=ensure_assignments_list(board),
+            title=steps.title.text.strip(),
+            body=task_card_body(steps, steps.task),
+            label_ids=[],
+            checklist_name=STEPS_CHECKLIST,
+            checklist=[step_item(step) for step in steps.steps],
+            depends_on=[],
+            position=1,
+        )
+        if known:
+            outcome = revisit_card(board, known, run_id, planned, published)
+        else:
+            key = f"{prefix}-{next_number(on_board, prefix)}"
+            outcome = make_card(board, key, run_id, planned, published)
+        write_log(log_path, published, [local_id])
+        return outcome
+
+
 def publish(issues_path: Path) -> list[CardOutcome]:
     text = issues_path.read_text(encoding="utf-8")
     problems = check_issues(text)
@@ -427,13 +555,31 @@ def report(outcomes: list[CardOutcome]) -> None:
         print(f"  {outcome.key:<{key_width}}  {word:<{status_width}}  {outcome.url}")
 
 
+def report_task(outcome: CardOutcome) -> None:
+    print(f"\n{ASSIGNMENTS_LIST}")
+    print(f"  {outcome.key}  {STATUS_WORDS[outcome.status]}  {outcome.url}")
+
+
+USAGE = "usage: python -m app.publish outputs/issues.json | outputs/steps.json"
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     if len(arguments) != 1:
-        print("usage: python -m app.publish outputs/issues.json", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return EXIT_USAGE
 
     path = Path(arguments[0])
+    if path.name not in (ISSUES_FILE, STEPS_FILE):
+        # Форма публикации по содержимому JSON угадывалась бы и сломалась на первом же поле с
+        # тем же именем, а имя файла-контракта её называет.
+        print(
+            f"{path.name}: публикуется {ISSUES_FILE} пути идеи или {STEPS_FILE} поручения",
+            USAGE,
+            sep="\n",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     try:
         path.read_text(encoding="utf-8")
     except OSError as error:
@@ -441,16 +587,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
-        outcomes = publish(path)
-    except InvalidIssues as invalid:
+        if path.name == STEPS_FILE:
+            report_task(publish_task(path))
+        else:
+            report(publish(path))
+    except (InvalidIssues, InvalidSteps) as invalid:
         print(f"{path}: проблем {len(invalid.problems)}", file=sys.stderr)
         for problem in invalid.problems:
             print(f"  {problem}", file=sys.stderr)
         return EXIT_FAILED
-    except (MissingRunId, ConfigError, TrelloError, httpx.HTTPError) as error:
+    except (MissingRunId, MissingTask, ConfigError, TrelloError, httpx.HTTPError) as error:
         logger.error("%s", error)
         return EXIT_FAILED
-    report(outcomes)
     return EXIT_OK
 
 

@@ -227,7 +227,7 @@ class FakeBoard:
 
     def handle_post(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        fields = dict(parse_qsl(request.content.decode()))
+        fields = dict(parse_qsl(request.content.decode(), keep_blank_values=True))
         self.posts.append((path, fields))
         if path == "/1/lists":
             return httpx.Response(200, json=self.add_list(fields["name"], fields["pos"]))

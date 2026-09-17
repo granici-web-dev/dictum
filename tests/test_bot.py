@@ -2647,6 +2647,11 @@ def reviewing_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, review_json: s
     return tmp_path / "runs" / "разбор"
 
 
+def sent_parts(review_json: str) -> list[str]:
+    review = Review.model_validate_json(review_json)
+    return [part for parts in review_messages(review) for part in parts]
+
+
 @pytest.mark.asyncio
 async def test_a_review_reaches_the_person_as_one_message_per_task_then_both_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
@@ -2659,7 +2664,7 @@ async def test_a_review_reaches_the_person_as_one_message_per_task_then_both_fil
 
     assert chat.edits[-1] == review_lead(Review.model_validate_json(REVIEW_DE))
     assert chat.sent == [
-        *review_messages(Review.model_validate_json(REVIEW_DE)),
+        *sent_parts(REVIEW_DE),
         root / REVIEW_MD,
         root / TRANSCRIPT,
     ]
@@ -2684,7 +2689,7 @@ async def test_a_review_without_tasks_still_sends_the_review_and_the_transcript(
 async def test_a_task_message_that_did_not_go_keeps_the_rest_of_the_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
-    messages = review_messages(Review.model_validate_json(REVIEW_DE))
+    messages = sent_parts(REVIEW_DE)
     root = reviewing_in(tmp_path, monkeypatch, REVIEW_DE)
     chat = DeliveryChat("Встреча текстом", failing=messages[0])
 
@@ -2704,7 +2709,7 @@ async def test_a_review_file_that_did_not_go_keeps_the_transcript(
     await on_text(an_update(chat), NO_CONTEXT)
 
     assert chat.sent[-2:] == [
-        review_messages(Review.model_validate_json(REVIEW_DE))[-1],
+        sent_parts(REVIEW_DE)[-1],
         root / TRANSCRIPT,
     ]
     assert store.status[root.name] == REVIEWED

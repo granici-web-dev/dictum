@@ -927,9 +927,10 @@ async def send_review(note: Message, run: Run, review: Review) -> None:
     поручения не должно отнять у человека остальные и расшифровку, по которой их проверяют.
     Расшифровка уходит и при пустом разборе: «заданий нет» проверяют как раз по ней.
     """
-    for text in review_messages(review):
-        with suppress(TelegramError):
-            await note.reply_text(text)
+    for parts in review_messages(review):
+        for text in parts:
+            with suppress(TelegramError):
+                await note.reply_text(text)
     for document in (REVIEW_MD, TRANSCRIPT):
         with suppress(TelegramError):
             await note.reply_document(run.root / document)

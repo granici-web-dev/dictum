@@ -1,6 +1,7 @@
 """outputs/issues.md — тот же бэклог для чтения человеком на воротах. См. SPEC.md §7.
 
-Здесь же разбор встречи из review.json: outputs/review.md и сообщения бота (P3-08).
+Здесь же разбор встречи из review.json: outputs/review.md и сообщения бота (P3-08), и шаги
+поручения из steps.json: outputs/steps.md для ворот.
 
 Раньше его писала модель вторым файлом: половина выхода стадии уходила на копию, потолок
 токенов срезал ответ, и две копии могли разойтись, не поспорив об этом вслух.
@@ -14,6 +15,7 @@ import frontmatter
 
 from app.models import Issue, IssuesFile
 from app.review import AskBack, Quote, Review, Said, Task
+from app.steps import Pair, Steps
 
 NOTHING = "—"
 
@@ -248,10 +250,68 @@ def split_message(lines: list[str]) -> list[str]:
     return ["\n".join(part) for part in parts]
 
 
-def review_messages(review: Review) -> list[str]:
-    """По сообщению на поручение, в порядке встречи; длинное поручение уходит несколькими."""
+def review_messages(review: Review) -> list[list[str]]:
+    """Части сообщения каждого поручения, в порядке встречи; длинное поручение делится на части.
+
+    Части сгруппированы по поручению: кнопку поручения вешают на его последнюю часть.
+    """
     return [
-        message
+        split_message(task_in_message(number, task))
         for number, task in enumerate(review.tasks, start=1)
-        for message in split_message(task_in_message(number, task))
     ]
+
+
+def pair_in_file(pair: Pair, lead: str, indent: str) -> list[str]:
+    """Текст на языке встречи и перевод стрелкой строкой ниже, как цитата в review.md."""
+    lines = [f"{lead}{pair.text}"]
+    if pair.translation:
+        lines.append(f"{indent}→ {pair.translation}")
+    return lines
+
+
+def steps_markdown(steps: Steps) -> str:
+    """Шаги поручения для чтения на воротах, вместе со сказанным на встрече о поручении."""
+    lines = [*pair_in_file(steps.title, "# ", ""), "", *pair_in_file(steps.summary, "", "")]
+    task = steps.task
+    if task:
+        deadline = said_in_file(task.deadline) if task.deadline else NOTHING
+        lines += [
+            "",
+            f"- **From review:** `{task.parent_run_id}`, task {task.number}",
+            f"- **Deadline:** {deadline}",
+        ]
+        for heading, said in (("Constraints", task.constraints), ("Do not", task.do_not)):
+            if said:
+                lines += ["", f"## {heading}", "", *(f"- {said_in_file(item)}" for item in said)]
+    lines += ["", "## Steps", ""]
+    for number, step in enumerate(steps.steps, start=1):
+        lines += pair_in_file(step, f"{number}. ", "   ")
+    if steps.open_questions:
+        lines += ["", "## Open questions", ""]
+        for question in steps.open_questions:
+            lines += pair_in_file(question, "- ", "  ")
+    if task and task.ask_back:
+        lines += ["", "## Ask back", ""]
+        for ask in task.ask_back:
+            lines += ask_back_in_file(ask)
+    return "\n".join(lines) + "\n"
+
+
+def steps_count(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        word = "шаг"
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = "шага"
+    else:
+        word = "шагов"
+    return f"{count} {word}"
+
+
+def steps_digest(steps: Steps) -> str:
+    """Шаги на воротах одной строкой: номер и название поручения, сколько шагов и вопросов."""
+    number = f" {steps.task.number}" if steps.task else ""
+    title = steps.title.translation or steps.title.text
+    return (
+        f"Поручение{number} «{title}»: {steps_count(len(steps.steps))}, "
+        f"открытых вопросов {len(steps.open_questions)}."
+    )
