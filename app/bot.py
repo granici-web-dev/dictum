@@ -49,6 +49,7 @@ from app.pipeline import (
     NAMES,
     REVIEW_JSON,
     REVIEW_MD,
+    STEPS_JSON,
     TRANSCRIPT,
     Stage,
     StopKind,
@@ -57,10 +58,17 @@ from app.pipeline import (
     route_of,
     stages_between,
 )
-from app.publish import journal_of
-from app.render import backlog_digest, brief_digest, review_lead, review_messages
+from app.publish import ASSIGNMENTS_LIST, PublishedCard, journal_of
+from app.render import (
+    backlog_digest,
+    brief_digest,
+    review_lead,
+    review_messages,
+    steps_digest,
+)
 from app.review import Review
 from app.run import Pause, Redo, Run, read_artifact, walk
+from app.steps import Steps
 from app.store import (
     FAILED,
     NO_TASK,
@@ -69,12 +77,16 @@ from app.store import (
     one_bot_per_database,
     PUBLISHED,
     REVIEWED,
+    Parent,
     Stopped,
     add_turn,
+    child_of,
     drop_stop,
     fail_orphans,
     finish_run,
     mark_stage,
+    parent_of,
+    reopen_run,
     start_run,
     stop_run,
     waiting_for,
@@ -95,6 +107,7 @@ logger = logging.getLogger("app.bot")
 
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
+TASK_ROUTE_START, TASK_ROUTE_END = "assignment", "card"
 VOICE_FILE = "inputs/voice.oga"
 
 # TODO(P3-09): одна граница длины для голосового и файла.
@@ -132,8 +145,8 @@ INGEST_LABEL: dict[Source, str] = {"voice": VOICE_INGEST_LABEL, "file": FILE_ING
 GATES_ON, GATES_OFF = "on", "off"
 
 GATES_STATE = {
-    False: "Ворота включены: прогон встанет после брифа и после разбора на задачи.",
-    True: "Ворота выключены: прогон идёт до карточек без подтверждений.",
+    False: "Ворота включены: поручение встанет на шагах, прежде чем попасть на доску.",
+    True: "Ворота выключены: поручение идёт до доски без подтверждения шагов.",
 }
 
 GATES_FROM_NEXT_RUN = " Это со следующего прогона, идущий доходит со своим режимом."
@@ -145,7 +158,8 @@ GATES_UNKNOWN = (
 GREETING = (
     "Пришлите запись встречи файлом, голосовое или текст. Я выпишу все поручения: кто поручил, "
     "срок, что не надо и что переспросить, со сказанным в оригинале и переводом.\n"
-    "Это займёт пару минут — я буду писать после каждого шага."
+    "Кнопка «Разложить на шаги» под поручением разложит его на шаги и положит карточкой в Trello.\n"
+    "Это займёт пару минут, я буду писать после каждого шага."
 )
 
 BUSY = "Прогон уже идёт, дождитесь его конца."
@@ -223,6 +237,16 @@ STOP_ALIVE = (
     "Прогон {run_id} ждёт вашего ответа выше. Ответьте там или пришлите /start, чтобы его снять, "
     "затем повторите."
 )
+
+TASK_BUTTON = "Разложить на шаги"
+
+PARENT_GONE = (
+    "Файлы этого разбора удалены с диска, кнопка больше не работает. Пришлите запись заново."
+)
+
+ALREADY_PUBLISHED = "Поручение {number} уже на доске: карточка {key}.\n{url}"
+
+CARD_FINISHED = f"Готово: карточка {{key}} в списке {ASSIGNMENTS_LIST}.\n{{url}}"
 
 NEXT, EDIT, STOP = "next", "edit", "stop"
 
@@ -332,6 +356,13 @@ def finished_text(root: Path) -> str:
     )
 
 
+def task_card(root: Path) -> PublishedCard:
+    """Карточка поручения из журнала его прогона: ключ `A<N>` в журнале один."""
+    journal = json.loads(journal_of(root / STEPS_JSON).read_text(encoding="utf-8"))
+    (card,) = journal.values()
+    return PublishedCard.model_validate(card)
+
+
 def started_run(
     run_id: str,
     chat_id: int,
@@ -355,6 +386,30 @@ def started_run(
         consent_confirmed=consent_confirmed,
         auto_approve=auto_approve_for(chat_id),
     )
+
+
+def child_run(run_id: str, parent: Parent, number: int, auto_approve: bool) -> Run:
+    """Прогон по поручению из разбора: язык и источник записи — факты родителя (§4.1)."""
+    return Run(
+        root=RUNS / run_id,
+        run_id=run_id,
+        lang=parent.lang,
+        source=parent.source,
+        auto_approve=auto_approve,
+        parent_root=RUNS / parent.run_id,
+        parent_run_id=parent.run_id,
+        assignment=number,
+    )
+
+
+def resumed_start(root: Path) -> str:
+    """Откуда вести сорванный прогон поручения.
+
+    Журнал рядом с шагами значит, что публикация начиналась: карточка может стоять на доске, и
+    пересобирать шаги значило бы оплатить их второй раз и дособирать карточку другим набором.
+    Без журнала до доски дело не дошло, и шаги собираются заново с поручения.
+    """
+    return TASK_ROUTE_END if journal_of(root / STEPS_JSON).exists() else TASK_ROUTE_START
 
 
 def continued(stopped: Stopped) -> Run:
@@ -702,6 +757,98 @@ async def on_assemble_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await follow(note, run, datetime.now(timezone.utc), stopped.stage, redo)
 
 
+async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка под поручением: шаги и карточка дочерним прогоном разбора (SPEC §7.3).
+
+    Нажатие не снимает клавиатуру: сообщения разбора живут в чате вечно, и повторное нажатие
+    отвечает по состоянию прогона, а не по тому, осталась ли кнопка.
+    """
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("task=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    pressed = task_of(query)
+    if pressed is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    parent_id, number = pressed
+    if running.locked():
+        await refuse(message, "busy", BUSY, run=parent_id, task=number)
+        return
+
+    async with running:
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is not None:
+            await refuse(
+                message,
+                "stop_alive",
+                STOP_ALIVE.format(run_id=stopped.run_id),
+                run=stopped.run_id,
+                task=number,
+            )
+            return
+        parent = await asyncio.to_thread(parent_of, parent_id, message.chat_id)
+        if parent is None or parent.status != REVIEWED:
+            await refuse(message, "stale_button", STALE_BUTTON, run=parent_id, task=number)
+            return
+        if not (RUNS / parent_id / REVIEW_JSON).exists():
+            await refuse(message, "parent_gone", PARENT_GONE, run=parent_id, task=number)
+            return
+        child = await asyncio.to_thread(child_of, parent_id, number)
+        if child is not None and child.status == PUBLISHED:
+            card = await asyncio.to_thread(task_card, RUNS / child.run_id)
+            await refuse(
+                message,
+                "already_published",
+                ALREADY_PUBLISHED.format(number=number, key=card.key, url=card.url),
+                run=child.run_id,
+                parent=parent_id,
+                task=number,
+            )
+            return
+        if child is None:
+            run = child_run(new_run_id(), parent, number, auto_approve_for(message.chat_id))
+            start, resume = TASK_ROUTE_START, NO_RUN
+            await asyncio.to_thread(
+                start_run,
+                run.run_id,
+                message.chat_id,
+                run.source,
+                run.lang,
+                run.auto_approve,
+                None,
+                start,
+                parent_id,
+                number,
+            )
+        else:
+            # Тот же run_id, а не новый: карточка сорванной публикации несёт его в маркере, и
+            # только с ним повтор найдёт её на доске, а не поставит вторую рядом (§6).
+            run = child_run(child.run_id, parent, number, child.auto_approve)
+            start = resume = await asyncio.to_thread(resumed_start, run.root)
+            await asyncio.to_thread(reopen_run, run.run_id, start)
+        logger.info(
+            "start=task run=%s parent=%s task=%s chat=%s resume=%s",
+            run.run_id,
+            parent_id,
+            number,
+            message.chat_id,
+            resume,
+        )
+        # Ответом на само поручение: под разбором их несколько, и ход прогона должен называть,
+        # какое из них раскладывается. В личном чате PTB без do_quote не цитирует.
+        note = await message.reply_text(
+            progress_text(run, done_before(start), start), do_quote=True
+        )
+        await follow(note, run, datetime.now(timezone.utc), start)
+
+
 async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запись с диктофона: сначала вопрос о согласии, и больше ничего (SPEC §3.1).
 
@@ -930,10 +1077,13 @@ async def send_review(note: Message, run: Run, review: Review) -> None:
     поручения не должно отнять у человека остальные и расшифровку, по которой их проверяют.
     Расшифровка уходит и при пустом разборе: «заданий нет» проверяют как раз по ней.
     """
-    for parts in review_messages(review):
-        for text in parts:
+    for number, parts in enumerate(review_messages(review), start=1):
+        for text in parts[:-1]:
             with suppress(TelegramError):
                 await note.reply_text(text)
+        # Кнопка на последней части: под ней поручение уже прочитано целиком.
+        with suppress(TelegramError):
+            await note.reply_text(parts[-1], reply_markup=task_keyboard(run.run_id, number))
     for document in (REVIEW_MD, TRANSCRIPT):
         with suppress(TelegramError):
             await note.reply_document(run.root / document)
@@ -1085,6 +1235,12 @@ def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
     )
 
 
+def task_keyboard(run_id: str, number: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}")]]
+    )
+
+
 def choice_keyboard(run_id: str, ideas: list[Idea]) -> InlineKeyboardMarkup:
     # На кнопке только номер: название стоит строкой выше в том же сообщении, а на кнопке его
     # обрезала бы ширина экрана неизвестно где. Ворота своим кнопкам называют ещё и стадию,
@@ -1103,12 +1259,17 @@ def backlog_of(run: Run) -> str:
     return backlog_digest(IssuesFile.model_validate_json(read_artifact(run.root, ISSUES_JSON)))
 
 
+def steps_of(run: Run) -> str:
+    return steps_digest(Steps.model_validate_json(read_artifact(run.root, STEPS_JSON)))
+
+
 # Ворота объявляет список стадий (`gate_after`), а короткое содержание пишет код: третьи
 # ворота, заведённые данными, обязаны упереться здесь, а не показать человеку «Бриф готов.»
 # над чужим артефактом.
 GATE_DIGESTS: dict[str, Callable[[Run], str]] = {
     "brief": lambda run: brief_digest(read_artifact(run.root, BRIEF)),
     "decompose": backlog_of,
+    "steps": steps_of,
 }
 
 
@@ -1148,6 +1309,14 @@ def choice_of(query: CallbackQuery) -> tuple[str, str] | None:
     return (parts[1], parts[2]) if parts and parts[2].isdecimal() else None
 
 
+def task_of(query: CallbackQuery) -> tuple[str, int] | None:
+    """Разбор и номер поручения из данных кнопки. Поручения нумеруются с единицы, как в разборе."""
+    parts = button_of(query, 3)
+    if not parts or not parts[2].isdecimal() or int(parts[2]) < 1:
+        return None
+    return parts[1], int(parts[2])
+
+
 def assembling_run(query: CallbackQuery) -> str | None:
     """Прогон, которому сказали кончать спрашивать."""
     parts = button_of(query, 2)
@@ -1164,6 +1333,12 @@ def choice_ending(run: Run, stop: Pause) -> Ending:
     return Ending(
         text=choice_text(found), stop=stop, keyboard=choice_keyboard(run.run_id, found.ideas)
     )
+
+
+def card_ending(run: Run) -> Ending:
+    card = task_card(run.root)
+    logger.info("run=%s finished card=%s", run.run_id, card.key)
+    return Ending(text=CARD_FINISHED.format(key=card.key, url=card.url), status=PUBLISHED)
 
 
 def review_ending(run: Run) -> Ending:
@@ -1206,6 +1381,8 @@ async def outcome(
             )
         if route_end(start) == "review":
             return review_ending(run)
+        if route_end(start) == TASK_ROUTE_END:
+            return card_ending(run)
         cards = cards_published(run.root)
         logger.info("run=%s finished cards=%d", run.run_id, cards)
         return Ending(text=finished_text(run.root), status=PUBLISHED)
@@ -1297,6 +1474,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
     application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
     application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
+    application.add_handler(CallbackQueryHandler(on_child_button, pattern=r"^task:"))
     # Последним и почти без фильтра по типу: молчание в ответ на присланный файл или на опечатку
     # в команде человек читает как поломку бота. /start сюда не доходит, его забирает
     # обработчик выше. Служебные события чата (кто-то вошёл, сменилось название) под отказ не

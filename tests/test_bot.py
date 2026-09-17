@@ -47,6 +47,10 @@ from app.bot import (
     QUESTION_TAIL,
     STALE_BUTTON,
     STOP_ALIVE,
+    ALREADY_PUBLISHED,
+    CARD_FINISHED,
+    PARENT_GONE,
+    TASK_BUTTON,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
@@ -60,6 +64,7 @@ from app.bot import (
     on_consent_button,
     on_recording,
     on_gate_button,
+    on_child_button,
     on_start,
     on_text,
     on_voice,
@@ -86,6 +91,8 @@ from app.pipeline import (
     NAMES,
     REVIEW_JSON,
     REVIEW_MD,
+    STEPS_JSON,
+    STEPS_MD,
     TRANSCRIPT,
     Stage,
     StopKind,
@@ -104,11 +111,14 @@ from app.store import (
     REFUSED,
     REVIEWED,
     STATUS_OF_STOP,
+    Child,
+    Parent,
     Stopped,
 )
-from app.render import review_lead, review_messages
+from app.render import review_lead, review_messages, steps_digest
+from app.steps import Steps
 from app.review import Review
-from tests.helpers import REAL_BRIEF, REAL_ISSUES
+from tests.helpers import REAL_BRIEF, REAL_ISSUES, STEPS_DE
 from tests.test_review import REVIEW_DE, REVIEW_NONE
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
@@ -133,6 +143,9 @@ class FakeStore:
         self.approved: dict[str, bool] = {}
         self.started: list[tuple[str, int, str]] = []
         self.turns: dict[str, list[Turn]] = {}
+        self.langs: dict[str, str] = {}
+        # Кто чей ребёнок и по какому поручению: (родитель, номер) у строки из кнопки разбора.
+        self.children: dict[str, tuple[str, int | None]] = {}
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
@@ -172,8 +185,32 @@ class FakeStore:
         self.chats[run_id] = chat_id
         self.status[run_id] = status
         self.sources[run_id] = source
+        self.langs[run_id] = lang
         self.consents[run_id] = consent_confirmed
         self.approved[run_id] = auto_approve
+        if parent_id is not None:
+            self.children[run_id] = (parent_id, assignment)
+
+    def parent_of(self, run_id: str, chat_id: int) -> Parent | None:
+        if self.chats.get(run_id) != chat_id or self.status[run_id] not in (REVIEWED, NO_TASK):
+            return None
+        return Parent(
+            run_id=run_id,
+            lang=self.langs[run_id],
+            source=self.sources[run_id],
+            status=self.status[run_id],
+        )
+
+    def child_of(self, parent_id: str, assignment: int | None) -> Child | None:
+        for run_id, chosen in self.children.items():
+            if chosen == (parent_id, assignment) and self.status[run_id] != DROPPED:
+                return Child(
+                    run_id=run_id, status=self.status[run_id], auto_approve=self.approved[run_id]
+                )
+        return None
+
+    def reopen_run(self, run_id: str, status: str) -> None:
+        self.status[run_id] = status
 
     def mark_stage(self, run_id: str, status: str, lang: str) -> None:
         self.status[run_id] = status
@@ -221,6 +258,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
         "stop_run",
         "finish_run",
         "drop_stop",
+        "parent_of",
+        "child_of",
+        "reopen_run",
     ):
         monkeypatch.setattr(bot, name, getattr(fake, name))
     return fake
@@ -487,9 +527,15 @@ class QuietChat:
 
     def __init__(self) -> None:
         self.replies: list[str] = []
+        self.reply_markups: list[object] = []
+        self.reply_quoted: list[bool | None] = []
 
-    async def reply_text(self, text: str) -> Message:
+    async def reply_text(
+        self, text: str, reply_markup: object = None, do_quote: bool | None = None
+    ) -> Message:
         self.replies.append(text)
+        self.reply_markups.append(reply_markup)
+        self.reply_quoted.append(do_quote)
         return cast(Message, self)
 
 
@@ -2624,12 +2670,14 @@ class DeliveryChat(TextChat):
         self.sent: list[str | Path] = []
         self.failing = failing
 
-    async def reply_text(self, text: str) -> Message:
+    async def reply_text(
+        self, text: str, reply_markup: object = None, do_quote: bool | None = None
+    ) -> Message:
         if self.replies:
             if isinstance(self.failing, str) and text.startswith(self.failing):
                 raise TelegramError("сообщение не ушло")
             self.sent.append(text)
-        return await super().reply_text(text)
+        return await super().reply_text(text, reply_markup, do_quote)
 
     async def reply_document(self, document: Path) -> Message:
         if document == self.failing:
@@ -2713,3 +2761,419 @@ async def test_a_review_file_that_did_not_go_keeps_the_transcript(
         root / TRANSCRIPT,
     ]
     assert store.status[root.name] == REVIEWED
+
+
+# Путь поручения (P3-08, фаза 2, часть D): кнопка под сообщением поручения заводит дочерний прогон.
+
+PARENT = "разбор"
+
+
+def a_review_in_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    status: str = REVIEWED,
+    chat_id: int = 12,
+) -> Path:
+    """Разбор голосового, законченный в чате: строка в базе и review.json на диске."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    store.start_run(PARENT, chat_id, "voice", "de", False, None, "ingest")
+    store.status[PARENT] = status
+    root = tmp_path / "runs" / PARENT
+    (root / "outputs").mkdir(parents=True)
+    (root / REVIEW_JSON).write_text(REVIEW_DE, encoding="utf-8")
+    return root
+
+
+def a_task_button(number: str = "1", parent: str = PARENT) -> ButtonChat:
+    return ButtonChat(f"task:{parent}:{number}")
+
+
+def card_of(number: int) -> dict[str, dict[str, str]]:
+    return {
+        f"A{number}": {
+            "key": f"DCT-{41 + number}",
+            "card_id": f"card{number}",
+            "url": f"https://trello.com/c/card{number}",
+        }
+    }
+
+
+def walk_task(seen: list[tuple[str, str, str]]) -> Walking:
+    """Обход поручения: с воротами встаёт после шагов, до карточки кладёт журнал публикации."""
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((run.run_id, start, stop))
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        if start == "assignment":
+            (run.root / STEPS_JSON).write_text(STEPS_DE, encoding="utf-8")
+            (run.root / STEPS_MD).write_text("# Schritte\n", encoding="utf-8")
+            if not run.auto_approve:
+                return Pause(stage="steps", artifact=STEPS_MD, kind="gate")
+        assert run.assignment is not None or start == "card"
+        number = run.assignment or 1
+        (run.root / "outputs/publish.json").write_text(
+            json.dumps(card_of(number)), encoding="utf-8"
+        )
+        return None
+
+    return walking
+
+
+def gates_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "auto_approve", False)
+
+
+@pytest.mark.asyncio
+async def test_every_task_message_carries_its_button_under_its_last_part_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Длинное поручение приходит частями, а кнопка под последней: там оно прочитано целиком."""
+    long_review = json.loads(REVIEW_DE)
+    long_review["tasks"][0]["summary"] = "Lang. " * 900
+    review_json = json.dumps(long_review, ensure_ascii=False)
+    root = reviewing_in(tmp_path, monkeypatch, review_json)
+    chat = DeliveryChat("Встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    first, second = review_messages(Review.model_validate_json(review_json))
+    assert len(first) > 1
+    buttons = [
+        None
+        if markup is None
+        else [
+            (button.text, button.callback_data)
+            for button in cast(InlineKeyboardMarkup, markup).inline_keyboard[0]
+        ]
+        for markup in chat.reply_markups[1:]
+    ]
+    assert buttons == [
+        *[None] * (len(first) - 1),
+        [(TASK_BUTTON, f"task:{root.name}:1")],
+        *[None] * (len(second) - 1),
+        [(TASK_BUTTON, f"task:{root.name}:2")],
+    ]
+    assert chat.sent[len(first) + len(second) :] == [root / REVIEW_MD, root / TRANSCRIPT]
+
+
+@pytest.mark.asyncio
+async def test_task_button_starts_a_child_run_that_stops_at_the_steps_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "ребёнок")
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.answered == 1
+    assert store.children == {"ребёнок": (PARENT, 1)}
+    assert (store.sources["ребёнок"], store.langs["ребёнок"]) == ("voice", "de")
+    assert store.consents["ребёнок"] is None
+    assert seen == [("ребёнок", "assignment", "card")]
+    assert chat.reply_quoted[0] is True
+    root = tmp_path / "runs" / "ребёнок"
+    digest = steps_digest(Steps.model_validate_json(STEPS_DE))
+    assert chat.edits[-1] == f"{digest}\n\n{GATE_TAIL}"
+    assert chat.documents == [root / STEPS_MD]
+    assert store.stops[12].stage == "steps"
+    assert store.status["ребёнок"] == AWAITING_GATE
+    assert (
+        "start=task run=ребёнок parent=разбор task=1 chat=12 resume=-" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_child_run_takes_its_parent_folder_and_the_pressed_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    seen: list[tuple[Run, str]] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((run.model_copy(), store.status[run.run_id]))
+        return walk_task([])(run, start, stop, on_done, redo)
+
+    monkeypatch.setattr(bot, "walk", walking)
+
+    await on_child_button(a_press(a_task_button("2")), NO_CONTEXT)
+
+    ((run, status),) = seen
+    assert run.parent_root == tmp_path / "runs" / PARENT
+    assert (run.parent_run_id, run.assignment) == (PARENT, 2)
+    assert status == "assignment"
+
+
+@pytest.mark.asyncio
+async def test_next_at_the_steps_gate_puts_one_card_on_the_board_and_links_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "ребёнок")
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_gate_button("ребёнок", "next", stage="steps")
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert seen[-1] == ("ребёнок", "card", "card")
+    assert store.status["ребёнок"] == PUBLISHED
+    assert 12 not in store.stops
+    assert chat.edits[-1] == CARD_FINISHED.format(key="DCT-42", url="https://trello.com/c/card1")
+    assert chat.edits[-1] == (
+        "Готово: карточка DCT-42 в списке Assignments.\nhttps://trello.com/c/card1"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", get_args(StopKind))
+async def test_task_button_at_a_live_stop_is_refused_like_a_recording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    kind: StopKind,
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    store.stop(12, a_live_stop(kind))
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="ждущий")]
+    assert "refusal=stop_alive chat=12 run=ждущий task=1" in caplog.text
+    assert store.children == {}
+    assert store.stops[12].run_id == "ждущий"
+
+
+@pytest.mark.asyncio
+async def test_task_button_of_a_review_whose_files_are_gone_says_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = a_review_in_chat(tmp_path, monkeypatch, store)
+    (root / REVIEW_JSON).unlink()
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [PARENT_GONE]
+    assert "refusal=parent_gone chat=12 run=разбор task=1" in caplog.text
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "chat_id"), [(PUBLISHED, 12), (NO_TASK, 12), (AWAITING_GATE, 12), (REVIEWED, 7)]
+)
+async def test_task_button_of_a_review_that_has_no_tasks_to_give_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    status: str,
+    chat_id: int,
+) -> None:
+    """Разбор другого чата или прогон, который разбором не кончился: кнопка не его."""
+    a_review_in_chat(tmp_path, monkeypatch, store, status=status, chat_id=chat_id)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data", ["task:разбор", "task:разбор:x", "task:разбор:²", "task:разбор:0", "task:a:1:2"]
+)
+async def test_task_button_of_another_shape_is_refused_like_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, data: str
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = ButtonChat(data)
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert chat.answered == 1
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+async def test_task_button_pressed_during_a_run_names_the_review_and_the_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    chat = a_task_button("2")
+    await bot.running.acquire()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_child_button(a_press(chat), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert chat.replies == [BUSY]
+    assert "refusal=busy chat=12 run=разбор task=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_task_button_without_a_message_still_leaves_a_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    chat = a_task_button()
+    update = cast(Update, SimpleNamespace(callback_query=chat, effective_message=None))
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await on_child_button(update, NO_CONTEXT)
+
+    assert "task=lost" in caplog.text
+    assert chat.answered == 1
+
+
+def a_child_in(
+    tmp_path: Path, store: FakeStore, status: str, journal: bool, number: int = 1
+) -> Path:
+    """Дочерний прогон поручения, уже бывший: строка и, если просят, журнал публикации."""
+    store.start_run("ребёнок", 12, "voice", "de", True, None, "assignment", PARENT, number)
+    store.status["ребёнок"] = status
+    root = tmp_path / "runs" / "ребёнок"
+    (root / "outputs").mkdir(parents=True)
+    if journal:
+        (root / "outputs/publish.json").write_text(json.dumps(card_of(number)), encoding="utf-8")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_a_published_task_answers_with_its_card_and_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    a_child_in(tmp_path, store, PUBLISHED, journal=True)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [
+        ALREADY_PUBLISHED.format(number=1, key="DCT-42", url="https://trello.com/c/card1")
+    ]
+    assert "refusal=already_published chat=12 run=ребёнок parent=разбор task=1" in caplog.text
+    assert list(store.children) == ["ребёнок"]
+
+
+@pytest.mark.asyncio
+async def test_a_task_broken_during_publishing_resumes_from_the_card_under_the_same_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Карточка сорванной публикации несёт run_id в маркере: только он найдёт её на доске."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    a_child_in(tmp_path, store, FAILED, journal=True)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert seen == [("ребёнок", "card", "card")]
+    assert list(store.children) == ["ребёнок"]
+    assert store.status["ребёнок"] == PUBLISHED
+    assert 12 not in store.stops
+    assert "start=task run=ребёнок parent=разбор task=1 chat=12 resume=card" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_task_broken_before_the_board_resumes_from_the_assignment_under_the_same_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Режим ворот у возобновлённого прогона его собственный, а не нынешний режим чата."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    a_child_in(tmp_path, store, "steps", journal=False)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    assert seen == [("ребёнок", "assignment", "card")]
+    assert list(store.children) == ["ребёнок"]
+    assert store.status["ребёнок"] == PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_two_tasks_of_one_review_reach_the_board_as_two_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+    bot.AUTO_APPROVE_BY_CHAT[12] = True
+
+    await on_child_button(a_press(a_task_button("1")), NO_CONTEXT)
+    await on_child_button(a_press(a_task_button("2")), NO_CONTEXT)
+    repeated = a_task_button("1")
+    await on_child_button(a_press(repeated), NO_CONTEXT)
+
+    first, second = (run_id for run_id, _, _ in seen)
+    assert first != second
+    assert store.children == {first: (PARENT, 1), second: (PARENT, 2)}
+    assert store.status[first] == store.status[second] == PUBLISHED
+    assert repeated.replies == [
+        ALREADY_PUBLISHED.format(number=1, key="DCT-42", url="https://trello.com/c/card1")
+    ]
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_at_the_steps_gate_lets_the_next_press_start_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_task(seen))
+    ids = iter(["первый", "второй"])
+    monkeypatch.setattr(bot, "new_run_id", lambda: next(ids))
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    await on_gate_button(a_press(a_gate_button("первый", "stop", stage="steps")), NO_CONTEXT)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    assert store.status["первый"] == DROPPED
+    assert seen[-1] == ("второй", "assignment", "card")
+    assert store.stops[12].run_id == "второй"
