@@ -72,7 +72,9 @@ def ffmpeg_installed() -> bool:
 
 
 def convert_to_mp3(source: Path) -> Path:
-    target = source.with_suffix(".mp3")
+    # Не `with_suffix(".mp3")`: у присланного mp3 это тот же путь, что и вход, а ffmpeg править
+    # файл на месте отказывается («Output same as Input») — прогон срывался на перекодировании.
+    target = source.with_name(f"{source.stem}.16k.mp3")
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-i", str(source), "-ac", "1", "-ar", "16000", str(target)],

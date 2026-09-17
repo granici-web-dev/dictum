@@ -160,6 +160,20 @@ def test_the_recording_is_recoded_the_way_whisper_is_fed(
 
     target = convert_to_mp3(tmp_path / "voice.oga")
 
-    assert target.name == "voice.mp3"
+    assert target.name == "voice.16k.mp3"
     assert asked[0][:2] == ["ffmpeg", "-y"]
     assert asked[0][-5:] == ["-ac", "1", "-ar", "16000", str(target)]
+
+
+def test_an_mp3_recording_is_not_recoded_onto_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Файл с диктофона приходит mp3, а выход с именем входа ffmpeg отвергает: правка на месте."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    source = tmp_path / "recording.mp3"
+
+    assert convert_to_mp3(source) != source
