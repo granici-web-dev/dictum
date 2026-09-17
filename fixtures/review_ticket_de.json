@@ -1,0 +1,59 @@
+{
+  "owner_lang": "ru",
+  "tasks": [
+    {
+      "title": "Проверять форму входа до отправки",
+      "summary": "Проверять поля формы входа в браузере, пока запрос не ушёл на сервер. API не меняется: оно принадлежит Backend-Team.",
+      "assigned_by": "Teamlead Frontend",
+      "assignee": "[уточнить: кому]",
+      "status": "decision",
+      "ticket_key": "ABC-123",
+      "ticket_url": "https://jira.example.com/browse/ABC-123",
+      "deadline": {
+        "text": "до 26.09.2026",
+        "original": "26.09.2026",
+        "in_transcript": true
+      },
+      "constraints": [
+        {
+          "text": "проверка в браузере, до запроса к серверу",
+          "original": "Die Felder des Login-Formulars sollen im Browser geprüft werden, bevor eine Anfrage an den Server geht.",
+          "in_transcript": true
+        }
+      ],
+      "acceptance": [
+        {
+          "text": "пустое обязательное поле показывает ошибку под полем",
+          "original": "Ein leeres Pflichtfeld zeigt eine Fehlermeldung unter dem Feld.",
+          "in_transcript": true
+        },
+        {
+          "text": "неверный адрес e-mail показывает ошибку под полем",
+          "original": "Eine ungültige E-Mail-Adresse zeigt eine Fehlermeldung unter dem Feld.",
+          "in_transcript": true
+        },
+        {
+          "text": "пока поле неверно, запрос к API не уходит",
+          "original": "Solange ein Feld ungültig ist, geht keine Anfrage an die API.",
+          "in_transcript": true
+        }
+      ],
+      "do_not": [
+        {
+          "text": "менять API: оно принадлежит Backend-Team",
+          "original": "Die API bleibt unverändert, sie gehört dem Backend-Team.",
+          "in_transcript": true
+        }
+      ],
+      "ask_back": [],
+      "quotes": [
+        {
+          "original": "ABC-123 Login-Formular vor dem Absenden prüfen",
+          "translation": "ABC-123 Проверить форму входа до отправки",
+          "in_transcript": true
+        }
+      ]
+    }
+  ],
+  "topics": []
+}

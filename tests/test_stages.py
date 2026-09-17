@@ -32,7 +32,7 @@ from tests.helpers import (
     server_error,
     steps_answer,
 )
-from tests.test_review import MEETING_DE, REVIEW_DE
+from tests.test_review import MEETING_DE, REVIEW_DE, REVIEW_TICKET_DE, TICKET_DE
 
 IDEA_BLOCK = (
     '<file path="inputs/idea.md">\n# Напоминания о дедлайнах\n\n'
@@ -422,6 +422,26 @@ def test_an_empty_translation_of_a_german_recording_fails_after_the_repair(
         run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
 
     assert len(requests) == 2
+
+
+def ticket_answer(ticket_key: str) -> str:
+    data = json.loads(REVIEW_TICKET_DE)
+    del data["owner_lang"]
+    data["tasks"][0]["ticket_key"] = ticket_key
+    return f'<file path="outputs/review.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
+def test_an_invented_ticket_key_gets_the_repair_and_is_dropped_if_it_stays(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(ticket_answer("ABC-124")), ok(ticket_answer("ABC-124"))])
+
+    result = run_stage("review", {"inputs/transcript.md": TICKET_DE}, RUN, params=OWNER_RU)
+
+    assert len(requests) == 2
+    assert "ABC-124" in request_body(requests[1])["messages"][-1]["content"]
+    [task] = Review.model_validate_json(result.files["outputs/review.json"]).tasks
+    assert (task.ticket_key, task.ticket_url) == (None, "https://jira.example.com/browse/ABC-123")
 
 
 ASSIGNMENT_INPUTS = {

@@ -253,3 +253,38 @@ def test_steps_without_translation_show_no_arrows_and_a_title_in_the_meeting_lan
 
     assert "→" not in rendered.split("## Ask back")[0]
     assert steps_digest(steps).startswith(f"Поручение 1 «{steps.title.text}»: 4 шага")
+
+
+def review_ticket_de() -> Review:
+    return Review.model_validate_json(
+        (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
+    )
+
+
+def test_the_ticket_task_message_shows_the_ticket_and_the_acceptance_criteria() -> None:
+    expected = (FIXTURES / "review_ticket_de_message.txt").read_text(encoding="utf-8")
+
+    [parts] = review_messages(review_ticket_de())
+
+    assert "\n".join(parts) + "\n" == expected
+
+
+def test_a_ticket_link_without_a_key_is_named_the_ticket_in_the_message() -> None:
+    task = review_ticket_de().tasks[0]
+    task.ticket_key = None
+
+    lines = task_in_message(1, task)
+
+    assert "Тикет: https://jira.example.com/browse/ABC-123" in lines
+    assert not any(line.startswith("Тикет: ABC") for line in lines)
+
+
+def test_the_ticket_and_the_acceptance_criteria_reach_the_review_file() -> None:
+    lines = review_markdown(review_ticket_de()).splitlines()
+
+    assert "- **Ticket:** ABC-123 · https://jira.example.com/browse/ABC-123" in lines
+    criteria = lines.index("### Acceptance criteria")
+    assert lines[criteria + 1] == (
+        "- пустое обязательное поле показывает ошибку под полем "
+        "(*Ein leeres Pflichtfeld zeigt eine Fehlermeldung unter dem Feld.*)"
+    )

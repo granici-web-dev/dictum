@@ -33,7 +33,14 @@ from app.pipeline import (
     stage_named,
 )
 from app.render import issues_markdown, review_markdown, steps_markdown
-from app.review import Review, check_review, fragments, stamp_review, unmatched_originals
+from app.review import (
+    Review,
+    check_review,
+    fragments,
+    stamp_review,
+    unmatched_originals,
+    unmatched_tickets,
+)
 from app.steps import Assignment, Steps, check_steps, stamp_steps
 from app.validate import check_issues
 
@@ -94,10 +101,11 @@ def repairable_problems(
 
 
 def unmatched_problems(files: dict[str, str], transcript: str) -> list[str]:
-    """Дословные фрагменты разбора, которых нет в расшифровке. Претензия только первого ответа.
+    """Дословные фрагменты и тикеты разбора, которых нет в расшифровке. Претензия первого ответа.
 
     После ремонта несошедшийся фрагмент стадию не роняет, а получает пометку (SPEC §7): на
-    встрече их десятки, и одно склеенное моделью составное слово отнимало бы весь разбор.
+    встрече их десятки, и одно склеенное моделью составное слово отнимало бы весь разбор. Ключ
+    и ссылка тикета после ремонта тоже не роняют, а обнуляются штампом.
     """
     try:
         review = Review.model_validate_json(files[REVIEW_JSON])
@@ -107,6 +115,10 @@ def unmatched_problems(files: dict[str, str], transcript: str) -> list[str]:
     return [
         f"в расшифровке дословно нет фрагмента «{original}»: скопируй его из расшифровки как есть"
         for original in unmatched_originals(review, transcript)
+    ] + [
+        f"в тексте нет ключа или ссылки тикета «{identifier}»: скопируй их из текста буква в "
+        "букву или поставь null, ссылку из ключа не собирай"
+        for identifier in unmatched_tickets(review, transcript)
     ]
 
 

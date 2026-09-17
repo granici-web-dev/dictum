@@ -135,9 +135,16 @@ def task_in_file(number: int, task: Task) -> list[str]:
         f"- **Assigned by:** {task.assigned_by}",
         f"- **Assignee:** {task.assignee}",
         f"- **Status:** {STATUS_LABEL[task.status]}",
-        f"- **Deadline:** {deadline}",
     ]
-    for heading, said in (("Constraints", task.constraints), ("Do not", task.do_not)):
+    ticket = " · ".join(filter(None, (task.ticket_key, task.ticket_url)))
+    if ticket:
+        lines.append(f"- **Ticket:** {ticket}")
+    lines.append(f"- **Deadline:** {deadline}")
+    for heading, said in (
+        ("Constraints", task.constraints),
+        ("Acceptance criteria", task.acceptance),
+        ("Do not", task.do_not),
+    ):
         if said:
             lines += ["", f"### {heading}", *(f"- {said_in_file(item)}" for item in said)]
     if task.ask_back:
@@ -199,13 +206,21 @@ def task_in_message(number: int, task: Task) -> list[str]:
         f"Поручил: {task.assigned_by} · Кому: {task.assignee}",
         f"Статус: {STATUS_TEXT[task.status]}",
     ]
+    if task.ticket_key:
+        lines.append(f"Тикет: {task.ticket_key}")
+    if task.ticket_url:
+        lines.append(task.ticket_url if task.ticket_key else f"Тикет: {task.ticket_url}")
     if task.deadline:
         lines += [f"Срок: {task.deadline.text}", f"  «{task.deadline.original}»"]
         if not confirmed(task.deadline):
             lines.append(f"  {NOT_FOUND_IN_MESSAGE}")
     else:
         lines.append("Срок: не назван")
-    for heading, said in (("Ограничения:", task.constraints), ("Не надо:", task.do_not)):
+    for heading, said in (
+        ("Ограничения:", task.constraints),
+        ("Критерии приёмки:", task.acceptance),
+        ("Не надо:", task.do_not),
+    ):
         if said:
             lines.append(heading)
             for item in said:

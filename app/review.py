@@ -26,6 +26,8 @@ RECOGNISED_LANGUAGE_SOURCES = ("voice", "file")
 
 ELLIPSIS = re.compile(r"…|\.\.\.")
 
+TICKET_KEY = r"^[A-Z][A-Z0-9]+-\d+$"
+
 
 class Said(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -53,6 +55,10 @@ class AskBack(BaseModel):
     translation: str | None = None
 
 
+def absent(value: object) -> bool:
+    return value is None or value == []
+
+
 class Task(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -61,8 +67,15 @@ class Task(BaseModel):
     assigned_by: str
     assignee: str
     status: Literal["decision", "thinking_aloud"]
+    # Поля тикета Jira в файле только у поручения из тикета: поручение встречи тикета не имеет, и
+    # разбор без него остаётся тем же файлом, что до P3-11, байт в байт.
+    ticket_key: str | None = Field(default=None, pattern=TICKET_KEY, exclude_if=absent)
+    ticket_url: str | None = Field(default=None, exclude_if=absent)
     deadline: Said | None = None
     constraints: list[Said] = Field(default_factory=list)
+    # Критерии приёмки дословно из тикета. Не `constraints`: условие работы и признак готовности
+    # на карточке и в шагах читаются по-разному.
+    acceptance: list[Said] = Field(default_factory=list, exclude_if=absent)
     do_not: list[Said] = Field(default_factory=list)
     ask_back: list[AskBack] = Field(default_factory=list)
     quotes: list[Quote] = Field(min_length=1, max_length=MAX_QUOTES)
@@ -81,11 +94,12 @@ class Review(BaseModel):
 
 
 def fragments(review: Review) -> Iterator[Said | Quote]:
-    """Дословные фрагменты разбора в порядке чтения: срок, ограничения, «не надо», цитаты."""
+    """Дословные фрагменты в порядке чтения: срок, ограничения, критерии, «не надо», цитаты."""
     for task in review.tasks:
         if task.deadline:
             yield task.deadline
         yield from task.constraints
+        yield from task.acceptance
         yield from task.do_not
         yield from task.quotes
 
@@ -126,6 +140,25 @@ def spoken_text(transcript: str) -> str:
 def unmatched_originals(review: Review, transcript: str) -> list[str]:
     spoken = spoken_text(transcript)
     return [piece.original for piece in fragments(review) if not found_in(piece.original, spoken)]
+
+
+def literally_in(identifier: str, text: str) -> bool:
+    """Идентификатор тикета в тексте буква в букву и целиком: `ABC-12` не находится в `ABC-123`.
+
+    Без нормализации, в отличие от фрагментов: у ключа и ссылки нет «почти того же» написания.
+    """
+    return re.search(rf"(?<![\w-]){re.escape(identifier)}(?![\w-])", text) is not None
+
+
+def unmatched_tickets(review: Review, transcript: str) -> list[str]:
+    """Ключи и ссылки тикетов, которых в тексте нет. Претензия первого ответа, как у фрагментов."""
+    written = frontmatter.loads(transcript).content
+    return [
+        identifier
+        for task in review.tasks
+        for identifier in (task.ticket_key, task.ticket_url)
+        if identifier is not None and not literally_in(identifier, written)
+    ]
 
 
 def missing_translations(review: Review) -> list[str]:
@@ -181,4 +214,12 @@ def stamp_review(review_json: str, transcript: str, owner_lang: str) -> str:
     spoken = spoken_text(transcript)
     for fragment in fragments(review):
         fragment.in_transcript = found_in(fragment.original, spoken)
+    # Ключ и ссылка, которых в тексте нет, обнуляются, а не помечаются: придуманный идентификатор
+    # хуже отсутствующего, а пометка «не найдено» у него ничего не спасает.
+    written = frontmatter.loads(transcript).content
+    for task in review.tasks:
+        if task.ticket_key is not None and not literally_in(task.ticket_key, written):
+            task.ticket_key = None
+        if task.ticket_url is not None and not literally_in(task.ticket_url, written):
+            task.ticket_url = None
     return review.model_dump_json(indent=2) + "\n"

@@ -5,13 +5,26 @@ from typing import Any
 
 import pytest
 
-from app.review import Review, check_review, stamp_review, unmatched_originals
+from app.ingest import build_transcript
+from app.review import Review, check_review, stamp_review, unmatched_originals, unmatched_tickets
 from app.stages import COMMANDS_DIR
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 MEETING_DE = (FIXTURES / "transcript_meeting_de.md").read_text(encoding="utf-8")
 REVIEW_DE = (FIXTURES / "review_de.json").read_text(encoding="utf-8")
 REVIEW_NONE = (FIXTURES / "review_none.json").read_text(encoding="utf-8")
+# Текст тикета составлен вручную: ключ ABC-123 и адрес jira.example.com ничьи, это не копия
+# настоящего тикета. Разбор к нему тоже написан руками и проштампован кодом.
+TICKET_DE = build_transcript(
+    (FIXTURES / "ticket_de.md").read_text(encoding="utf-8"),
+    "de",
+    "5c0e4b7a9d2f1e36",
+    "text",
+    None,
+    None,
+)
+REVIEW_TICKET_DE = (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
+TICKET_URL = "https://jira.example.com/browse/ABC-123"
 
 # Короткий разговор без поручений под темы из review_none.json. Составлен вручную, как и
 # transcript_meeting_de.md: живой записи встречи без поручений у нас нет.
@@ -197,3 +210,80 @@ def test_the_example_in_the_prompt_passes_the_schema_without_the_fields_the_code
     assert "owner_lang" not in example.group(1)
     assert "in_transcript" not in example.group(1)
     Review.model_validate_json(example.group(1))
+
+
+def ticket_review(**fields: object) -> str:
+    data = review_data(REVIEW_TICKET_DE)
+    data["tasks"][0].update(fields)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def test_the_ticket_review_is_what_the_stamp_writes_and_passes_the_check() -> None:
+    """ticket_de.md и review_ticket_de.json составлены вручную, ключ и адрес ничьи."""
+    assert check_review(REVIEW_TICKET_DE, TICKET_DE, "ru") == []
+    assert stamp_review(REVIEW_TICKET_DE, TICKET_DE, "ru") == REVIEW_TICKET_DE
+    [task] = Review.model_validate_json(REVIEW_TICKET_DE).tasks
+    assert (task.ticket_key, task.ticket_url, len(task.acceptance)) == ("ABC-123", TICKET_URL, 3)
+
+
+def test_ticket_key_that_is_not_in_the_text_is_dropped() -> None:
+    answer = ticket_review(ticket_key="ABC-124")
+
+    assert unmatched_tickets(Review.model_validate_json(answer), TICKET_DE) == ["ABC-124"]
+    [task] = Review.model_validate_json(stamp_review(answer, TICKET_DE, "ru")).tasks
+    assert task.ticket_key is None
+    assert task.ticket_url == TICKET_URL
+
+
+@pytest.mark.parametrize("key", ["ABC-12", "BC-123"])
+def test_a_ticket_key_found_only_inside_a_longer_key_is_dropped(key: str) -> None:
+    [task] = Review.model_validate_json(
+        stamp_review(ticket_review(ticket_key=key), TICKET_DE, "ru")
+    ).tasks
+
+    assert task.ticket_key is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://jira.example.com/browse/ABC-12", "https://jira.example.org/browse/ABC-123"],
+)
+def test_a_ticket_url_that_is_not_in_the_text_letter_for_letter_is_dropped(url: str) -> None:
+    answer = ticket_review(ticket_url=url)
+
+    assert unmatched_tickets(Review.model_validate_json(answer), TICKET_DE) == [url]
+    [task] = Review.model_validate_json(stamp_review(answer, TICKET_DE, "ru")).tasks
+    assert (task.ticket_key, task.ticket_url) == ("ABC-123", None)
+
+
+def test_a_ticket_key_from_the_frontmatter_alone_is_not_in_the_text() -> None:
+    header_only = TICKET_DE.replace("ABC-123", "XYZ-1").replace(
+        "lang: de", "lang: de\nnote: ABC-123"
+    )
+
+    assert unmatched_tickets(Review.model_validate_json(REVIEW_TICKET_DE), header_only) == [
+        "ABC-123",
+        TICKET_URL,
+    ]
+
+
+def test_an_acceptance_criterion_nobody_wrote_is_marked_like_any_fragment() -> None:
+    invented = {"text": "форма работает на телефоне", "original": "Das Formular läuft mobil."}
+    data = review_data(REVIEW_TICKET_DE)
+    data["tasks"][0]["acceptance"].append(invented)
+
+    stamped = Review.model_validate_json(
+        stamp_review(json.dumps(data, ensure_ascii=False), TICKET_DE, "ru")
+    )
+
+    marks = [criterion.in_transcript for criterion in stamped.tasks[0].acceptance]
+    assert marks == [True, True, True, False]
+    assert unmatched_originals(stamped, TICKET_DE) == ["Das Formular läuft mobil."]
+
+
+def test_a_review_without_a_ticket_writes_no_ticket_fields() -> None:
+    """Разбор встречи остаётся тем же файлом, что до тикетов: старые review.json валидны."""
+    stamped = stamp_review(REVIEW_DE, MEETING_DE, "ru")
+
+    for field in ("ticket_key", "ticket_url", "acceptance"):
+        assert field not in stamped

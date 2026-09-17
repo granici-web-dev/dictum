@@ -1,0 +1,24 @@
+1. Проверять форму входа до отправки
+Проверять поля формы входа в браузере, пока запрос не ушёл на сервер. API не меняется: оно принадлежит Backend-Team.
+Поручил: Teamlead Frontend · Кому: [уточнить: кому]
+Статус: решение
+Тикет: ABC-123
+https://jira.example.com/browse/ABC-123
+Срок: до 26.09.2026
+  «26.09.2026»
+Ограничения:
+• проверка в браузере, до запроса к серверу
+  «Die Felder des Login-Formulars sollen im Browser geprüft werden, bevor eine Anfrage an den Server geht.»
+Критерии приёмки:
+• пустое обязательное поле показывает ошибку под полем
+  «Ein leeres Pflichtfeld zeigt eine Fehlermeldung unter dem Feld.»
+• неверный адрес e-mail показывает ошибку под полем
+  «Eine ungültige E-Mail-Adresse zeigt eine Fehlermeldung unter dem Feld.»
+• пока поле неверно, запрос к API не уходит
+  «Solange ein Feld ungültig ist, geht keine Anfrage an die API.»
+Не надо:
+• менять API: оно принадлежит Backend-Team
+  «Die API bleibt unverändert, sie gehört dem Backend-Team.»
+Цитаты:
+«ABC-123 Login-Formular vor dem Absenden prüfen»
+→ «ABC-123 Проверить форму входа до отправки»
