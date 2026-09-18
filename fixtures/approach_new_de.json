@@ -1,0 +1,114 @@
+{
+  "status": "done",
+  "mode": "new",
+  "stack_quote": null,
+  "stack_named": false,
+  "known": [
+    {
+      "text": "проверка в браузере до отправки, API не трогать",
+      "from": "task"
+    }
+  ],
+  "unknown": [
+    "стандартов проекта нет, поручение и ответы стек не называют",
+    "неизвестно, есть ли уже библиотека форм во фронтенде"
+  ],
+  "rejected": [],
+  "options": [
+    {
+      "name": "React Hook Form mit zod",
+      "summary": "Библиотека форм и схема проверки: правила описываются схемой и подключаются резолвером.",
+      "uses": [
+        "React Hook Form",
+        "zod"
+      ],
+      "adds": [],
+      "adds_why": null,
+      "pros": [
+        "правила лежат одним местом",
+        "распространённая пара, документации много"
+      ],
+      "cons": [
+        "две зависимости там, где проект мог обойтись без них"
+      ],
+      "risks": [
+        "если во фронтенде уже есть своя библиотека форм, их станет две"
+      ],
+      "cost": "полдня, обе MIT",
+      "sources": [
+        "S1",
+        "S2"
+      ]
+    },
+    {
+      "name": "Eingebaute HTML-Validierung",
+      "summary": "Правила задаются атрибутами полей, браузер проверяет их сам до отправки.",
+      "uses": [],
+      "adds": [],
+      "adds_why": null,
+      "pros": [
+        "ни одной зависимости"
+      ],
+      "cons": [
+        "вид сообщения задаёт браузер, переводы и оформление ограничены"
+      ],
+      "risks": [
+        "сложное правило формата e-mail атрибутом не выразить"
+      ],
+      "cost": "пара часов",
+      "sources": [
+        "S3"
+      ]
+    }
+  ],
+  "recommendation": {
+    "option": "React Hook Form mit zod",
+    "why": "пара покрывает и обязательные поля, и формат e-mail, и оставляет сообщения об ошибках нам; но стек проекта не подтверждён, и выбор предварительный.",
+    "how_to_write": [
+      "схему держать рядом с формой одним модулем",
+      "сообщение об ошибке показывать у самого поля",
+      "отправку блокировать состоянием формы, а не отдельной проверкой в обработчике"
+    ],
+    "standards_refs": [],
+    "provisional": true,
+    "headline": {
+      "text": "Vorläufig: React Hook Form mit zod, Stack noch nicht bestätigt",
+      "translation": "Предварительно: React Hook Form со схемой zod, стек не подтверждён"
+    },
+    "sources": [
+      "S1",
+      "S2"
+    ]
+  },
+  "new_questions": [
+    {
+      "text": "Mit welchem Framework und welcher Formularbibliothek ist das Frontend gebaut, in dem das Login-Formular liegt?",
+      "translation": "На каком фреймворке и какой библиотеке форм построен фронтенд, в котором лежит форма входа?",
+      "why": "без этого шаги назовут библиотеки наугад, и стек проекту будет приписан"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "url": "https://example.org/react-hook-form/resolvers",
+      "title": "Resolvers",
+      "found_by_search": true
+    },
+    {
+      "id": "S2",
+      "url": "https://example.org/zod/changelog",
+      "title": "Changelog",
+      "found_by_search": true
+    },
+    {
+      "id": "S3",
+      "url": "https://example.org/blog/forms-in-2026",
+      "title": "Forms in 2026",
+      "found_by_search": true
+    }
+  ],
+  "searches": [
+    "react hook form zod resolver validation",
+    "zod schema email required field"
+  ]
+}

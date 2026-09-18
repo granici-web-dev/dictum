@@ -25,6 +25,14 @@ from anthropic.types import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.answers import read_answers
+from app.approach import (
+    Approach,
+    check_approach,
+    leaked_in_queries,
+    stamp_approach,
+    unverified_problems,
+    unverified_sources,
+)
 from app.candidates import check_candidates
 from app.clarify import Clarify, check_clarify, stamp_clarify
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
@@ -32,6 +40,8 @@ from app.dialog import Turn, check_question
 from app.models import IssuesFile
 from app.pipeline import (
     ANSWERS,
+    APPROACH_JSON,
+    APPROACH_MD,
     ASSIGNMENT_JSON,
     BRIEF_QUESTION,
     CANDIDATES,
@@ -47,7 +57,7 @@ from app.pipeline import (
     stage_named,
 )
 from app.project import read_project
-from app.render import issues_markdown, review_markdown, steps_markdown
+from app.render import approach_markdown, issues_markdown, review_markdown, steps_markdown
 from app.review import (
     Review,
     check_review,
@@ -114,6 +124,8 @@ def repairable_problems(
     if stage == "clarify":
         assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
         return check_clarify(files[CLARIFY_JSON], assignment)
+    if stage == "approach":
+        return check_approach(files[APPROACH_JSON])
     if stage == "steps":
         assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
         asked = Clarify.model_validate_json(inputs[CLARIFY_JSON]).questions
@@ -196,6 +208,11 @@ def repair_request(problems: list[str]) -> str:
         "Исправь перечисленное и верни результат целиком в тегах <file path=\"...\">. "
         "Меняй только то, на что указано: остальное должно остаться слово в слово прежним."
     )
+
+
+def log_query_leaks(run_id: str, queries: list[str], assignment: Assignment) -> None:
+    for leaked in leaked_in_queries(queries, assignment.task):
+        logger.warning("stage=approach run=%s query_has=%s", run_id, leaked)
 
 
 class StageResult(BaseModel):
@@ -507,9 +524,14 @@ def run_stage(
     outputs = allowed if allowed is not None else stage_named(stage).outputs
     given_params = params or {}
     model = settings.anthropic_model_decompose if stage == "decompose" else settings.anthropic_model
-    if stage in ("clarify", "steps"):
+    if stage in ("clarify", "approach", "steps"):
         assignment = parsed_input(stage, inputs, ASSIGNMENT_JSON, Assignment.model_validate_json)
         project = parsed_input(stage, inputs, PROJECT, read_project)
+    if stage == "approach":
+        answers = parsed_input(stage, inputs, ANSWERS, read_answers)
+        # Поручение и ответ тимлида одним текстом: и названный стек, и библиотека варианта
+        # ищутся в обоих, и разводить два поиска по двум строкам нечем.
+        assignment_and_answers = f"{inputs[ASSIGNMENT_JSON]}\n{answers.text}"
     if stage == "steps":
         clarify = parsed_input(stage, inputs, CLARIFY_JSON, Clarify.model_validate_json)
         answers = parsed_input(stage, inputs, ANSWERS, read_answers)
@@ -520,15 +542,23 @@ def run_stage(
     tools = search_tools(stage, inputs)
     turn = ask_model(stage, run_id, model, messages, tools)
     response = turn.response
+    if stage == "approach":
+        log_query_leaks(run_id, turn.queries, assignment)
     raw = answer_text(stage, response)
     files = without_extras(stage, parse_file_blocks(raw))
     input_tokens = turn.input_tokens
     output_tokens = turn.output_tokens
     duration_ms = turn.duration_ms
+    searched = turn.urls
+    queries = turn.queries
 
     problems = repairable_problems(stage, files, outputs, inputs, given_params)
     if stage == "review" and frozenset(files) in outputs:
         problems += unmatched_problems(files, inputs[TRANSCRIPT])
+    if stage == "approach" and frozenset(files) in outputs:
+        problems += unverified_problems(
+            files[APPROACH_JSON], searched, assignment, assignment_and_answers, project
+        )
     if problems:
         # Удачный ремонт стирал причину: прогон выглядел как два вызова без объяснения,
         # а претензии оставались только у провалившихся.
@@ -550,7 +580,11 @@ def run_stage(
         duration_ms += repair.duration_ms
         input_tokens += repair.input_tokens
         output_tokens += repair.output_tokens
+        searched |= repair.urls
+        queries += repair.queries
         response = repair.response
+        if stage == "approach":
+            log_query_leaks(run_id, repair.queries, assignment)
         raw = answer_text(stage, response)
         files = without_extras(stage, parse_file_blocks(raw))
         problems = repairable_problems(stage, files, outputs, inputs, given_params)
@@ -576,6 +610,21 @@ def run_stage(
         files[REVIEW_MD] = review_markdown(review)
     if stage == "clarify":
         files[CLARIFY_JSON] = stamp_clarify(files[CLARIFY_JSON], assignment)
+    if stage == "approach":
+        files[APPROACH_JSON] = stamp_approach(
+            files[APPROACH_JSON], assignment, assignment_and_answers, project, searched, queries
+        )
+        approach = Approach.model_validate_json(files[APPROACH_JSON])
+        # По этой строке живые прогоны считают, как часто модель придумывает ссылку.
+        logger.info(
+            "stage=approach run=%s mode=%s searches=%d sources=%d unverified=%d",
+            run_id,
+            approach.mode,
+            len(approach.searches),
+            len(approach.sources),
+            unverified_sources(approach),
+        )
+        files[APPROACH_MD] = approach_markdown(approach, project, assignment_and_answers)
     if stage == "steps":
         files[STEPS_JSON] = stamp_steps(
             files[STEPS_JSON],

@@ -31,10 +31,15 @@ ASSIGNMENT_JSON = "inputs/assignment.json"
 PROJECT = "inputs/project.md"
 CLARIFY_JSON = "outputs/clarify.json"
 ANSWERS = "inputs/answers.md"
+APPROACH_JSON = "outputs/approach.json"
+APPROACH_MD = "outputs/approach.md"
 STEPS_JSON = "outputs/steps.json"
 STEPS_MD = "outputs/steps.md"
 
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
+# Что ложится в outputs/approach.json вместо вызова модели, когда человек выбрал шаги без
+# ресёрча: остальные поля контракта пусты по умолчанию, и заполнять их было бы выдумкой.
+APPROACH_SKIPPED = '{\n  "status": "skipped"\n}\n'
 
 
 class WebSearch(BaseModel):

@@ -15,6 +15,15 @@ outputs/steps.md для ворот.
 import frontmatter
 
 from app.answers import Answers
+from app.approach import (
+    Approach,
+    KnownFrom,
+    Mode,
+    Option,
+    Recommendation,
+    confirmed_source_ids,
+    outside_the_standards,
+)
 from app.clarify import Clarify
 from app.models import Issue, IssuesFile
 from app.project import STANDARD_ALIASES, Project
@@ -480,3 +489,130 @@ def standards_snapshot_line(project: Project) -> str:
         f"Стандарты проекта: снимок от {project.taken_at:{SNAPSHOT_TAKEN_AT}}, "
         "каталог сейчас недоступен"
     )
+
+
+# Пометки ресёрча (SPEC §7): вывод без подтверждённого источника или вне стандартов проекта не
+# должен выглядеть проверенным. Английские, как все подписи в файлах: содержимое приходит на
+# языке владельца, а заголовки вокруг него фиксированы.
+OUTSIDE_STANDARDS = "*(outside the project standards)*"
+NEW_DEPENDENCY = "*(new dependency: the teamlead decides)*"
+QUOTE_NOT_IN_STANDARDS = "*(quote not found in the standards)*"
+PROVISIONAL = "*(provisional: the stack is not confirmed)*"
+NOT_FROM_SEARCH = "*(not in the search results)*"
+NO_CONFIRMED_SOURCE = "*(no source: the model's opinion)*"
+
+MODE_IN_FILE: dict[Mode, str] = {
+    "existing": "existing project, inside its stack",
+    "new": "new project, the stack is being chosen",
+}
+
+KNOWN_FROM_IN_FILE: dict[KnownFrom, str] = {
+    "standards": "standards",
+    "task": "task",
+    "answers": "teamlead answers",
+}
+
+
+def sources_in_file(named: list[str], confirmed: set[str]) -> str:
+    """Источники места. Ни одного подтверждённого поиском — это мнение модели, и так и написано."""
+    if not named:
+        return NO_CONFIRMED_SOURCE
+    listed = ", ".join(named)
+    return listed if set(named) & confirmed else f"{listed} {NO_CONFIRMED_SOURCE}"
+
+
+def option_in_file(
+    number: int, option: Option, confirmed: set[str], outside: bool
+) -> list[str]:
+    lines = [f"### {number}. {option.name}{' ' + OUTSIDE_STANDARDS if outside else ''}", ""]
+    lines += [option.summary, ""]
+    if option.uses:
+        lines.append(f"- **Uses:** {', '.join(option.uses)}")
+    if option.adds:
+        why = f" — {option.adds_why}" if option.adds_why else ""
+        lines.append(f"- **Adds:** {', '.join(option.adds)}{why} {NEW_DEPENDENCY}")
+    for heading, items in (("Pros", option.pros), ("Cons", option.cons), ("Risks", option.risks)):
+        if items:
+            lines.append(f"- **{heading}:** {'; '.join(items)}")
+    return lines + [
+        f"- **Cost:** {option.cost}",
+        f"- **Sources:** {sources_in_file(option.sources, confirmed)}",
+    ]
+
+
+def recommendation_in_file(recommendation: Recommendation, confirmed: set[str]) -> list[str]:
+    mark = f" {PROVISIONAL}" if recommendation.provisional else ""
+    lines = [
+        "## Recommendation",
+        "",
+        f"**{recommendation.option}**{mark}",
+        "",
+        recommendation.why,
+        "",
+        f"- **Sources:** {sources_in_file(recommendation.sources, confirmed)}",
+    ]
+    if recommendation.how_to_write:
+        lines += ["", "### How to write it", ""]
+        lines += [f"{number}. {item}" for number, item in enumerate(recommendation.how_to_write, 1)]
+    if recommendation.standards_refs:
+        lines += ["", "### Project standards", ""]
+        for reference in recommendation.standards_refs:
+            missing = "" if reference.in_snapshot else f" {QUOTE_NOT_IN_STANDARDS}"
+            lines += [f"- `{reference.file}`{missing}", f"  > {reference.quote}"]
+    return lines
+
+
+def approach_markdown(approach: Approach, project: Project, assignment_and_answers: str) -> str:
+    """Ресёрч для чтения на воротах шагов: варианты, рекомендация и честность её источников.
+
+    Пометку «вне стандартов проекта» код считает заново по снимку, а не хранит полем: после
+    ремонта вариант остаётся в файле, и о том, что он вышел за стек, человек узнаёт здесь.
+    """
+    confirmed = confirmed_source_ids(approach)
+    lines = [
+        "# Approach",
+        "",
+        f"- **Mode:** {MODE_IN_FILE[approach.mode]}" if approach.mode else "- **Mode:** —",
+        f"- **Project standards:** {standards_in_file(project)}",
+    ]
+    if approach.stack_quote:
+        found = "" if approach.stack_named else f" {QUOTE_NOT_IN_STANDARDS}"
+        lines.append(f"- **Stack named in the task:** {approach.stack_quote}{found}")
+    if approach.known:
+        lines += ["", "## Known", ""]
+        lines += [
+            f"- {item.text} ({KNOWN_FROM_IN_FILE[item.origin]})" for item in approach.known
+        ]
+    if approach.unknown:
+        lines += ["", "## Unknown", ""]
+        lines += [f"- {item}" for item in approach.unknown]
+    if approach.rejected:
+        lines += ["", "## Rejected in the standards", ""]
+        for rejected in approach.rejected:
+            lines += [f"- **{rejected.name}**", f"  > {rejected.quote}"]
+    if approach.options:
+        lines += ["", "## Options"]
+        for number, option in enumerate(approach.options, start=1):
+            # У нового проекта стандартов нет, и выйти за них нечему: пометка была бы ложью.
+            outside = approach.mode == "existing" and outside_the_standards(
+                option, project, assignment_and_answers
+            )
+            lines += ["", *option_in_file(number, option, confirmed, outside)]
+    if approach.recommendation:
+        lines += ["", *recommendation_in_file(approach.recommendation, confirmed)]
+    if approach.new_questions:
+        lines += ["", "## New questions for the teamlead", ""]
+        for question in approach.new_questions:
+            lines.append(f"- {question.text}")
+            if question.translation:
+                lines.append(f"  → {question.translation}")
+            lines.append(f"  Why: {question.why}")
+    if approach.sources:
+        lines += ["", "## Sources", ""]
+        for source in approach.sources:
+            invented = "" if source.found_by_search else f" {NOT_FROM_SEARCH}"
+            lines.append(f"- **{source.id}** {source.title} — {source.url}{invented}")
+    if approach.searches:
+        lines += ["", "## Searches", ""]
+        lines += [f"- {query}" for query in approach.searches]
+    return "\n".join(lines) + "\n"

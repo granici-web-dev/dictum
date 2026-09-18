@@ -1,0 +1,138 @@
+{
+  "status": "done",
+  "mode": "existing",
+  "stack_quote": null,
+  "stack_named": false,
+  "known": [
+    {
+      "text": "формы проекта идут через React Hook Form, отдельной библиотеки состояния нет",
+      "from": "standards"
+    },
+    {
+      "text": "проверка в браузере до отправки, API не трогать",
+      "from": "task"
+    },
+    {
+      "text": "тимлид назвал React Hook Form вместе с zod, как на странице аккаунта",
+      "from": "answers"
+    }
+  ],
+  "unknown": [
+    "в стандартах не сказано, в какой момент показывать ошибку: при вводе или при отправке"
+  ],
+  "rejected": [
+    {
+      "name": "Formik",
+      "quote": "**Formik:** replaced by React Hook Form; two form libraries in one bundle."
+    },
+    {
+      "name": "Redux",
+      "quote": "**Redux:** nothing in the app needs a global store."
+    }
+  ],
+  "options": [
+    {
+      "name": "zod-Schema über den Resolver",
+      "summary": "Правила полей описываются схемой zod, а схема подключается к React Hook Form через резолвер.",
+      "uses": [
+        "React Hook Form",
+        "zod"
+      ],
+      "adds": [],
+      "adds_why": null,
+      "pros": [
+        "правила лежат одним местом и переиспользуются на других формах",
+        "типы полей выводятся из схемы"
+      ],
+      "cons": [
+        "в бандл добавляется схема-библиотека"
+      ],
+      "risks": [
+        "версия резолвера привязана к мажорной версии React Hook Form"
+      ],
+      "cost": "полдня, обе библиотеки уже названы тимлидом, лицензия MIT",
+      "sources": [
+        "S1",
+        "S2"
+      ]
+    },
+    {
+      "name": "Eingebaute Regeln von React Hook Form",
+      "summary": "Правила задаются прямо при регистрации поля, без отдельной схемы.",
+      "uses": [
+        "React Hook Form"
+      ],
+      "adds": [],
+      "adds_why": null,
+      "pros": [
+        "ни одной новой зависимости"
+      ],
+      "cons": [
+        "правила размазаны по разметке формы и не переиспользуются"
+      ],
+      "risks": [
+        "на второй форме правила придётся писать заново"
+      ],
+      "cost": "два-три часа, ничего не добавляется",
+      "sources": [
+        "S1"
+      ]
+    }
+  ],
+  "recommendation": {
+    "option": "zod-Schema über den Resolver",
+    "why": "тимлид прямо назвал эту пару, а стандарты проекта уже ведут формы через React Hook Form: схема ложится рядом и не заводит второй библиотеки форм.",
+    "how_to_write": [
+      "схему держать рядом с формой одним модулем, а не разносить правила по полям",
+      "подключать её через zodResolver в useForm, не вызывая проверку руками",
+      "сообщение об ошибке брать из состояния формы у самого поля",
+      "тесты на обязательные поля и формат e-mail писать на Vitest с Testing Library, как велит TESTING.md"
+    ],
+    "standards_refs": [
+      {
+        "file": "STACK.md",
+        "quote": "**Forms go through React Hook Form.** Uncontrolled inputs keep re-renders out of large forms.",
+        "in_snapshot": true
+      },
+      {
+        "file": "TESTING.md",
+        "quote": "Form validation rules: every required field and every format rule has a test.",
+        "in_snapshot": true
+      }
+    ],
+    "provisional": false,
+    "headline": {
+      "text": "React Hook Form mit zod-Schema über den Resolver",
+      "translation": "React Hook Form со схемой zod через резолвер"
+    },
+    "sources": [
+      "S1",
+      "S2"
+    ]
+  },
+  "new_questions": [
+    {
+      "text": "Soll die Fehlermeldung schon beim Tippen erscheinen oder erst beim Absenden des Login-Formulars?",
+      "translation": "Показывать ошибку уже при вводе или только при отправке формы входа?",
+      "why": "от этого зависит режим проверки в шагах, а в стандартах проекта об этом ничего нет"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "url": "https://example.org/react-hook-form/resolvers",
+      "title": "Resolvers",
+      "found_by_search": true
+    },
+    {
+      "id": "S2",
+      "url": "https://example.org/zod/strings",
+      "title": "Strings",
+      "found_by_search": true
+    }
+  ],
+  "searches": [
+    "react hook form zod resolver validation",
+    "zod schema email required field"
+  ]
+}
