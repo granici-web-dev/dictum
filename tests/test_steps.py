@@ -389,5 +389,7 @@ def test_the_example_in_the_prompt_passes_the_schema_without_the_fields_the_code
     for stamped in ("run_id", "owner_lang", "meeting_lang", "task", "questions"):
         assert f'"{stamped}"' not in example.group(1)
     steps = Steps.model_validate_json(example.group(1))
-    assert check_steps(example.group(1), assignment(), 2) == []
-    assert steps.unanswered == [1]
+    # Два вопроса тимлиду и один от ресёрча: пример показывает и сквозную нумерацию.
+    assert check_steps(example.group(1), assignment(), 3) == []
+    assert steps.unanswered == [1, 3]
+    assert steps.approach is not None
