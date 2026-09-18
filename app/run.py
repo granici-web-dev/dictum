@@ -205,7 +205,7 @@ def assignment_body(run: Run) -> dict[str, str]:
         run.assignment,
         run.run_id,
         run.parent_run_id,
-        meeting_lang_of(run.source, run.lang),
+        meeting_lang_of(run.source, run.lang, review.meeting_lang),
     )
     # Заданный, но сломанный каталог роняет прогон до вызова модели: владелец рассчитывает на
     # стандарты, и тихий прогон без них потратил бы деньги на шаги не по его стеку.

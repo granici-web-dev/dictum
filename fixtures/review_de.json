@@ -1,5 +1,6 @@
 {
   "owner_lang": "ru",
+  "meeting_lang": "de",
   "tasks": [
     {
       "title": "Проверка формы входа до отправки на сервер",

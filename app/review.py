@@ -28,6 +28,10 @@ ELLIPSIS = re.compile(r"…|\.\.\.")
 
 TICKET_KEY = r"^[A-Z][A-Z0-9]+-\d+$"
 
+# Код языка, как его называет Whisper: две строчные буквы. У текста язык называет модель, и код
+# проверяет только форму: «немецкий» или «de-DE» стадиям шагов не язык.
+MEETING_LANG = r"^[a-z]{2}$"
+
 
 class Said(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,6 +93,10 @@ class Review(BaseModel):
     # Вписывает код после проверок, как run_id в issues.json: с этого момента язык разбора
     # объявляет артефакт, а не настройка, которая может смениться.
     owner_lang: str | None = None
+    # Язык, на котором говорили или написан тикет. Его называет модель, потому что у текста язык
+    # не распознавал никто, а `lang` прогона там DEFAULT_LANG. Необязательное: разборы до P3-11
+    # его не носят, и читать их это не мешает.
+    meeting_lang: str | None = Field(default=None, pattern=MEETING_LANG)
     tasks: list[Task]
     topics: list[str] = Field(default_factory=list, max_length=MAX_TOPICS)
 
@@ -196,6 +204,12 @@ def check_review(review_json: str, transcript: str, owner_lang: str) -> list[str
         problems.append("topics: темы пишутся только при пустом tasks, а поручения есть")
     written = frontmatter.loads(transcript).metadata
     lang, source = written.get("lang"), written.get("source")
+    if source not in RECOGNISED_LANGUAGE_SOURCES and review.meeting_lang is None:
+        # У записи язык называет Whisper, и поле там никто не читает. У текста его не называл
+        # никто: без него шаги и вопросы пишутся на языке, который выберет модель (P3-11).
+        problems.append(
+            "meeting_lang: язык этого текста не распознавал никто, назови его сам двумя буквами"
+        )
     if source in RECOGNISED_LANGUAGE_SOURCES and lang != owner_lang:
         problems += [
             f"{place}: перевод пуст, а запись на {lang}, язык владельца {owner_lang}"

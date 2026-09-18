@@ -196,6 +196,28 @@ def test_the_stamp_marks_unmatched_fragments_and_overwrites_what_the_model_claim
     assert first.deadline is not None and first.deadline.in_transcript is True
 
 
+def test_a_text_without_a_named_language_is_a_problem_and_a_recording_without_one_is_not() -> None:
+    """У записи язык называет Whisper, а у текста никто: без него шаги пишутся на любом языке."""
+    written = review_data(REVIEW_TICKET_DE)
+    del written["meeting_lang"]
+    recorded = review_data()
+    del recorded["meeting_lang"]
+
+    assert problems_of(written, TICKET_DE) == [
+        "meeting_lang: язык этого текста не распознавал никто, назови его сам двумя буквами"
+    ]
+    assert problems_of(recorded) == []
+
+
+@pytest.mark.parametrize("named", ["немецкий", "de-DE", "DE", "deu", ""])
+def test_a_language_that_is_not_a_two_letter_code_is_a_problem(named: str) -> None:
+    """Стадии шагов и вопросов сравнивают его с `owner_lang`: «de-DE» там не язык."""
+    data = review_data()
+    data["meeting_lang"] = named
+
+    assert problems_of(data)[0].startswith("meeting_lang:")
+
+
 def test_the_fixture_is_what_the_stamp_writes() -> None:
     """review_de.json лежит в том виде, в каком его оставляет стадия: пометки поставила сверка."""
     assert stamp_review(REVIEW_DE, MEETING_DE, "ru") == REVIEW_DE

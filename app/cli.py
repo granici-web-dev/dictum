@@ -144,7 +144,7 @@ def task_run(parser: CommandLineParser, number: int) -> Run:
             number,
             run.run_id,
             run.parent_run_id,
-            meeting_lang_of(run.source, run.lang),
+            meeting_lang_of(run.source, run.lang, review.meeting_lang),
         )
     except ValidationError as error:
         parser.error(f"{REVIEW_JSON} не проходит схему: {error}")

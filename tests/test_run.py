@@ -645,18 +645,36 @@ def test_an_assignment_walk_writes_the_task_and_its_stamped_steps(
     assert (child / STEPS_MD).is_file()
 
 
-def test_a_text_parent_gives_the_steps_no_meeting_language(
+def test_a_text_parent_gives_the_steps_the_language_its_review_named(
     llm: InstallResponses, tmp_path: Path
 ) -> None:
-    """У текста `lang` это DEFAULT_LANG, а не распознанный язык встречи."""
+    """У текста `lang` это DEFAULT_LANG, а язык называет разбор: он этот текст прочитал."""
     parent = a_review_on_disk(tmp_path / "parent")
+    # Язык прогона нарочно не немецкий: иначе не видно, откуда стадия взяла язык встречи.
+    run = a_task_run(tmp_path / "child", parent, "text").model_copy(update={"lang": "ru"})
     requests = llm([ok(clarify_answer()), ok(steps_answer())])
+
+    walk(run, "assignment", "steps")
+
+    assignment = json.loads(read_artifact(tmp_path / "child", ASSIGNMENT_JSON))
+    assert assignment["meeting_lang"] == "de"
+    assert '"meeting_lang": "de"' in request_body(requests[0])["messages"][0]["content"]
+
+
+def test_a_review_that_named_no_language_leaves_a_text_task_without_one(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Разбор до P3-11 языка не называл, и его текст остаётся без языка встречи, как было."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    older = json.loads(read_artifact(parent, REVIEW_JSON))
+    del older["meeting_lang"]
+    (parent / REVIEW_JSON).write_text(json.dumps(older, ensure_ascii=False), encoding="utf-8")
+    llm([ok(clarify_answer()), ok(steps_answer())])
 
     walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
 
     assignment = json.loads(read_artifact(tmp_path / "child", ASSIGNMENT_JSON))
     assert assignment["meeting_lang"] is None
-    assert '"meeting_lang": null' in request_body(requests[0])["messages"][0]["content"]
 
 
 def test_an_assignment_without_the_review_of_its_parent_fails_before_the_model(

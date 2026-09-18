@@ -99,16 +99,22 @@ class Assignment(BaseModel):
     run_id: str
     parent_run_id: str
     number: int = Field(ge=1)
-    # Язык, который назвало распознавание. У текста его никто не распознавал, и это null, а не
-    # DEFAULT_LANG: иначе стадия получила бы выдуманный язык встречи.
+    # Язык встречи: у голосового и записи его назвало распознавание, у текста назвал разбор. Null
+    # остаётся только у разбора до P3-11, который языка не называл: DEFAULT_LANG вместо него был бы
+    # выдуманным языком встречи.
     meeting_lang: str | None
     owner_lang: str
     task: Task
 
 
-def meeting_lang_of(source: Source, lang: str) -> str | None:
-    """Язык встречи, если его назвало распознавание. У текста `lang` это DEFAULT_LANG, не язык."""
-    return lang if source in RECOGNISED_LANGUAGE_SOURCES else None
+def meeting_lang_of(source: Source, lang: str, named_by_review: str | None) -> str | None:
+    """Язык встречи: у голосового и записи его назвал Whisper, у текста — разбор.
+
+    `lang` прогона у текста это DEFAULT_LANG, а не язык, поэтому там верить можно только разбору:
+    он этот текст прочитал. Разбор до P3-11 языка не называет, и у его текста язык остаётся
+    неизвестным, как было.
+    """
+    return lang if source in RECOGNISED_LANGUAGE_SOURCES else named_by_review
 
 
 def assignment_of(
