@@ -26,7 +26,7 @@ from app.steps import (
     check_steps,
     stamp_steps,
 )
-from tests.helpers import FIXTURES
+from tests.helpers import FIXTURES, without_marks
 
 REVIEW_DE = (FIXTURES / "review_de.json").read_text(encoding="utf-8")
 ASSIGNMENT_DE = (FIXTURES / "assignment_de.json").read_text(encoding="utf-8")
@@ -125,6 +125,59 @@ def test_no_translation_is_demanded_when_the_meeting_language_is_unknown_or_the_
     assert problems_of(data, meeting_lang) == []
 
 
+def marked(data: dict[str, Any], text: str, translation: str) -> dict[str, Any]:
+    data["steps"][1]["text"] = text
+    data["steps"][1]["translation"] = translation
+    return data
+
+
+def test_a_mark_naming_a_question_left_without_an_answer_passes() -> None:
+    """Так стоит пометка в fixtures/steps_de.json: вопрос 1 в unanswered."""
+    assert problems_of(model_answer()) == []
+
+
+def test_a_mark_naming_a_question_nobody_asked_is_named_by_its_place() -> None:
+    data = marked(model_answer(), "[уточнить: Frage 9] Schema anbinden", "[уточнить: вопрос 9] Ц")
+
+    assert problems_of(data) == [
+        "steps.1.text: пометка называет вопрос 9, а вопросы тимлиду пронумерованы от 1 до 3",
+        "steps.1.translation: пометка называет вопрос 9, а вопросы тимлиду пронумерованы от 1 до 3",
+    ]
+
+
+def test_a_mark_naming_an_answered_question_is_a_problem() -> None:
+    """Вопрос 2 тимлид закрыл, и уточнять по нему нечего: шаг сослался бы в пустоту."""
+    data = marked(model_answer(), "[уточнить: Frage 2] Schema anbinden", "[уточнить: вопрос 2] Ц")
+
+    assert problems_of(data) == [
+        "steps.1.text: пометка называет вопрос 2, а его нет в unanswered: "
+        "ответ на него есть, и уточнять нечего",
+        "steps.1.translation: пометка называет вопрос 2, а его нет в unanswered: "
+        "ответ на него есть, и уточнять нечего",
+    ]
+
+
+def test_a_mark_without_a_number_stays_words_and_is_not_checked() -> None:
+    """Неясное не из списка вопросов остаётся словами: словаря неясностей у кода нет."""
+    data = marked(
+        model_answer(),
+        "[уточнить: Format des Datums] Schema anbinden",
+        "[уточнить: формат даты] Подключить схему",
+    )
+
+    assert problems_of(data) == []
+
+
+def test_a_mark_is_pointless_when_the_teamlead_was_asked_nothing() -> None:
+    data = marked(model_answer(), "[уточнить: Frage 1] Schema anbinden", "[уточнить: вопрос 1] Ц")
+    data["unanswered"] = []
+
+    assert check_steps(json.dumps(data, ensure_ascii=False), assignment(), 0) == [
+        "steps.1.text: пометка называет вопрос 1, а тимлиду вопросов не задавали",
+        "steps.1.translation: пометка называет вопрос 1, а тимлиду вопросов не задавали",
+    ]
+
+
 def test_an_untranslated_open_question_of_a_german_meeting_is_a_problem() -> None:
     data = model_answer()
     data["open_questions"] = [{"text": "Wo liegt das Login-Formular?", "translation": None}]
@@ -221,6 +274,7 @@ def test_an_unanswered_number_outside_the_questions_is_a_problem() -> None:
 
 def test_any_unanswered_number_is_a_problem_when_nothing_was_asked() -> None:
     data = model_answer()
+    without_marks(data)
     data["unanswered"] = [1]
 
     problems = check_steps(json.dumps(data), assignment(), 0)
@@ -236,6 +290,7 @@ def test_partial_answer_leaves_any_subset_unanswered(unanswered: list[int]) -> N
     оставляет его как есть.
     """
     data = model_answer()
+    without_marks(data)
     data["unanswered"] = unanswered
 
     assert problems_of(data) == []

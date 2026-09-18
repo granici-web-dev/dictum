@@ -8,6 +8,7 @@
 """
 
 import json
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -25,6 +26,11 @@ from app.review import (
 )
 
 MAX_STEPS = 10
+
+# Пометка неясного места. Приставка не переводится, как английские заголовки полей; номер вопроса
+# стоит после слова на языке своего текста: «[уточнить: Frage 2]», «[уточнить: вопрос 2]».
+MARK = re.compile(r"\[уточнить:([^\]]*)\]")
+MARK_NUMBER = re.compile(r"^(?:\S+\s+)?(\d+)$")
 
 
 class ReviewUnusable(ValueError):
@@ -150,6 +156,47 @@ def pairs_by_place(steps: Steps) -> list[tuple[str, Pair]]:
     ]
 
 
+def marked_numbers(text: str) -> list[int]:
+    """Номера вопросов, названные пометками этого текста.
+
+    Пометка без номера — обычные слова про неясность не из списка вопросов, и проверять её
+    нечем: словаря неясностей на каждый язык проект не заводит, её держит промпт.
+    """
+    return [
+        int(number.group(1))
+        for body in MARK.findall(text)
+        if (number := MARK_NUMBER.match(body.strip()))
+    ]
+
+
+def mark_problems(steps: Steps, questions: int) -> list[str]:
+    """Претензии к номеру в пометке: он должен быть вопросом тимлида, и вопросом без ответа.
+
+    Иначе владелец читает на карточке ссылку в пустоту, а шаг молча решает за того, кто поручил.
+    """
+    unanswered = set(steps.unanswered)
+    problems = []
+    for place, pair in pairs_by_place(steps):
+        for side, text in (("text", pair.text), ("translation", pair.translation or "")):
+            for number in marked_numbers(text):
+                if not questions:
+                    problems.append(
+                        f"{place}.{side}: пометка называет вопрос {number}, а тимлиду вопросов "
+                        "не задавали"
+                    )
+                elif not 1 <= number <= questions:
+                    problems.append(
+                        f"{place}.{side}: пометка называет вопрос {number}, а вопросы тимлиду "
+                        f"пронумерованы от 1 до {questions}"
+                    )
+                elif number not in unanswered:
+                    problems.append(
+                        f"{place}.{side}: пометка называет вопрос {number}, а его нет в "
+                        "unanswered: ответ на него есть, и уточнять нечего"
+                    )
+    return problems
+
+
 def check_steps(steps_json: str, assignment: Assignment, questions: int) -> list[str]:
     """Претензии к ответу стадии. Перевод проверяется, только если язык встречи известен.
 
@@ -166,6 +213,7 @@ def check_steps(steps_json: str, assignment: Assignment, questions: int) -> list
         for number in steps.unanswered
         if not 1 <= number <= questions
     ]
+    problems += mark_problems(steps, questions)
     meeting_lang, owner_lang = assignment.meeting_lang, assignment.owner_lang
     if meeting_lang is None or meeting_lang == owner_lang:
         return problems

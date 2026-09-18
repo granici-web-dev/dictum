@@ -3,6 +3,7 @@ import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -52,6 +53,7 @@ from tests.helpers import (
     InstallResponses,
     clarify_answer,
     no_questions,
+    without_marks,
     ok,
     real_issues,
     request_body,
@@ -746,7 +748,8 @@ def test_walk_parks_after_clarify_only_when_the_run_asks_teamlead(
     assert steps.unanswered == [1, 2, 3]
 
 
-def nothing_unanswered(data: dict[str, object]) -> None:
+def nothing_unanswered(data: dict[str, Any]) -> None:
+    without_marks(data)
     data["unanswered"] = []
 
 

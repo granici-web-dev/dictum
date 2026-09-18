@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -305,6 +306,16 @@ def clarify_answer(change: Callable[[dict[str, Any]], None] = lambda data: None)
         del data[stamped]
     change(data)
     return f'<file path="outputs/clarify.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
+MARK = re.compile(r"\[уточнить:[^\]]*\]\s*")
+
+
+def without_marks(data: dict[str, Any]) -> None:
+    """Шаги без пометок неясного: нужны там, где тест убирает вопрос, на который они ссылаются."""
+    for step in data["steps"]:
+        step["text"] = MARK.sub("", step["text"])
+        step["translation"] = MARK.sub("", step["translation"])
 
 
 def no_questions(data: dict[str, Any]) -> None:

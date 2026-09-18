@@ -549,6 +549,24 @@ def test_an_empty_step_translation_gets_the_one_repair_and_is_named_in_it(
     assert result.files["outputs/steps.json"] == STEPS_DE
 
 
+def mark_of_an_answered_question(data: dict[str, Any]) -> None:
+    data["steps"][1]["text"] = "[уточнить: Frage 2] Schema anbinden"
+    data["steps"][1]["translation"] = "[уточнить: вопрос 2] Подключить схему"
+
+
+def test_a_mark_naming_the_wrong_question_gets_the_one_repair_and_is_named_in_it(
+    llm: InstallResponses,
+) -> None:
+    requests = llm([ok(steps_answer(mark_of_an_answered_question)), ok(steps_answer())])
+
+    result = run_stage("steps", ASSIGNMENT_INPUTS, RUN)
+
+    assert len(requests) == 2
+    repair = request_body(requests[1])["messages"][-1]["content"]
+    assert "steps.1.text: пометка называет вопрос 2" in repair
+    assert result.files["outputs/steps.json"] == STEPS_DE
+
+
 def test_an_empty_step_translation_in_both_answers_fails_the_stage(
     llm: InstallResponses,
 ) -> None:
