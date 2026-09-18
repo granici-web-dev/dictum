@@ -308,6 +308,33 @@ def clarify_answer(change: Callable[[dict[str, Any]], None] = lambda data: None)
     return f'<file path="outputs/clarify.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
 
 
+WEB_SEARCH_BLOCKS: list[dict[str, Any]] = json.loads(
+    (FIXTURES / "web_search_response.json").read_text(encoding="utf-8")
+)["content"]
+PAUSED_SEARCH_BLOCKS: list[dict[str, Any]] = json.loads(
+    (FIXTURES / "web_search_paused.json").read_text(encoding="utf-8")
+)["content"]
+
+
+def searched(text: str, requests: int = 2) -> httpx2.Response:
+    """Ответ стадии с поиском: блоки поиска из фикстуры, за ними текст с файлом стадии.
+
+    Текст модели до поиска («поищу…») лежит в фикстуре вне тегов и должен уйти в никуда.
+    """
+    body = message_body(text)
+    body["content"] = [*WEB_SEARCH_BLOCKS, *body["content"]]
+    body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
+    return httpx2.Response(200, json=body)
+
+
+def paused_search(requests: int = 1) -> httpx2.Response:
+    """Ответ, которым API прервал серверный цикл: последний запрос поиска ещё не отработал."""
+    body = message_body("", stop_reason="pause_turn")
+    body["content"] = PAUSED_SEARCH_BLOCKS
+    body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
+    return httpx2.Response(200, json=body)
+
+
 MARK = re.compile(r"\[уточнить:[^\]]*\]\s*")
 
 

@@ -13,11 +13,11 @@ from app import stages
 from app.answers import read_answers
 from app.clarify import Clarify
 from app.config import LiveApiNotAllowed, MissingApiKey, settings
-from app.pipeline import STAGES
+from app.pipeline import STAGES, WebSearch, stage_named
 from app.render import issues_markdown, review_markdown, steps_markdown
 from app.review import Review
 from app.review import fragments
-from app.project import project_snapshot, read_project
+from app.project import project_snapshot, read_project, read_standards
 from app.steps import Steps
 from app.stages import (
     StageError,
@@ -28,14 +28,18 @@ from tests.helpers import (
     BROKEN_ISSUES,
     CLARIFY_DE,
     FIXTURES,
+    PAUSED_SEARCH_BLOCKS,
     REAL_ISSUES,
     STEPS_DE,
+    WEB_SEARCH_BLOCKS,
     InstallResponses,
     clarify_answer,
     decompose_answer,
     ok,
+    paused_search,
     real_issues,
     request_body,
+    searched,
     server_error,
     steps_answer,
     thought,
@@ -655,3 +659,121 @@ def test_an_unanswered_number_outside_the_questions_gets_the_one_repair(
 
     assert "unanswered: вопроса 9 нет" in request_body(requests[1])["messages"][-1]["content"]
     assert result.files["outputs/steps.json"] == STEPS_DE
+
+
+# Стадии с поиском в списке ещё нет: её заводит следующий коммит части E. Поиск здесь объявляет
+# запись `clarify` — тест проверяет механизм, а не то, какая стадия им пользуется.
+SEARCH_BUDGET = WebSearch(max_uses_with_stack=3, max_uses_without_stack=5)
+FRONTEND_PROJECT = project_snapshot(
+    read_standards(FIXTURES / "project_frontend"), datetime(2026, 9, 18, 9, 0, tzinfo=UTC)
+)
+SEARCHING_INPUTS = {**CLARIFY_INPUTS, "inputs/project.md": FRONTEND_PROJECT}
+
+
+@pytest.fixture
+def searching(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stage_named("clarify"), "web_search", SEARCH_BUDGET)
+
+
+def test_a_stage_without_a_web_search_record_declares_no_tool(llm: InstallResponses) -> None:
+    requests = llm([ok(clarify_answer())])
+
+    run_stage("clarify", CLARIFY_INPUTS, RUN)
+
+    assert "tools" not in request_body(requests[0])
+
+
+def test_search_budget_follows_the_stack_flag_of_the_snapshot(
+    llm: InstallResponses, searching: None
+) -> None:
+    """Существующему проекту хватает документации названных библиотек, новому нужен подбор."""
+    requests = llm([searched(clarify_answer()), searched(clarify_answer())])
+
+    run_stage("clarify", SEARCHING_INPUTS, RUN)
+    run_stage("clarify", CLARIFY_INPUTS, RUN)
+
+    assert request_body(requests[0])["tools"] == [
+        {"type": "web_search_20260318", "name": "web_search", "max_uses": 3}
+    ]
+    assert request_body(requests[1])["tools"][0]["max_uses"] == 5
+
+
+def test_search_results_nested_pairs_and_citations_all_count_as_seen(
+    llm: InstallResponses, searching: None
+) -> None:
+    """Вывод со ссылкой не из этого списка — мнение модели, а не источник (SPEC §7)."""
+    llm([searched(clarify_answer())])
+
+    turn = stages.ask_model(
+        "clarify",
+        RUN,
+        settings.anthropic_model,
+        [{"role": "user", "content": "ищи"}],
+        stages.search_tools("clarify", SEARCHING_INPUTS),
+    )
+
+    assert turn.urls == {
+        "https://example.org/react-hook-form/resolvers",
+        "https://example.org/zod/changelog",
+        "https://example.org/zod/strings",
+        "https://example.org/blog/forms-in-2026",
+    }
+    assert turn.queries == [
+        "react hook form zod resolver validation",
+        "zod schema email required field",
+    ]
+
+
+def test_pause_turn_is_continued_with_the_assistant_blocks_unchanged(
+    llm: InstallResponses, searching: None
+) -> None:
+    """Пауза это прерванный серверный цикл, а не конец хода: блоки несут encrypted_content."""
+    requests = llm([paused_search(), searched(clarify_answer())])
+
+    result = run_stage("clarify", SEARCHING_INPUTS, RUN)
+
+    assert len(requests) == 2
+    messages = request_body(requests[1])["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["content"] == PAUSED_SEARCH_BLOCKS
+    assert request_body(requests[1])["tools"] == request_body(requests[0])["tools"]
+    assert (result.input_tokens, result.output_tokens) == (240, 60)
+    assert result.files["outputs/clarify.json"] == CLARIFY_DE
+
+
+def test_a_fourth_pause_in_a_row_fails_the_stage(
+    llm: InstallResponses, searching: None
+) -> None:
+    requests = llm([paused_search() for _ in range(4)])
+
+    with pytest.raises(StageError, match="серверный цикл поиска не кончился"):
+        run_stage("clarify", SEARCHING_INPUTS, RUN)
+
+    assert len(requests) == 4
+
+
+def test_a_repair_after_a_search_keeps_the_answer_in_blocks(
+    llm: InstallResponses, searching: None
+) -> None:
+    """Склеенный текст потерял бы encrypted_content результатов, и продолжение дало бы 400."""
+    requests = llm([searched(clarify_answer(untranslated_question)), searched(clarify_answer())])
+
+    run_stage("clarify", SEARCHING_INPUTS, RUN)
+
+    messages = request_body(requests[1])["messages"]
+    assert messages[-2]["content"][:-1] == WEB_SEARCH_BLOCKS
+    assert "questions.0.translation: перевод пуст" in messages[-1]["content"]
+
+
+def test_the_search_log_counts_requests_and_names_every_query(
+    llm: InstallResponses, searching: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Что ушло в поиск, владелец должен видеть в логе поимённо (SPEC §8)."""
+    llm([searched(clarify_answer())])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("clarify", SEARCHING_INPUTS, RUN)
+
+    assert "web_search_requests=2" in caplog.text
+    assert f"stage=clarify run={RUN} query=react hook form zod resolver validation" in caplog.text
+    assert f"stage=clarify run={RUN} query=zod schema email required field" in caplog.text

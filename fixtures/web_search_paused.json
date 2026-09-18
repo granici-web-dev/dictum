@@ -1,0 +1,34 @@
+{
+  "note": "Составлено вручную по документации Anthropic (server tools, pause_turn, 18.09.2026): API прервал серверный цикл, и последний server_tool_use ещё не отработал. Адреса вымышленные.",
+  "content": [
+    {
+      "type": "text",
+      "text": "Ich suche weiter."
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_00",
+      "name": "web_search",
+      "input": {"query": "typescript strict mode form validation"}
+    },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_00",
+      "content": [
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/typescript/handbook",
+          "title": "Handbook",
+          "page_age": "March 3, 2026",
+          "encrypted_content": "EqgfCioIARgBIiQwYTk5MTU0MS1lZTI4"
+        }
+      ]
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_03",
+      "name": "web_search",
+      "input": {"query": "vitest testing library form errors"}
+    }
+  ]
+}

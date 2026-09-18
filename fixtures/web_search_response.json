@@ -1,0 +1,76 @@
+{
+  "note": "Составлено вручную по документации Anthropic (web search tool, 18.09.2026), а не перехвачено у живого вызова: живого ресёрча ещё не было. Адреса вымышленные, example.org.",
+  "content": [
+    {
+      "type": "text",
+      "text": "Ich schaue in die Dokumentation."
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01",
+      "name": "web_search",
+      "input": {"query": "react hook form zod resolver validation"}
+    },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_01",
+      "content": [
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/react-hook-form/resolvers",
+          "title": "Resolvers",
+          "page_age": "April 30, 2026",
+          "encrypted_content": "EqgfCioIARgBIiQ3YTAwMjY1Mi1mZjM5"
+        },
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/zod/changelog",
+          "title": "Changelog",
+          "page_age": null,
+          "encrypted_content": "EqgfCioIARgBIiQ4YjExMzc2My1nZzQw"
+        }
+      ]
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_02",
+      "name": "web_search",
+      "caller": {"type": "code_execution_20260120", "tool_id": "srvtoolu_code"},
+      "input": {"query": "zod schema email required field"}
+    },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_02",
+      "caller": {"type": "code_execution_20260120", "tool_id": "srvtoolu_code"},
+      "content": [
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/zod/strings",
+          "title": "Strings",
+          "page_age": "May 12, 2026",
+          "encrypted_content": "EqgfCioIARgBIiQ5YzIyNDg3NC1oaDUx"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "text": "Der Resolver verbindet das Schema mit dem Formular",
+      "citations": [
+        {
+          "type": "web_search_result_location",
+          "url": "https://example.org/react-hook-form/resolvers",
+          "title": "Resolvers",
+          "encrypted_index": "Eo8BCioIAhgBIiQyYjQ0OWJmZi1lNm",
+          "cited_text": "Resolvers connect an external validation schema to the form state."
+        },
+        {
+          "type": "web_search_result_location",
+          "url": "https://example.org/blog/forms-in-2026",
+          "title": "Forms in 2026",
+          "encrypted_index": "Eo8BCioIAhgBIiQzYzU1MGNnZy1mNw",
+          "cited_text": "Schema-first validation has become the default in React form code."
+        }
+      ]
+    }
+  ]
+}

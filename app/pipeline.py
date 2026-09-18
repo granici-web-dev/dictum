@@ -37,6 +37,17 @@ STEPS_MD = "outputs/steps.md"
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 
 
+class WebSearch(BaseModel):
+    """Предел поисков стадии, свой на каждый режим ресёрча (SPEC §7, P3-11).
+
+    Режим выбирает не модель, а флаг `stack` снимка стандартов: существующему проекту хватает
+    документации уже названных библиотек, новому нужен подбор стека, и это разное число поисков.
+    """
+
+    max_uses_with_stack: int
+    max_uses_without_stack: int
+
+
 class Stage(BaseModel):
     name: str
     runs: Literal["llm", "code"]
@@ -63,6 +74,10 @@ class Stage(BaseModel):
     # параметр не отправляется вовсе, и стадия остаётся ровно такой, какой была. `adaptive` это
     # то же самое, сказанное явно, `disabled` — минимально возможное.
     thinking: Literal["adaptive", "disabled"] | None = None
+    # Веб-поиск стадии (SPEC §7). None — инструмент не объявляется вовсе, и стадия остаётся такой,
+    # какой была. Стадия с поиском обязана держать во входах снимок стандартов: по нему код
+    # выбирает предел поисков, и тест списка стадий это стережёт.
+    web_search: WebSearch | None = None
 
 
 STAGES: tuple[Stage, ...] = (

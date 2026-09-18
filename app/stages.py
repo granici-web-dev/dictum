@@ -10,12 +10,19 @@ import time
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import anthropic
 from anthropic import DefaultHttpxClient, Omit, omit
-from anthropic.types import Message, MessageParam, ThinkingConfigParam, Usage
-from pydantic import BaseModel, ValidationError
+from anthropic.types import (
+    ContentBlockParam,
+    Message,
+    MessageParam,
+    ThinkingConfigParam,
+    Usage,
+    WebSearchTool20260318Param,
+)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.answers import read_answers
 from app.candidates import check_candidates
@@ -66,6 +73,10 @@ API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 REQUEST_TIMEOUT_SECONDS = 600.0
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
+
+# Серверный цикл поиска API прерывает паузой (`stop_reason: pause_turn`), и пауза может
+# повториться; предел продолжений ставит вызывающий (SPEC §7).
+MAX_SEARCH_CONTINUATIONS = 3
 
 NO_FILE_BLOCKS = 'в ответе нет ни одного тега <file path="...">'
 
@@ -274,8 +285,99 @@ def text_length(response: Message) -> int:
     return sum(len(block.text) for block in response.content if block.type == "text")
 
 
-def ask_model(
-    stage: str, run_id: str, model: str, messages: list[MessageParam]
+def search_tools(stage: str, inputs: dict[str, str]) -> list[WebSearchTool20260318Param] | Omit:
+    """Инструмент поиска стадии; предел поисков — по флагу `stack` снимка стандартов её входа.
+
+    Версия с динамической фильтрацией: модель отбирает результаты кодом до того, как они лягут
+    в контекст, а токены результатов и есть главная статья цены ресёрча (SPEC §8).
+    """
+    budget = stage_named(stage).web_search
+    if budget is None:
+        return omit
+    stack = read_project(inputs[PROJECT]).stack
+    return [
+        {
+            "type": "web_search_20260318",
+            "name": "web_search",
+            "max_uses": budget.max_uses_with_stack if stack else budget.max_uses_without_stack,
+        }
+    ]
+
+
+def search_result_urls(response: Message) -> set[str]:
+    """URL из результатов поиска и из цитат ответа: всё, что модель в этом ходу видела.
+
+    Результаты, найденные фильтрующим кодом, приходят такими же блоками верхнего уровня, только
+    с полем `caller`, поэтому отдельного обхода вложенным не нужно.
+    """
+    urls: set[str] = set()
+    for block in response.content:
+        if block.type == "web_search_tool_result" and isinstance(block.content, list):
+            urls |= {result.url for result in block.content}
+        if block.type == "text" and block.citations:
+            urls |= {
+                citation.url
+                for citation in block.citations
+                if citation.type == "web_search_result_location"
+            }
+    return urls
+
+
+def search_queries(response: Message) -> list[str]:
+    """Запросы, ушедшие в поиск. Владелец должен видеть, что именно ушло наружу (SPEC §8)."""
+    return [
+        query
+        for block in response.content
+        if block.type == "server_tool_use" and block.name == "web_search"
+        if isinstance(query := block.input.get("query"), str)
+    ]
+
+
+def searches_made(usage: Usage) -> int:
+    return usage.server_tool_use.web_search_requests if usage.server_tool_use else 0
+
+
+def assistant_blocks(response: Message) -> MessageParam:
+    """Ответ ассистента блоками, слово в слово.
+
+    Так его требует вернуть продолжение паузы: в блоках результатов лежит `encrypted_content`,
+    и изменённый блок API отвергает (400).
+    """
+    return {"role": "assistant", "content": cast("list[ContentBlockParam]", response.content)}
+
+
+def answered_turn(stage: str, response: Message, raw: str) -> MessageParam:
+    """Прошлый ответ стадии для истории ремонтного повтора.
+
+    Стадия с поиском отдаёт блоки как есть, по той же причине. Остальным довольно склеенного
+    текста, и он же лежал там до P3-11.
+    """
+    if stage_named(stage).web_search is None:
+        return {"role": "assistant", "content": raw}
+    return assistant_blocks(response)
+
+
+class ModelTurn(BaseModel):
+    """Ход стадии целиком: последний ответ, приостановленные до него и счёт по всему ходу."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    response: Message
+    # Ответы, которыми API прерывал серверный цикл поиска: в истории они идут перед последним.
+    paused: list[Message] = Field(default_factory=list)
+    input_tokens: int
+    output_tokens: int
+    duration_ms: int
+    urls: set[str] = Field(default_factory=set)
+    queries: list[str] = Field(default_factory=list)
+
+
+def ask_once(
+    stage: str,
+    run_id: str,
+    model: str,
+    messages: list[MessageParam],
+    tools: list[WebSearchTool20260318Param] | Omit,
 ) -> tuple[Message, int]:
     started = time.perf_counter()
     try:
@@ -285,6 +387,7 @@ def ask_model(
             system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
             messages=messages,
             thinking=thinking_of(stage),
+            tools=tools,
         )
     except anthropic.APIError as error:
         logger.warning(
@@ -302,7 +405,7 @@ def ask_model(
     # «модель много написала» и «модель долго думала» в логе не увидеть.
     logger.info(
         "stage=%s run=%s model=%s input_tokens=%d output_tokens=%d thinking=%s "
-        "thinking_tokens=%s text_chars=%d duration_ms=%d",
+        "thinking_tokens=%s text_chars=%d duration_ms=%d web_search_requests=%d",
         stage,
         run_id,
         response.model,
@@ -312,8 +415,55 @@ def ask_model(
         thinking_tokens(response.usage),
         text_length(response),
         duration_ms,
+        searches_made(response.usage),
     )
+    for query in search_queries(response):
+        logger.info("stage=%s run=%s query=%s", stage, run_id, query)
     return response, duration_ms
+
+
+def ask_model(
+    stage: str,
+    run_id: str,
+    model: str,
+    messages: list[MessageParam],
+    tools: list[WebSearchTool20260318Param] | Omit,
+) -> ModelTurn:
+    """Ход стадии вместе с продолжениями серверного цикла поиска (SPEC §7).
+
+    `pause_turn` значит, что API прервал долгий цикл поиска, а не что ход кончился: продолжение
+    это тот же запрос с теми же инструментами и с ответом ассистента, отданным блоками без
+    единой правки. Пауза может повториться сколько угодно раз, и предел ставим мы.
+    """
+    paused: list[Message] = []
+    input_tokens = output_tokens = duration_ms = 0
+    urls: set[str] = set()
+    queries: list[str] = []
+    while True:
+        history = [*messages, *(assistant_blocks(answer) for answer in paused)]
+        response, step_ms = ask_once(stage, run_id, model, history, tools)
+        input_tokens += response.usage.input_tokens
+        output_tokens += response.usage.output_tokens
+        duration_ms += step_ms
+        urls |= search_result_urls(response)
+        queries += search_queries(response)
+        if response.stop_reason != "pause_turn":
+            return ModelTurn(
+                response=response,
+                paused=paused,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=duration_ms,
+                urls=urls,
+                queries=queries,
+            )
+        if len(paused) == MAX_SEARCH_CONTINUATIONS:
+            raise StageError(
+                f"{stage}: серверный цикл поиска не кончился за {MAX_SEARCH_CONTINUATIONS} "
+                "продолжения",
+                "",
+            )
+        paused.append(response)
 
 
 def answer_text(stage: str, response: Message) -> str:
@@ -367,11 +517,14 @@ def run_stage(
         *(history or []),
         {"role": "user", "content": build_user_message(inputs, user_edit, params)},
     ]
-    response, duration_ms = ask_model(stage, run_id, model, messages)
+    tools = search_tools(stage, inputs)
+    turn = ask_model(stage, run_id, model, messages, tools)
+    response = turn.response
     raw = answer_text(stage, response)
     files = without_extras(stage, parse_file_blocks(raw))
-    input_tokens = response.usage.input_tokens
-    output_tokens = response.usage.output_tokens
+    input_tokens = turn.input_tokens
+    output_tokens = turn.output_tokens
+    duration_ms = turn.duration_ms
 
     problems = repairable_problems(stage, files, outputs, inputs, given_params)
     if stage == "review" and frozenset(files) in outputs:
@@ -382,21 +535,23 @@ def run_stage(
         logger.warning(
             "stage=%s run=%s repair=1 problems=%s", stage, run_id, "; ".join(problems)
         )
-        repair, repair_ms = ask_model(
+        repair = ask_model(
             stage,
             run_id,
             model,
             [
                 *messages,
-                {"role": "assistant", "content": raw},
+                *(assistant_blocks(answer) for answer in turn.paused),
+                answered_turn(stage, response, raw),
                 {"role": "user", "content": repair_request(problems)},
             ],
+            tools,
         )
-        duration_ms += repair_ms
-        input_tokens += repair.usage.input_tokens
-        output_tokens += repair.usage.output_tokens
-        response = repair
-        raw = answer_text(stage, repair)
+        duration_ms += repair.duration_ms
+        input_tokens += repair.input_tokens
+        output_tokens += repair.output_tokens
+        response = repair.response
+        raw = answer_text(stage, response)
         files = without_extras(stage, parse_file_blocks(raw))
         problems = repairable_problems(stage, files, outputs, inputs, given_params)
 
