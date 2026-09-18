@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -17,7 +18,9 @@ from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
 from app import bot
+from app.answers import Answers, answers_file, read_answers
 from app.bot import (
+    ANSWERS_STAGE,
     ASSEMBLE,
     ASSEMBLE_ASKED,
     ASSEMBLE_BUTTON,
@@ -51,7 +54,11 @@ from app.bot import (
     ALREADY_PUBLISHED,
     CARD_FINISHED,
     PARENT_GONE,
+    QUESTIONS_PARKED,
+    STALE_REPLY,
     TASK_BUTTON,
+    TASK_ROUTE_END,
+    TASK_ROUTE_START,
     TASK_FILES_GONE,
     IDEA_ALREADY_PUBLISHED,
     IDEA_BOARD_MISSING,
@@ -67,6 +74,7 @@ from app.bot import (
     on_assemble_button,
     on_choice_button,
     on_consent_button,
+    on_questions_button,
     on_recording,
     on_gate_button,
     on_child_button,
@@ -85,15 +93,19 @@ from app.bot import (
     too_long,
 )
 from app.candidates import parse_candidates
+from app.clarify import Clarify
 from app.config import ConfigError, MissingApiKey, settings
 from app.ingest import Source
 from app.pipeline import (
+    ANSWERS,
     BRIEF,
     BRIEF_QUESTION,
     CANDIDATES,
+    CLARIFY_JSON,
     ISSUES_JSON,
     ISSUES_MD,
     NAMES,
+    PROJECT,
     REVIEW_JSON,
     REVIEW_MD,
     STEPS_JSON,
@@ -101,8 +113,10 @@ from app.pipeline import (
     TRANSCRIPT,
     Stage,
     StopKind,
+    stage_named,
     stages_between,
 )
+from app.project import project_snapshot, read_project, read_standards
 from app.run import Pause, Redo, Run, walk
 from app.dialog import Turn
 from app.transcribe import TranscriptionError
@@ -113,17 +127,26 @@ from app.store import (
     FAILED,
     NO_TASK,
     PUBLISHED,
+    QUESTIONS_SENT,
     REFUSED,
     REVIEWED,
     STATUS_OF_STOP,
     Child,
     Parent,
+    Parked,
     Stopped,
 )
-from app.render import review_lead, review_messages, steps_digest
+from app.render import (
+    questions_copy_text,
+    questions_note,
+    review_lead,
+    review_messages,
+    standards_line,
+    steps_digest,
+)
 from app.steps import Steps
 from app.review import Review
-from tests.helpers import REAL_BRIEF, REAL_ISSUES, STEPS_DE
+from tests.helpers import CLARIFY_DE, FIXTURES, REAL_BRIEF, REAL_ISSUES, STEPS_DE
 from tests.test_review import REVIEW_DE, REVIEW_NONE
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
@@ -153,6 +176,8 @@ class FakeStore:
         # Кто чей ребёнок и по какому поручению: (родитель, номер) у строки из кнопки разбора.
         self.children: dict[str, tuple[str, int | None]] = {}
         self.research: dict[str, bool | None] = {}
+        # Сообщения с вопросами для тимлида: по любому из двух id узнаётся припаркованный прогон.
+        self.questions: dict[str, tuple[int, int]] = {}
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
@@ -253,6 +278,28 @@ class FakeStore:
         if chat_id in self.stops and self.stops[chat_id].run_id == run_id:
             del self.stops[chat_id]
 
+    def park_run(self, run_id: str) -> None:
+        self.status[run_id] = QUESTIONS_SENT
+
+    def note_questions(self, run_id: str, message_id: int, note_id: int) -> None:
+        self.questions[run_id] = (message_id, note_id)
+
+    def parked_by_reply(self, chat_id: int, message_id: int) -> Parked | None:
+        """Прогон, на чьё сообщение с вопросами ответили: статус любой, его разбирает бот."""
+        for run_id, ids in self.questions.items():
+            if self.chats.get(run_id) != chat_id or message_id not in ids:
+                continue
+            parent_id, assignment = self.children[run_id]
+            if assignment is None:
+                return None
+            return Parked(
+                run_id=run_id,
+                status=self.status[run_id],
+                parent_id=parent_id,
+                assignment=assignment,
+            )
+        return None
+
     def drop_stop(self, chat_id: int) -> str | None:
         left = self.stops.pop(chat_id, None)
         if left is None:
@@ -275,6 +322,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeStore:
         "parent_of",
         "child_of",
         "reopen_run",
+        "park_run",
+        "note_questions",
+        "parked_by_reply",
     ):
         monkeypatch.setattr(bot, name, getattr(fake, name))
     return fake
@@ -536,7 +586,12 @@ def a_stopped_run(root: Path, monkeypatch: pytest.MonkeyPatch, candidates: str) 
 
 
 class QuietChat:
-    """Сообщение из чата 12: отвечать умеет, больше от него ничего не нужно."""
+    """Сообщение из чата 12: отвечать умеет, больше от него ничего не нужно.
+
+    Ответ возвращает сам чат, поэтому у ушедших сообщений один объект на всех, а `message_id`
+    считает отправки: бот читает его сразу после отправки, записывая в строку id обоих сообщений
+    с вопросами. Двойник нажатой кнопки ставит id сам: он изображает уже лежащее сообщение.
+    """
 
     chat_id = 12
 
@@ -544,6 +599,8 @@ class QuietChat:
         self.replies: list[str] = []
         self.reply_markups: list[object] = []
         self.reply_quoted: list[bool | None] = []
+        self.message_id = 0
+        self.reply_to_message: object | None = None
 
     async def reply_text(
         self, text: str, reply_markup: object = None, do_quote: bool | None = None
@@ -551,6 +608,7 @@ class QuietChat:
         self.replies.append(text)
         self.reply_markups.append(reply_markup)
         self.reply_quoted.append(do_quote)
+        self.message_id += 1
         return cast(Message, self)
 
 
@@ -2931,8 +2989,8 @@ async def test_the_child_run_takes_its_parent_folder_and_the_pressed_task(
     assert run.parent_root == tmp_path / "runs" / PARENT
     assert (run.parent_run_id, run.assignment) == (PARENT, 2)
     assert status == "assignment"
-    # Парковки в боте ещё нет: вопросы для тимлида уходят на карточку открытыми.
-    assert run.asks_teamlead is False
+    # Ворота в этом чате включены умолчанием настроек, значит вопросы есть кому отбирать.
+    assert run.asks_teamlead is True
     assert store.research[run.run_id] is True
 
 
@@ -3563,9 +3621,452 @@ async def test_gates_speak_of_both_paths(
 
     assert on.replies == [
         "Ворота включены. Своя идея встанет на вопросы брифа, на бриф и на задачи, поручение "
-        "встанет на шаги, прежде чем попасть на доску." + GATES_FROM_NEXT_RUN
-    ]
-    assert off.replies == [
-        "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов."
+        "встанет на вопросы для тимлида и на шаги, прежде чем попасть на доску."
         + GATES_FROM_NEXT_RUN
     ]
+    assert off.replies == [
+        "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов, "
+        "а вопросы для тимлида уходят на карточку открытыми." + GATES_FROM_NEXT_RUN
+    ]
+
+
+# Вопросы для тимлида (P3-11, часть D): прогон паркуется, чат остаётся свободным, ответ приходит
+# ответом (reply) на любое из двух сообщений.
+
+
+TAKEN_AT = datetime(2026, 9, 18, 10, 2, tzinfo=timezone.utc)
+NO_STANDARDS = project_snapshot(None, TAKEN_AT)
+FRONTEND_STANDARDS = project_snapshot(read_standards(FIXTURES / "project_frontend"), TAKEN_AT)
+EMPTY_STANDARDS = project_snapshot(read_standards(FIXTURES / "empty_standards"), TAKEN_AT)
+ANSWER_DE = "Zu 2: nimm React Hook Form mit zod."
+NO_QUESTIONS = json.dumps({**json.loads(CLARIFY_DE), "questions": []}, ensure_ascii=False)
+
+
+def walk_teamlead(
+    seen: list[tuple[str, str, str]], snapshot: str = NO_STANDARDS, clarify: str = CLARIFY_DE
+) -> Walking:
+    """Обход поручения маршрутом P3-11: снимок и вопросы, ответ тимлида, шаги, карточка.
+
+    Ходит теми же ветками, что настоящий `walk`: паркуется после `clarify`, только если вопросы
+    есть и их есть кому отбирать, и встаёт на воротах шагов, только если ворота включены.
+    """
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((run.run_id, start, stop))
+        (run.root / "inputs").mkdir(parents=True, exist_ok=True)
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        if start == TASK_ROUTE_START:
+            (run.root / PROJECT).write_text(snapshot, encoding="utf-8")
+            (run.root / CLARIFY_JSON).write_text(clarify, encoding="utf-8")
+            on_done(stage_named("assignment"))
+            on_done(stage_named("clarify"))
+            if run.asks_teamlead and Clarify.model_validate_json(clarify).questions:
+                return Pause(stage="clarify", artifact=CLARIFY_JSON, kind="questions")
+        if start in (TASK_ROUTE_START, ANSWERS_STAGE):
+            (run.root / ANSWERS).write_text(
+                answers_file(run.answers or Answers(status="not_sent")), encoding="utf-8"
+            )
+            (run.root / STEPS_JSON).write_text(STEPS_DE, encoding="utf-8")
+            (run.root / STEPS_MD).write_text("# Schritte\n", encoding="utf-8")
+            on_done(stage_named(ANSWERS_STAGE))
+            on_done(stage_named("steps"))
+            if not run.auto_approve:
+                return Pause(stage="steps", artifact=STEPS_MD, kind="gate")
+        (run.root / "outputs/publish.json").write_text(
+            json.dumps(card_of(run.assignment or 1)), encoding="utf-8"
+        )
+        return None
+
+    return walking
+
+
+def naming_runs(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    given = list(names)
+    monkeypatch.setattr(bot, "new_run_id", lambda: given.pop(0))
+
+
+def a_task_asking_the_teamlead(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    snapshot: str = NO_STANDARDS,
+    clarify: str = CLARIFY_DE,
+) -> list[tuple[str, str, str]]:
+    """Разбор в чате и обход, который спрашивает тимлида. Отдаёт список ходок обхода."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_teamlead(seen, snapshot, clarify))
+    naming_runs(monkeypatch, "ребёнок", "второй")
+    return seen
+
+
+def asked_questions(number: int = 1, snapshot: str = NO_STANDARDS) -> list[str]:
+    """Два сообщения с вопросами, какими их собирает код: для копирования и с переводом."""
+    clarify = Clarify.model_validate_json(CLARIFY_DE)
+    return [questions_copy_text(clarify), questions_note(clarify, number, read_project(snapshot))]
+
+
+def a_reply(text: str, message_id: int) -> TextChat:
+    chat = TextChat(text)
+    chat.reply_to_message = SimpleNamespace(message_id=message_id)
+    return chat
+
+
+def a_questions_button(run_id: str, decision: str, message_id: int = 3) -> ButtonChat:
+    """Нажатие под переводом вопросов: по id этого сообщения бот и находит прогон."""
+    chat = ButtonChat(f"asked:{run_id}:{decision}")
+    chat.message_id = message_id
+    return chat
+
+
+def answers_of(tmp_path: Path, run_id: str = "ребёнок") -> Answers:
+    return read_answers((tmp_path / "runs" / run_id / ANSWERS).read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_task_with_questions_parks_and_sends_a_copy_text_and_a_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Парковка — не остановка: строка ждёт тимлида, а место остановки в чате свободно."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert store.status["ребёнок"] == QUESTIONS_SENT
+    assert 12 not in store.stops
+    assert chat.replies[1:] == asked_questions()
+    assert chat.reply_markups[1] is None
+    assert buttons_of(chat.reply_markups[2]) == [
+        ("Продолжить без ответов", "asked:ребёнок:without"),
+        ("Стоп", "asked:ребёнок:stop"),
+    ]
+    assert store.questions["ребёнок"] == (2, 3)
+    assert chat.edits[-1] == QUESTIONS_PARKED.format(run_id="ребёнок")
+    assert "stop=questions run=ребёнок questions=3" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_new_meeting_is_accepted_while_a_task_waits_for_the_teamlead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Главная причина парковки: пока тимлид молчит днями, бот остаётся рабочим."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE))
+    chat = DeliveryChat("Ещё одна встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert store.status["второй"] == REVIEWED
+    assert not [reply for reply in chat.replies if reply.startswith("Прогон ребёнок ждёт")]
+    assert store.status["ребёнок"] == QUESTIONS_SENT
+
+
+@pytest.mark.asyncio
+async def test_another_task_of_the_same_review_starts_while_the_first_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_task_button("2")
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert [run_id for run_id, _, _ in seen] == ["ребёнок", "второй"]
+    assert store.status["второй"] == QUESTIONS_SENT
+    assert chat.replies[1:] == asked_questions(number=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answered", [2, 3])
+async def test_reply_to_the_questions_continues_the_same_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+    answered: int,
+) -> None:
+    """Ответ узнаётся по reply на любое из двух сообщений и продолжает тот же прогон."""
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_reply(ANSWER_DE, answered)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert seen[-1] == ("ребёнок", ANSWERS_STAGE, TASK_ROUTE_END)
+    written = answers_of(tmp_path)
+    assert (written.status, written.text) == ("answered", ANSWER_DE)
+    assert store.status["ребёнок"] == AWAITING_GATE
+    assert store.stops[12].stage == "steps"
+    assert f"answer=teamlead run=ребёнок chat=12 chars={len(ANSWER_DE)}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_at_a_live_gate_of_another_run_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Иначе припаркованный дошёл бы до своих ворот и упёрся в индекс одной остановки."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    store.start_run("сосед", 12, "text", "ru", False, None, "ingest")
+    store.stop_run("сосед", "gate", "brief", BRIEF)
+    chat = a_reply(ANSWER_DE, 2)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="сосед")]
+    assert not (tmp_path / "runs/ребёнок" / ANSWERS).exists()
+    assert store.status["ребёнок"] == QUESTIONS_SENT
+    assert "refusal=stop_alive chat=12 run=сосед task=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_questions_that_are_already_closed_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Reply на вопросы новой встречей не бывает: разбор такого текста стоил бы денег зря."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    await on_questions_button(a_press(a_questions_button("ребёнок", "without")), NO_CONTEXT)
+    chat = a_reply(ANSWER_DE, 3)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_REPLY.format(number=1, run_id="ребёнок")]
+    assert store.started == [(PARENT, 12, "voice"), ("ребёнок", 12, "voice")]
+    assert "refusal=stale_reply chat=12 run=ребёнок task=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_going_on_without_answers_says_so_in_the_file_and_walks_to_the_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_questions_button("ребёнок", "without")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_questions_button(a_press(chat), NO_CONTEXT)
+
+    assert seen[-1] == ("ребёнок", ANSWERS_STAGE, TASK_ROUTE_END)
+    assert answers_of(tmp_path).status == "without_answers"
+    assert store.status["ребёнок"] == AWAITING_GATE
+    assert chat.markups == [None]
+    assert "questions=without run=ребёнок chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_under_the_questions_drops_the_run_and_the_next_press_starts_a_new_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    stopping = a_questions_button("ребёнок", "stop")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_questions_button(a_press(stopping), NO_CONTEXT)
+        await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    assert store.status["ребёнок"] == DROPPED
+    assert stopping.replies == [GATE_STOPPED.format(run_id="ребёнок")]
+    assert [run_id for run_id, _, _ in seen] == ["ребёнок", "второй"]
+    assert store.status["второй"] == QUESTIONS_SENT
+    assert "questions=stop run=ребёнок chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_questions_button_of_a_run_that_no_longer_waits_moves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    await on_questions_button(a_press(a_questions_button("ребёнок", "without")), NO_CONTEXT)
+    walked = len(seen)
+    chat = a_questions_button("ребёнок", "without")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_questions_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STALE_BUTTON]
+    assert len(seen) == walked
+    assert "refusal=stale_button chat=12 run=ребёнок" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_questions_button_pressed_during_a_run_is_refused_like_a_message(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    listed(monkeypatch, "12")
+    chat = a_questions_button("ребёнок", "without")
+    await bot.running.acquire()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.bot"):
+            await on_questions_button(a_press(chat), NO_CONTEXT)
+    finally:
+        bot.running.release()
+
+    assert chat.replies == [BUSY]
+    assert "refusal=busy chat=12 run=ребёнок press=without" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pressing_the_parked_task_again_resends_the_questions_without_a_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Так же лечится сообщение, не дошедшее до чата: вопросы лежат в clarify.json."""
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert [run_id for run_id, _, _ in seen] == ["ребёнок"]
+    assert chat.replies == asked_questions()
+    assert store.questions["ребёнок"] == (1, 2)
+    assert store.status["ребёнок"] == QUESTIONS_SENT
+    assert "questions=resent run=ребёнок chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_with_gates_off_a_task_does_not_park_and_its_questions_go_to_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(settings, "auto_approve", True)
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_teamlead(seen))
+    naming_runs(monkeypatch, "ребёнок")
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert store.status["ребёнок"] == PUBLISHED
+    assert answers_of(tmp_path).status == "not_sent"
+    assert store.questions == {}
+    assert 12 not in store.stops
+
+
+def test_a_child_broken_after_the_teamlead_answered_resumes_from_the_steps(
+    tmp_path: Path,
+) -> None:
+    """Иначе прогон спросил бы тимлида заново и выбросил ответ, которого ждали днями."""
+    root = tmp_path / "runs" / "ребёнок"
+    (root / "inputs").mkdir(parents=True)
+    assert bot.resumed_start(root, TASK_ROUTE_START) == TASK_ROUTE_START
+
+    (root / ANSWERS).write_text(answers_file(Answers(status="without_answers")), encoding="utf-8")
+
+    assert bot.resumed_start(root, TASK_ROUTE_START) == "steps"
+
+
+@pytest.mark.asyncio
+async def test_a_broken_child_with_an_answer_walks_from_the_steps_and_not_from_the_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    root = a_child_in(tmp_path, store, FAILED, journal=False)
+    (root / "inputs").mkdir()
+    (root / ANSWERS).write_text(answers_file(Answers(status="without_answers")), encoding="utf-8")
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_teamlead(seen))
+
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    assert seen == [("ребёнок", "steps", TASK_ROUTE_END)]
+
+
+def test_the_bot_writes_to_no_chat_of_its_own_choosing() -> None:
+    """Бот тимлиду не пишет ничего: отправка по произвольному chat_id есть только в уборке."""
+    source = Path(str(bot.__file__)).read_text(encoding="utf-8")
+
+    assert source.count("send_message(") == 1
+    assert "send_message(" in inspect.getsource(bot.warn_orphans)
+
+
+@pytest.mark.asyncio
+async def test_unset_standards_are_named_before_research_is_paid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Забытая настройка иначе оплачивает шаги не по тому стеку, и сказать это надо заранее."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store, snapshot=EMPTY_STANDARDS)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert standards_line(read_project(EMPTY_STANDARDS)) in chat.replies[2]
+    assert "Стандарты проекта не заданы: в каталоге empty_standards нет" in chat.replies[2]
+
+
+@pytest.mark.asyncio
+async def test_without_questions_the_standards_line_stands_in_the_progress_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Сообщения с вопросами нет, а строку владелец обязан увидеть до следующей стадии."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store, clarify=NO_QUESTIONS)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    after_clarify = chat.edits[1]
+    assert after_clarify.endswith(standards_line(read_project(NO_STANDARDS)))
+    assert "Стандарты проекта не заданы: шаги пишутся без стандартов проекта" in after_clarify
+    assert chat.replies[1:] == []
+
+
+@pytest.mark.asyncio
+async def test_with_gates_off_the_standards_line_still_stands_before_the_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Без ворот сообщения с вопросами тоже нет, а стандарты решают, по какому стеку писать шаги."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(settings, "auto_approve", True)
+    monkeypatch.setattr(bot, "walk", walk_teamlead([]))
+    naming_runs(monkeypatch, "ребёнок")
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.edits[1].endswith(standards_line(read_project(NO_STANDARDS)))
+
+
+@pytest.mark.asyncio
+async def test_found_standards_are_named_by_their_folder_and_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store, snapshot=FRONTEND_STANDARDS)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert "Стандарты проекта: project_frontend (STACK.md, TESTING.md)" in chat.replies[2]
+    assert "Стандарты проекта не заданы" not in chat.replies[2]

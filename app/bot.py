@@ -38,16 +38,21 @@ from telegram.ext import (
     filters,
 )
 
+from app.answers import Answers
 from app.candidates import Candidates, Idea, parse_candidates
+from app.clarify import Clarify, has_questions
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.dialog import budget_spent
 from app.ingest import Source, new_run_id
 from app.models import IssuesFile
 from app.pipeline import (
+    ANSWERS,
     BRIEF,
     BRIEF_QUESTION,
+    CLARIFY_JSON,
     ISSUES_JSON,
     NAMES,
+    PROJECT,
     REVIEW_JSON,
     REVIEW_MD,
     STEPS_JSON,
@@ -59,26 +64,33 @@ from app.pipeline import (
     route_of,
     stages_between,
 )
+from app.project import read_project
 from app.publish import ASSIGNMENTS_LIST, PublishedCard, journal_of
 from app.render import (
     backlog_digest,
     brief_digest,
+    questions_copy_text,
+    questions_note,
     review_lead,
     review_messages,
+    standards_line,
     steps_digest,
 )
 from app.review import Review
 from app.run import Pause, Redo, Run, read_artifact, walk
 from app.steps import Steps
 from app.store import (
+    DROPPED,
     FAILED,
     NO_TASK,
+    QUESTIONS_SENT,
     REFUSED,
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
     REVIEWED,
     Parent,
+    Parked,
     Stopped,
     add_turn,
     child_of,
@@ -86,7 +98,10 @@ from app.store import (
     fail_orphans,
     finish_run,
     mark_stage,
+    note_questions,
     parent_of,
+    park_run,
+    parked_by_reply,
     reopen_run,
     start_run,
     stop_run,
@@ -109,6 +124,7 @@ logger = logging.getLogger("app.bot")
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 TASK_ROUTE_START, TASK_ROUTE_END = "assignment", "card"
+CLARIFY_STAGE, ANSWERS_STAGE = "clarify", "answers"
 IDEA_ROUTE_START = "handoff"
 # Журнал публикации лежит рядом с файлом, который путь кладёт на доску: у каждого пути свой.
 BOARD_CONTRACT = {TASK_ROUTE_START: STEPS_JSON, IDEA_ROUTE_START: ISSUES_JSON}
@@ -154,9 +170,12 @@ GATES_ON, GATES_OFF = "on", "off"
 GATES_STATE = {
     False: (
         "Ворота включены. Своя идея встанет на вопросы брифа, на бриф и на задачи, поручение "
-        "встанет на шаги, прежде чем попасть на доску."
+        "встанет на вопросы для тимлида и на шаги, прежде чем попасть на доску."
     ),
-    True: "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов.",
+    True: (
+        "Ворота выключены. Идея и поручение идут до доски без подтверждений, бриф без вопросов, "
+        "а вопросы для тимлида уходят на карточку открытыми."
+    ),
 }
 
 GATES_FROM_NEXT_RUN = " Это со следующего прогона, идущий доходит со своим режимом."
@@ -168,7 +187,9 @@ GATES_UNKNOWN = (
 GREETING = (
     "Пришлите запись встречи файлом, голосовое или текст. Я выпишу все поручения: кто поручил, "
     "срок, что не надо и что переспросить, со сказанным в оригинале и переводом.\n"
-    "Кнопка «Разложить на шаги» под поручением разложит его на шаги и положит карточкой в Trello.\n"
+    "Кнопка «Разложить на шаги» под поручением сначала соберёт вопросы для тимлида: отберите "
+    "нужные и отправьте их сами, а его ответ пришлите ответом (reply) на моё сообщение. Потом "
+    "разложу поручение на шаги и положу карточкой в Trello.\n"
     "Кнопка «Проработать как идею» под оглавлением разбора проведёт всю запись путём своей идеи: "
     "вопросы, бриф, задачи и карточки на доске идей.\n"
     "Это займёт пару минут, я буду писать после каждого шага."
@@ -252,6 +273,30 @@ STOP_ALIVE = (
 
 TASK_BUTTON = "Разложить на шаги"
 
+# Вопросы для тимлида (P3-11). Прогон не занимает места остановки: пока тимлид молчит, чат
+# принимает новые записи и другие поручения, поэтому сообщение о ходе прогона говорит об этом
+# вслух — иначе парковка неотличима от повисшего прогона.
+QUESTIONS_PARKED = (
+    "Вопросы для тимлида ниже. Прогон {run_id} ждёт ответа и чат не занимает: можно прислать "
+    "новую запись или взять другое поручение."
+)
+
+STALE_REPLY = (
+    "Вопросы по поручению {number} уже закрыты, прогон {run_id} идёт дальше без этого ответа."
+)
+
+REPLY_LOST = (
+    "Прогон {run_id} по поручению {number} больше не ждёт ответа: разбора, из которого он вырос, "
+    "у меня нет. Нажмите «Разложить на шаги» ещё раз."
+)
+
+QUESTIONS_WITHOUT, QUESTIONS_STOP = "without", "stop"
+
+QUESTIONS_BUTTONS = (
+    (QUESTIONS_WITHOUT, "Продолжить без ответов"),
+    (QUESTIONS_STOP, "Стоп"),
+)
+
 IDEA = "idea"
 
 IDEA_BUTTON = "Проработать как идею"
@@ -331,6 +376,8 @@ class Ending(BaseModel):
     `stop` заполнен, когда прогон ждёт ответа: на выборе, на воротах и когда повтор сорвался,
     а ответить ещё раз есть смысл. Статус остановки тогда не пишут: его называет род (§4),
     и второе его написание разошлось бы с первым. `status` — только для концовок без остановки.
+    `parked` — вопросы для тимлида отданы владельцу (P3-11): прогон ждёт днями и места остановки
+    в чате не занимает, поэтому это не `stop` и статус ему пишет `park_run`, а не `Ending`.
     `keyboard` собирает тот, кто читал артефакт: списку кнопок нужны сами идеи, и второе
     чтение файла ради них завело бы второе место, где список живёт. `review` — по тому же
     доводу: поручения уходят сообщениями из того разбора, чьё оглавление уже в `text`.
@@ -341,6 +388,7 @@ class Ending(BaseModel):
     text: str
     status: str = ""
     stop: Pause | None = None
+    parked: bool = False
     keyboard: InlineKeyboardMarkup | None = None
     review: Review | None = None
 
@@ -422,11 +470,18 @@ def started_run(
     )
 
 
-def child_run(run_id: str, parent: Parent, number: int | None, auto_approve: bool) -> Run:
+def child_run(
+    run_id: str,
+    parent: Parent,
+    number: int | None,
+    auto_approve: bool,
+    answers: Answers | None = None,
+) -> Run:
     """Прогон по выбору из разбора: поручение `number` или, при None, вся запись как идея.
 
-    Язык и источник записи — факты родителя (§4.1). Вопросы брифа идут там же, где ворота: кто
-    готов подтверждать, готов и отвечать (§3.2).
+    Язык и источник записи — факты родителя (§4.1). Вопросы брифа и вопросы для тимлида идут там
+    же, где ворота: кто готов подтверждать, готов и отвечать, и готов отбирать вопросы (§3.2).
+    `answers` несёт продолженный прогон: ответ тимлида или отказ его ждать.
     """
     return Run(
         root=RUNS / run_id,
@@ -438,18 +493,25 @@ def child_run(run_id: str, parent: Parent, number: int | None, auto_approve: boo
         parent_root=RUNS / parent.run_id,
         parent_run_id=parent.run_id,
         assignment=number,
+        asks_teamlead=not auto_approve,
+        answers=answers,
     )
 
 
 def resumed_start(root: Path, first: str) -> str:
-    """Откуда вести сорванный прогон, начатый кнопкой: с публикации или с начала маршрута.
+    """Откуда вести сорванный прогон, начатый кнопкой: по цепочке артефактов, что он успел.
 
     Журнал рядом с файлом для доски значит, что публикация начиналась: карточки могут стоять на
     доске, и собирать их заново значило бы оплатить стадии второй раз и дособирать карточки
-    другим набором. Без журнала до доски дело не дошло, и маршрут идёт с первой стадии.
+    другим набором. Лежащий `answers.md` значит, что тимлида уже спросили и ответ получен:
+    начать с `assignment` значило бы спросить его заново и выбросить ответ, которого ждали днями.
+    Без того и другого до доски дело не дошло, и маршрут идёт с первой стадии.
     """
-    published = journal_of(root / BOARD_CONTRACT[first]).exists()
-    return route_end(first) if published else first
+    if journal_of(root / BOARD_CONTRACT[first]).exists():
+        return route_end(first)
+    if first == TASK_ROUTE_START and (root / ANSWERS).exists():
+        return after(ANSWERS_STAGE).name
+    return first
 
 
 def continued(stopped: Stopped) -> Run:
@@ -564,6 +626,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     async with running:
+        # Ответ тимлида разбирается раньше остановки: reply на вопросы новой встречей не бывает,
+        # и разбор такого текста стоил бы денег, а ответа прогон так и не дождался бы.
+        replied = message.reply_to_message
+        parked = (
+            await asyncio.to_thread(parked_by_reply, message.chat_id, replied.message_id)
+            if replied is not None
+            else None
+        )
+        if parked is not None:
+            await answer_teamlead(message, parked)
+            return
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
             run = started_run(new_run_id(), message.chat_id, source="text", text=message.text)
@@ -600,6 +673,146 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             start = stopped.stage
         note = await message.reply_text(progress_text(run, done_before(start), start))
         await follow(note, run, message.date, start, redo)
+
+
+async def answer_teamlead(message: Message, parked: Parked) -> None:
+    """Текст ответом (reply) на вопросы поручения: тот же прогон идёт дальше со стадии `answers`.
+
+    Содержимое берётся как есть, целиком: какие вопросы оно закрывает, читает стадия шагов по
+    смыслу, а не код по номерам — владелец отправляет не все вопросы, а тимлид нумерует по-своему.
+    """
+    if parked.status != QUESTIONS_SENT:
+        await refuse(
+            message,
+            "stale_reply",
+            STALE_REPLY.format(number=parked.assignment, run_id=parked.run_id),
+            run=parked.run_id,
+            task=parked.assignment,
+        )
+        return
+    stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+    if stopped is not None:
+        # Иначе припаркованный прогон дошёл бы до своих ворот и упёрся в индекс одной остановки
+        # уже после оплаченных стадий.
+        await refuse(
+            message,
+            "stop_alive",
+            STOP_ALIVE.format(run_id=stopped.run_id),
+            run=stopped.run_id,
+            task=parked.assignment,
+        )
+        return
+    written = message.text or ""
+    logger.info(
+        "answer=teamlead run=%s chat=%s chars=%d", parked.run_id, message.chat_id, len(written)
+    )
+    answers = Answers(status="answered", received_at=message.date, text=written)
+    await resume_parked(message, parked, answers)
+
+
+async def resume_parked(message: Message, parked: Parked, answers: Answers) -> None:
+    """Припаркованный прогон идёт дальше: ответ тимлида или отказ его ждать ложится в `answers.md`.
+
+    Язык и режим ворот берутся из строк разбора и ребёнка, как при первом нажатии: прогон
+    простоял дни, и настройки за это время могли смениться.
+    """
+    parent = await asyncio.to_thread(parent_of, parked.parent_id, message.chat_id)
+    child = await asyncio.to_thread(child_of, parked.parent_id, parked.assignment)
+    if parent is None or child is None:
+        await refuse(
+            message,
+            "stale_reply",
+            REPLY_LOST.format(run_id=parked.run_id, number=parked.assignment),
+            run=parked.run_id,
+            parent="gone",
+        )
+        return
+    run = child_run(parked.run_id, parent, parked.assignment, child.auto_approve, answers)
+    await asyncio.to_thread(reopen_run, run.run_id, ANSWERS_STAGE)
+    note = await message.reply_text(
+        progress_text(run, done_before(ANSWERS_STAGE), ANSWERS_STAGE)
+    )
+    await follow(note, run, message.date, ANSWERS_STAGE)
+
+
+async def send_questions(answering: Message, run_id: str, root: Path, number: int) -> None:
+    """Вопросы владельцу двумя сообщениями ответом на нажатое поручение (SPEC §7.3).
+
+    Первое — текст для копирования: только вопросы на языке встречи, без подписей бота и без
+    кнопок, потому что копируемое не должно нести ничего лишнего. Второе — перевод, зачем
+    спрашивать, обращение, стандарты проекта и две кнопки.
+    """
+    clarify = Clarify.model_validate_json(read_artifact(root, CLARIFY_JSON))
+    project = read_project(read_artifact(root, PROJECT))
+    sent: list[int] = []
+    for written, keyboard in (
+        (questions_copy_text(clarify), None),
+        (questions_note(clarify, number, project), questions_keyboard(run_id)),
+    ):
+        # Каждая отправка прикрыта, как у разбора: сорванная не должна отнять вторую.
+        with suppress(TelegramError):
+            posted = await answering.reply_text(written, reply_markup=keyboard, do_quote=True)
+            sent.append(posted.message_id)
+    if len(sent) < 2:
+        # Строка уже `questions_sent`, и лечит это повторное нажатие кнопки поручения: оно
+        # пришлёт те же вопросы из `clarify.json`, не платя за стадию второй раз.
+        logger.warning(
+            "questions=kept run=%s chat=%s: сообщения не ушли, нажмите поручение ещё раз",
+            run_id,
+            answering.chat_id,
+        )
+        return
+    await asyncio.to_thread(note_questions, run_id, sent[0], sent[1])
+
+
+async def on_questions_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки под переводом вопросов: идти без ответов или снять прогон (SPEC §7.3)."""
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("questions=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    pressed = asked_of(query)
+    if pressed is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    run_id, decision = pressed
+    if running.locked():
+        await refuse(message, "busy", BUSY, run=run_id, press=decision)
+        return
+
+    async with running:
+        # Прогон ищется по самому сообщению с кнопками: его id и записан в строке, а кнопке
+        # остаётся сверить, тот ли это прогон и ждёт ли он ещё.
+        parked = await asyncio.to_thread(parked_by_reply, message.chat_id, message.message_id)
+        if parked is None or parked.run_id != run_id or parked.status != QUESTIONS_SENT:
+            await refuse(message, "stale_button", STALE_BUTTON, run=run_id)
+            return
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is not None:
+            await refuse(
+                message,
+                "stop_alive",
+                STOP_ALIVE.format(run_id=stopped.run_id),
+                run=stopped.run_id,
+                task=parked.assignment,
+            )
+            return
+        logger.info("questions=%s run=%s chat=%s", decision, run_id, message.chat_id)
+        # Оба решения кончают ожидание, поэтому кнопки уходят: оставленные звали бы нажать ещё
+        # раз прогон, который уже идёт дальше.
+        with suppress(TelegramError):
+            await query.edit_message_reply_markup(reply_markup=None)
+        if decision == QUESTIONS_STOP:
+            await asyncio.to_thread(finish_run, run_id, DROPPED)
+            await message.reply_text(GATE_STOPPED.format(run_id=run_id))
+            return
+        await resume_parked(message, parked, Answers(status="without_answers"))
 
 
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -853,6 +1066,12 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if child is not None and child.status == PUBLISHED:
             await refuse_published(message, child.run_id, parent_id, number)
             return
+        if child is not None and child.status == QUESTIONS_SENT and number is not None:
+            # Вопросы уже собраны и лежат в `clarify.json`: второе нажатие присылает их заново,
+            # не зовя модель. Этим же лечится сообщение, не дошедшее до чата.
+            logger.info("questions=resent run=%s chat=%s", child.run_id, message.chat_id)
+            await send_questions(message, child.run_id, RUNS / child.run_id, number)
+            return
         first = IDEA_ROUTE_START if number is None else TASK_ROUTE_START
         if child is None:
             run = child_run(new_run_id(), parent, number, auto_approve_for(message.chat_id))
@@ -892,7 +1111,9 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         note = await message.reply_text(
             progress_text(run, done_before(start), start), do_quote=True
         )
-        await follow(note, run, datetime.now(timezone.utc), start)
+        # Вопросы для тимлида уходят ответом на само поручение, а не на сообщение о ходе прогона:
+        # так первое нажатие и повторное отвечают в одно место.
+        await follow(note, run, datetime.now(timezone.utc), start, answering=message)
 
 
 async def refuse_published(
@@ -1089,6 +1310,7 @@ async def follow(
     asked_at: datetime,
     start: str = FIRST_STAGE,
     redo: Redo | None = None,
+    answering: Message | None = None,
 ) -> None:
     """Гонит прогон в потоке, правит одно сообщение до конца и закрывает строку прогона.
 
@@ -1113,18 +1335,27 @@ async def follow(
             # опубликованы. Ронять из-за неё прогон, который человек оплатил, нельзя; строка
             # останется на прошлой стадии, и её закроет уборка следующего старта.
             logger.exception("Прогон %s не записал стадию %s", run.run_id, stage.name)
-        progress.append(
-            asyncio.run_coroutine_threadsafe(
-                note.edit_text(progress_text(run, done, start)), loop
-            )
-        )
+        written = progress_text(run, done, start)
+        if stage.name == CLARIFY_STAGE and not parks_after_clarify(run):
+            # Незаданные стандарты владелец обязан увидеть до того, как за них заплачено. Когда
+            # вопросы уходят сообщением, строка стоит там; без них показать её больше негде.
+            snapshot = read_project(read_artifact(run.root, PROJECT))
+            written = f"{written}\n\n{standards_line(snapshot)}"
+        progress.append(asyncio.run_coroutine_threadsafe(note.edit_text(written), loop))
 
     ending = await outcome(run, report, start, redo)
     try:
-        # Вопросы для тимлида строке не остановка: до такой паузы бот не доходит (`outcome`).
-        if ending.stop and ending.stop.kind != "questions":
+        if ending.parked:
+            # Не остановка: места остановки в чате парковка не занимает, и статус ей пишет
+            # `park_run`, а не род `Pause` (SPEC §3.2).
+            await asyncio.to_thread(park_run, run.run_id)
+        elif ending.stop:
             await asyncio.to_thread(
-                stop_run, run.run_id, ending.stop.kind, ending.stop.stage, ending.stop.artifact
+                stop_run,
+                run.run_id,
+                stopping(ending.stop),
+                ending.stop.stage,
+                ending.stop.artifact,
             )
         else:
             await asyncio.to_thread(finish_run, run.run_id, ending.status)
@@ -1147,6 +1378,8 @@ async def follow(
         # без содержания, без кнопок и без единого способа понять, чего от него ждут.
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
+    if ending.parked and run.assignment is not None:
+        await send_questions(answering or note, run.run_id, run.root, run.assignment)
     if ending.review is not None:
         await send_review(note, run, ending.review)
     # Сколько человек прождал ответа: отчёт серии живых прогонов (P2-06) отвечает на этот вопрос
@@ -1327,6 +1560,18 @@ def idea_keyboard(run_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def questions_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    # Кнопка называет прогон, но не место: вопросы у прогона одни, второго круга не бывает.
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(title, callback_data=f"asked:{run_id}:{decision}")
+                for decision, title in QUESTIONS_BUTTONS
+            ]
+        ]
+    )
+
+
 def task_keyboard(run_id: str, number: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}")]]
@@ -1353,6 +1598,20 @@ def backlog_of(run: Run) -> str:
 
 def steps_of(run: Run) -> str:
     return steps_digest(Steps.model_validate_json(read_artifact(run.root, STEPS_JSON)))
+
+
+def stopping(pause: Pause) -> StopKind:
+    """Род остановки, которым закрывают строку. Парковка сюда не доходит: её пишет `park_run`."""
+    if pause.kind == "questions":
+        raise ValueError(f"вопросы для тимлида не остановка: пауза после {pause.stage}")
+    return pause.kind
+
+
+def parks_after_clarify(run: Run) -> bool:
+    """Прогон встанет на вопросах: есть кому их отбирать и есть что спрашивать (SPEC §3.2)."""
+    return run.asks_teamlead and has_questions(
+        Clarify.model_validate_json(read_artifact(run.root, CLARIFY_JSON))
+    )
 
 
 # Ворота объявляет список стадий (`gate_after`), а короткое содержание пишет код: третьи
@@ -1417,6 +1676,12 @@ def chosen_of(query: CallbackQuery) -> tuple[str, int | None] | None:
     return task_of(query)
 
 
+def asked_of(query: CallbackQuery) -> tuple[str, str] | None:
+    """Прогон и решение по вопросам для тимлида из данных кнопки."""
+    parts = button_of(query, 3)
+    return (parts[1], parts[2]) if parts and parts[2] in dict(QUESTIONS_BUTTONS) else None
+
+
 def assembling_run(query: CallbackQuery) -> str | None:
     """Прогон, которому сказали кончать спрашивать."""
     parts = button_of(query, 2)
@@ -1477,9 +1742,9 @@ async def outcome(
                 keyboard=assemble_keyboard(run.run_id),
             )
         if waiting and waiting.kind == "questions":
-            # Вопросы бот владельцу пока не показывает и не паркуется: `child_run` не ставит
-            # `asks_teamlead`, и вопросы ложатся на карточку открытыми.
-            raise RuntimeError(f"Прогон {run.run_id} встал на вопросах, которых бот не показывает")
+            asked = Clarify.model_validate_json(read_artifact(run.root, CLARIFY_JSON))
+            logger.info("stop=questions run=%s questions=%d", run.run_id, len(asked.questions))
+            return Ending(text=QUESTIONS_PARKED.format(run_id=run.run_id), parked=True)
         if waiting:
             logger.info("stop=gate run=%s stage=%s", run.run_id, waiting.stage)
             return Ending(
@@ -1581,6 +1846,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(on_gate_button, pattern=r"^gate:"))
     application.add_handler(CallbackQueryHandler(on_choice_button, pattern=r"^pick:"))
     application.add_handler(CallbackQueryHandler(on_assemble_button, pattern=rf"^{ASSEMBLE}:"))
+    application.add_handler(CallbackQueryHandler(on_questions_button, pattern=r"^asked:"))
     application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
     application.add_handler(
         CallbackQueryHandler(on_child_button, pattern=rf"^(task|{IDEA}):")
