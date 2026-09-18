@@ -518,6 +518,24 @@ def test_steps_come_back_stamped_and_drawn_without_a_repair(llm: InstallResponse
     )
 
 
+@pytest.mark.parametrize(
+    ("stage", "inputs", "answer"),
+    [
+        ("clarify", CLARIFY_INPUTS, clarify_answer()),
+        ("steps", ASSIGNMENT_INPUTS, steps_answer()),
+    ],
+)
+def test_the_two_stages_the_owner_waits_through_ask_for_the_least_thinking(
+    llm: InstallResponses, stage: str, inputs: dict[str, str], answer: str
+) -> None:
+    """Вход у обеих разобран предыдущей стадией, а человек ждёт их на воротах (SPEC §7)."""
+    requests = llm([ok(answer)])
+
+    run_stage(stage, inputs, RUN)
+
+    assert request_body(requests[0])["thinking"] == {"type": "disabled"}
+
+
 def test_an_empty_step_translation_gets_the_one_repair_and_is_named_in_it(
     llm: InstallResponses,
 ) -> None:

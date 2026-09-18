@@ -148,6 +148,7 @@ STAGES: tuple[Stage, ...] = (
         runs="llm",
         inputs=(ASSIGNMENT_JSON, PROJECT),
         outputs=(frozenset({CLARIFY_JSON}),),
+        thinking="disabled",
     ),
     # Ответ тимлида пишется всегда, одним из четырёх состояний, и снимок стандартов переснимается:
     # между вопросами и ответом проходят дни, и каталог могли поправить.
@@ -164,6 +165,7 @@ STAGES: tuple[Stage, ...] = (
         inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, PROJECT),
         outputs=(frozenset({STEPS_JSON}),),
         gate_after=STEPS_MD,
+        thinking="disabled",
     ),
     # Поручение ложится на доску одной карточкой; publish.json стадия пишет сама, как publish.
     Stage(
