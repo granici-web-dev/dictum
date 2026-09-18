@@ -314,6 +314,13 @@ REPLY_LOST = (
     "у меня нет. Нажмите «Разложить на шаги» ещё раз."
 )
 
+# Текст ответом на сообщение бота, которое вопросами не оказалось. Новой записью он не бывает, и
+# разбирать его значило бы оплатить разбор и снова потерять ответ тимлида.
+REPLY_NOT_QUESTIONS = (
+    "Это ответ на моё сообщение, но не на вопросы для тимлида. Новую запись пришлите обычным "
+    "сообщением, без ответа (reply). Ответ тимлида пришлите ответом на сообщение с вопросами."
+)
+
 QUESTIONS_WITHOUT, QUESTIONS_STOP = "without", "stop"
 
 QUESTIONS_BUTTONS = (
@@ -663,6 +670,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         stopped = await asyncio.to_thread(waiting_for, message.chat_id)
         if stopped is None:
+            if replied is not None and sent_by_bot(replied):
+                await refuse(message, "reply_to_bot", REPLY_NOT_QUESTIONS)
+                return
             run = started_run(new_run_id(), message.chat_id, source="text", text=message.text)
             start, redo = FIRST_STAGE, None
             await asyncio.to_thread(
@@ -702,6 +712,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             start = stopped.stage
         note = await message.reply_text(progress_text(run, done_before(start), start))
         await follow(note, run, message.date, start, redo)
+
+
+def sent_by_bot(replied: Message) -> bool:
+    """Сообщение, на которое ответили, написал бот, а не человек.
+
+    Reply на сообщение бота новой записью не бывает, и если вопросы этот текст не нашёл, ответ
+    тимлида уйдёт мимо прогона: страховка от той же потери, что нашла живая проверка части D.
+    """
+    return replied.from_user is not None and replied.from_user.is_bot
 
 
 async def answer_teamlead(message: Message, parked: Parked) -> None:

@@ -56,6 +56,7 @@ from app.bot import (
     CARD_FINISHED,
     PARENT_GONE,
     QUESTIONS_PARKED,
+    REPLY_NOT_QUESTIONS,
     STALE_REPLY,
     TASK_BUTTON,
     TASK_ROUTE_END,
@@ -3715,9 +3716,12 @@ def asked_questions(number: int = 1, snapshot: str = NO_STANDARDS) -> list[str]:
     return [questions_copy_text(clarify), questions_note(clarify, number, read_project(snapshot))]
 
 
-def a_reply(text: str, message_id: int) -> TextChat:
+def a_reply(text: str, message_id: int, by_bot: bool = True) -> TextChat:
+    """Текст ответом (reply). По умолчанию на сообщение бота: вопросы тимлиду пишет он."""
     chat = TextChat(text)
-    chat.reply_to_message = SimpleNamespace(message_id=message_id)
+    chat.reply_to_message = SimpleNamespace(
+        message_id=message_id, from_user=SimpleNamespace(is_bot=by_bot)
+    )
     return chat
 
 
@@ -3988,6 +3992,45 @@ async def test_a_reply_to_the_first_copy_after_a_resend_continues_the_same_run(
     assert answers_of(tmp_path).status == "answered"
     assert store.started == [(PARENT, 12, "voice"), ("ребёнок", 12, "voice")]
     assert "answer=teamlead run=ребёнок chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_a_bot_message_that_is_not_the_questions_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Страховка от той же потери: ответ тимлида мимо вопросов не должен уходить разбором."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    started = list(store.started)
+    chat = a_reply(ANSWER_DE, 1)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [REPLY_NOT_QUESTIONS]
+    assert store.started == started
+    assert store.status["ребёнок"] == QUESTIONS_SENT
+    assert "refusal=reply_to_bot chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_a_person_is_a_new_review_like_any_other_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Пересланное или процитированное человеком задание — обычная новая запись."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE))
+    naming_runs(monkeypatch, "прогон")
+    chat = a_reply("Kurze Aufgabe für dich: …", 7, by_bot=False)
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert store.started == [("прогон", 12, "text")]
+    assert store.status["прогон"] == REVIEWED
 
 
 @pytest.mark.asyncio
