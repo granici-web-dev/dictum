@@ -70,7 +70,9 @@ class AskedQuestion(BaseModel):
     number: int = Field(ge=1)
     text: str
     translation: str | None = None
-    origin: Literal["clarify"]
+    # Откуда вопрос: спросила стадия вопросов или открыл ресёрч. Нумерация общая и сквозная —
+    # владелец отбирает их одним списком, и второго счёта у него в голове быть не должно.
+    origin: Literal["clarify", "research"]
     answered: bool
 
 
@@ -176,7 +178,7 @@ def marked_numbers(text: str) -> list[int]:
 
 
 def mark_problems(steps: Steps, questions: int) -> list[str]:
-    """Претензии к номеру в пометке: он должен быть вопросом тимлида, и вопросом без ответа.
+    """Претензии к номеру в пометке: он должен быть вопросом списка, и вопросом без ответа.
 
     Иначе владелец читает на карточке ссылку в пустоту, а шаг молча решает за того, кто поручил.
     """
@@ -187,12 +189,12 @@ def mark_problems(steps: Steps, questions: int) -> list[str]:
             for number in marked_numbers(text):
                 if not questions:
                     problems.append(
-                        f"{place}.{side}: пометка называет вопрос {number}, а тимлиду вопросов "
+                        f"{place}.{side}: пометка называет вопрос {number}, а вопросов "
                         "не задавали"
                     )
                 elif not 1 <= number <= questions:
                     problems.append(
-                        f"{place}.{side}: пометка называет вопрос {number}, а вопросы тимлиду "
+                        f"{place}.{side}: пометка называет вопрос {number}, а вопросы "
                         f"пронумерованы от 1 до {questions}"
                     )
                 elif number not in unanswered:
@@ -206,16 +208,16 @@ def mark_problems(steps: Steps, questions: int) -> list[str]:
 def check_steps(steps_json: str, assignment: Assignment, questions: int) -> list[str]:
     """Претензии к ответу стадии. Перевод проверяется, только если язык встречи известен.
 
-    `questions` это сколько вопросов было задано тимлиду: номера в `unanswered` берутся из них.
+    `questions` это длина общего списка вопросов, тимлиду и от ресёрча: номера берутся из него.
     """
     problems = schema_problems(steps_json)
     if problems:
         return problems
     steps = Steps.model_validate_json(steps_json)
     problems = [
-        f"unanswered: вопроса {number} нет, вопросы тимлиду пронумерованы от 1 до {questions}"
+        f"unanswered: вопроса {number} нет, вопросы пронумерованы от 1 до {questions}"
         if questions
-        else f"unanswered: вопроса {number} нет, тимлиду вопросов не задавали"
+        else f"unanswered: вопроса {number} нет, вопросов не задавали"
         for number in steps.unanswered
         if not 1 <= number <= questions
     ]
@@ -235,28 +237,36 @@ def stamp_steps(
     steps_json: str,
     assignment: Assignment,
     title: Pair,
-    questions: list[Pair],
+    asked: list[Pair],
+    found: list[Pair],
     answered: bool,
 ) -> str:
     """Готовые шаги: номер прогона, языки, название, вопросы и сказанное на встрече вписаны кодом.
 
     Всё, что модель прислала в этих полях, затирается: дословное переносит только код. Название
-    одно на вопросы и чек-лист, его написала стадия вопросов. Если ответа не было, без ответа
-    остались все вопросы, что бы ни решила модель; если был, какие он закрыл, решает она.
+    одно на вопросы и чек-лист, его написала стадия вопросов. Нумерация общая: сначала вопросы
+    тимлиду (`asked`), затем открытые ресёрчем (`found`).
+
+    Если ответа тимлида не было, без ответа остались все его вопросы, что бы ни решила модель;
+    если был, какие он закрыл, решает она. Вопросы ресёрча открыты всегда: ресёрч идёт после
+    ответа, тимлид их не видел, и закрытый такой вопрос на карточке был бы неправдой.
     """
     steps = Steps.model_validate_json(steps_json)
     steps.title = title
-    numbers = range(1, len(questions) + 1)
-    steps.unanswered = list(numbers) if not answered else sorted(set(steps.unanswered))
+    numbers = range(1, len(asked) + len(found) + 1)
+    by_teamlead = set(range(1, len(asked) + 1))
+    by_research = set(numbers) - by_teamlead
+    still_open = set(steps.unanswered) if answered else by_teamlead
+    steps.unanswered = sorted(still_open | by_research)
     steps.questions = [
         AskedQuestion(
             number=number,
             text=question.text,
             translation=question.translation,
-            origin="clarify",
+            origin="clarify" if number in by_teamlead else "research",
             answered=number not in steps.unanswered,
         )
-        for number, question in zip(numbers, questions, strict=True)
+        for number, question in zip(numbers, [*asked, *found], strict=True)
     ]
     task = assignment.task
     steps.run_id = assignment.run_id

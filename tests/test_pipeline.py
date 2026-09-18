@@ -71,15 +71,34 @@ def test_an_assignment_asks_the_teamlead_before_the_steps() -> None:
     """Ожидание ответа тимлида длится днями и начинается сразу после нажатия."""
     route = [stage.name for stage in stages_between(*route_of("assignment"))]
 
-    assert route == ["assignment", "clarify", "answers", "steps", "card"]
+    assert route == ["assignment", "clarify", "answers", "approach", "steps", "card"]
     assert stage_named("clarify").runs == "llm"
     assert stage_named("answers").runs == "code"
     assert set(stage_named("steps").inputs) == {
         "inputs/assignment.json",
         "outputs/clarify.json",
         "inputs/answers.md",
+        "outputs/approach.json",
         "inputs/project.md",
     }
+
+
+def test_a_stage_that_searches_reads_the_standards_snapshot() -> None:
+    """Предел поисков код берёт по флагу `stack` снимка: без снимка выбирать его нечем (SPEC §7)."""
+    searching = [stage for stage in STAGES if stage.web_search is not None]
+
+    assert [stage.name for stage in searching] == ["approach"]
+    for stage in searching:
+        assert "inputs/project.md" in stage.inputs
+
+
+def test_only_a_stage_with_one_output_can_be_skipped() -> None:
+    """Пропуск кладёт один файл вместо вызова модели, и путь у него объявлен в самой записи."""
+    for stage in STAGES:
+        if stage.skipped_output is None:
+            continue
+        path, _ = stage.skipped_output
+        assert stage.outputs == (frozenset({path}),)
 
 
 def test_the_stages_that_write_to_the_board_end_their_routes() -> None:

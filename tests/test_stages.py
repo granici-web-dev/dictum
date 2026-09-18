@@ -496,10 +496,12 @@ CLARIFY_INPUTS = {
     "inputs/assignment.json": (FIXTURES / "assignment_de.json").read_text(encoding="utf-8"),
     "inputs/project.md": UNSET_PROJECT,
 }
+APPROACH_EXISTING_DE = (FIXTURES / "approach_existing_de.json").read_text(encoding="utf-8")
 ASSIGNMENT_INPUTS = {
     "inputs/assignment.json": CLARIFY_INPUTS["inputs/assignment.json"],
     "outputs/clarify.json": CLARIFY_DE,
     "inputs/answers.md": PARTIAL_ANSWERS,
+    "outputs/approach.json": APPROACH_EXISTING_DE,
     "inputs/project.md": UNSET_PROJECT,
 }
 

@@ -40,6 +40,7 @@ from telegram.ext import (
 )
 
 from app.answers import Answers
+from app.approach import Approach
 from app.candidates import Candidates, Idea, parse_candidates
 from app.clarify import Clarify, has_questions
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
@@ -48,6 +49,8 @@ from app.ingest import Source, new_run_id
 from app.models import IssuesFile
 from app.pipeline import (
     ANSWERS,
+    APPROACH_JSON,
+    APPROACH_MD,
     BRIEF,
     BRIEF_QUESTION,
     CLARIFY_JSON,
@@ -72,6 +75,7 @@ from app.render import (
     brief_digest,
     questions_copy_text,
     questions_note,
+    research_line,
     review_lead,
     review_messages,
     standards_line,
@@ -127,7 +131,8 @@ logger = logging.getLogger("app.bot")
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 TASK_ROUTE_START, TASK_ROUTE_END = "assignment", "card"
-CLARIFY_STAGE, ANSWERS_STAGE, STEPS_STAGE = "clarify", "answers", "steps"
+CLARIFY_STAGE, ANSWERS_STAGE = "clarify", "answers"
+APPROACH_STAGE, STEPS_STAGE = "approach", "steps"
 IDEA_ROUTE_START = "handoff"
 # Журнал публикации лежит рядом с файлом, который путь кладёт на доску: у каждого пути свой.
 BOARD_CONTRACT = {TASK_ROUTE_START: STEPS_JSON, IDEA_ROUTE_START: ISSUES_JSON}
@@ -158,6 +163,7 @@ LABEL = {
     "assignment": "поручение из разбора",
     "clarify": "вопросы для тимлида",
     "answers": "ответы тимлида",
+    "approach": "ресёрч решений",
     "steps": "разложил на шаги",
     "card": "карточка в Trello",
 }
@@ -296,6 +302,12 @@ STOP_ALIVE = (
 )
 
 TASK_BUTTON = "Разложить на шаги"
+
+# Вторая кнопка под тем же поручением: решение о ресёрче принимается по задаче и на глазах у неё,
+# а не режимом чата, который забылся бы включённым.
+BARE = "bare"
+
+TASK_BARE_BUTTON = "Шаги без ресёрча"
 
 # Вопросы для тимлида (P3-11). Прогон не занимает места остановки: пока тимлид молчит, чат
 # принимает новые записи и другие поручения, поэтому сообщение о ходе прогона говорит об этом
@@ -507,12 +519,14 @@ def child_run(
     number: int | None,
     auto_approve: bool,
     answers: Answers | None = None,
+    research: bool | None = None,
 ) -> Run:
     """Прогон по выбору из разбора: поручение `number` или, при None, вся запись как идея.
 
     Язык и источник записи — факты родителя (§4.1). Вопросы брифа и вопросы для тимлида идут там
     же, где ворота: кто готов подтверждать, готов и отвечать, и готов отбирать вопросы (§3.2).
-    `answers` несёт продолженный прогон: ответ тимлида или отказ его ждать.
+    `answers` несёт продолженный прогон: ответ тимлида или отказ его ждать, `research` — выбор
+    кнопки: прогон паркуется на дни, и продолжить его обязано тем же режимом (§4.1).
     """
     return Run(
         root=RUNS / run_id,
@@ -526,6 +540,7 @@ def child_run(
         assignment=number,
         asks_teamlead=not auto_approve,
         answers=answers,
+        skip=frozenset() if research is not False else frozenset({APPROACH_STAGE}),
     )
 
 
@@ -536,11 +551,16 @@ def resumed_start(root: Path, first: str) -> str:
     доске, и собирать их заново значило бы оплатить стадии второй раз и дособирать карточки
     другим набором. Лежащий `answers.md` значит, что тимлида уже спросили и ответ получен:
     начать с `assignment` значило бы спросить его заново и выбросить ответ, которого ждали днями.
-    Без того и другого до доски дело не дошло, и маршрут идёт с первой стадии.
+    Лежащий `approach.json` значит, что ресёрч уже оплачен, и повторять поиск незачем.
+    Без всего этого до доски дело не дошло, и маршрут идёт с первой стадии.
     """
     if journal_of(root / BOARD_CONTRACT[first]).exists():
         return route_end(first)
-    if first == TASK_ROUTE_START and (root / ANSWERS).exists():
+    if first != TASK_ROUTE_START:
+        return first
+    if (root / APPROACH_JSON).exists():
+        return STEPS_STAGE
+    if (root / ANSWERS).exists():
         return after(ANSWERS_STAGE).name
     return first
 
@@ -775,7 +795,9 @@ async def resume_parked(message: Message, parked: Parked, answers: Answers) -> N
             parent="gone",
         )
         return
-    run = child_run(parked.run_id, parent, parked.assignment, child.auto_approve, answers)
+    run = child_run(
+        parked.run_id, parent, parked.assignment, child.auto_approve, answers, child.research
+    )
     await asyncio.to_thread(reopen_run, run.run_id, ANSWERS_STAGE)
     note = await message.reply_text(
         progress_text(run, done_before(ANSWERS_STAGE), ANSWERS_STAGE)
@@ -1081,7 +1103,7 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if pressed is None:
         await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
         return
-    parent_id, number = pressed
+    parent_id, number, research = pressed
     task = NO_RUN if number is None else number
     if number is None and not settings.trello_idea_board_id:
         await refuse(message, "idea_board_missing", IDEA_BOARD_MISSING, run=parent_id)
@@ -1122,7 +1144,9 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         first = IDEA_ROUTE_START if number is None else TASK_ROUTE_START
         if child is None:
-            run = child_run(new_run_id(), parent, number, auto_approve_for(message.chat_id))
+            run = child_run(
+                new_run_id(), parent, number, auto_approve_for(message.chat_id), research=research
+            )
             start, resume = first, NO_RUN
             await asyncio.to_thread(
                 start_run,
@@ -1135,22 +1159,24 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 start,
                 parent_id,
                 number,
-                # Ресёрч поручения выбирается кнопкой. Пока кнопки «Шаги без ресёрча» нет,
-                # нажимают только обычную, а она значит «с ресёрчем».
-                True if number is not None else None,
+                research,
             )
         else:
             # Тот же run_id, а не новый: карточка сорванной публикации несёт его в маркере, и
-            # только с ним повтор найдёт её на доске, а не поставит вторую рядом (§6).
-            run = child_run(child.run_id, parent, number, child.auto_approve)
+            # только с ним повтор найдёт её на доске, а не поставит вторую рядом (§6). Режим
+            # ресёрча тоже берётся из строки: нажатая сейчас другая кнопка его не меняет.
+            run = child_run(
+                child.run_id, parent, number, child.auto_approve, research=child.research
+            )
             start = resume = await asyncio.to_thread(resumed_start, run.root, first)
             await asyncio.to_thread(reopen_run, run.run_id, start)
         logger.info(
-            "start=%s run=%s parent=%s task=%s chat=%s resume=%s",
+            "start=%s run=%s parent=%s task=%s research=%s chat=%s resume=%s",
             "task" if number is not None else IDEA,
             run.run_id,
             parent_id,
             task,
+            NO_RUN if research is None else ("on" if research else "off"),
             message.chat_id,
             resume,
         )
@@ -1433,6 +1459,11 @@ async def follow(
                 )
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
+        # Ресёрч уходит тем же ходом: несогласие с рекомендацией это правка на этих же воротах,
+        # и читать её человек должен, ещё не нажав «Дальше». Пропущенный файла не оставляет.
+        if ending.stop.stage == STEPS_STAGE and (run.root / APPROACH_MD).exists():
+            with suppress(TelegramError):
+                await note.reply_document(run.root / APPROACH_MD)
     if ending.parked and run.assignment is not None:
         await send_questions(answering or note, run.run_id, run.root, run.assignment)
     if ending.review is not None:
@@ -1641,7 +1672,14 @@ def questions_keyboard(run_id: str) -> InlineKeyboardMarkup:
 
 def task_keyboard(run_id: str, number: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}")]]
+        [
+            [
+                InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}"),
+                InlineKeyboardButton(
+                    TASK_BARE_BUTTON, callback_data=f"task:{run_id}:{number}:{BARE}"
+                ),
+            ]
+        ]
     )
 
 
@@ -1664,9 +1702,14 @@ def backlog_of(run: Run) -> str:
 
 
 def steps_of(run: Run) -> str:
-    """Шаги на воротах: числа из steps.json и стандарты, если снимок прогона уже не свежий."""
+    """Шаги на воротах: числа из steps.json, ресёрч и стандарты, если снимок уже не свежий."""
     steps = Steps.model_validate_json(read_artifact(run.root, STEPS_JSON))
-    lines = [steps_digest(steps), f"Вопросов без ответа: {len(steps.unanswered)}."]
+    approach = Approach.model_validate_json(read_artifact(run.root, APPROACH_JSON))
+    lines = [
+        steps_digest(steps),
+        f"Вопросов без ответа: {len(steps.unanswered)}.",
+        research_line(approach),
+    ]
     try:
         current_standards()
     except ProjectContextError:
@@ -1736,19 +1779,24 @@ def choice_of(query: CallbackQuery) -> tuple[str, str] | None:
     return (parts[1], parts[2]) if parts and parts[2].isdecimal() else None
 
 
-def task_of(query: CallbackQuery) -> tuple[str, int] | None:
-    """Разбор и номер поручения из данных кнопки. Поручения нумеруются с единицы, как в разборе."""
-    parts = button_of(query, 3)
-    if not parts or not parts[2].isdecimal() or int(parts[2]) < 1:
+def task_of(query: CallbackQuery) -> tuple[str, int, bool] | None:
+    """Разбор, номер поручения и нужен ли ресёрч. Поручения нумеруются с единицы, как в разборе."""
+    parts = (query.data or "").split(":")
+    if len(parts) not in (3, 4) or not parts[2].isdecimal() or int(parts[2]) < 1:
         return None
-    return parts[1], int(parts[2])
+    if len(parts) == 4 and parts[3] != BARE:
+        return None
+    return parts[1], int(parts[2]), len(parts) == 3
 
 
-def chosen_of(query: CallbackQuery) -> tuple[str, int | None] | None:
-    """Разбор и выбор из него: номер поручения у `task:`, None у `idea:`, то есть вся запись."""
+def chosen_of(query: CallbackQuery) -> tuple[str, int | None, bool | None] | None:
+    """Разбор и выбор из него: номер поручения у `task:`, None у `idea:`, то есть вся запись.
+
+    Ресёрч есть только у поручения: у пути идеи своя стадия ресёрча и своя кнопка.
+    """
     if (query.data or "").startswith(f"{IDEA}:"):
         parts = button_of(query, 2)
-        return (parts[1], None) if parts else None
+        return (parts[1], None, None) if parts else None
     return task_of(query)
 
 

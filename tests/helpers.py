@@ -335,6 +335,30 @@ def paused_search(requests: int = 1) -> httpx2.Response:
     return httpx2.Response(200, json=body)
 
 
+APPROACH_NEW_DE = (FIXTURES / "approach_new_de.json").read_text(encoding="utf-8")
+APPROACH_EXISTING_DE = (FIXTURES / "approach_existing_de.json").read_text(encoding="utf-8")
+
+
+def approach_answer(
+    source: str = APPROACH_NEW_DE, change: Callable[[dict[str, Any]], None] = lambda data: None
+) -> str:
+    """Ответ стадии approach по фикстуре: без полей, которые вписывает код.
+
+    По умолчанию берётся вывод для нового проекта: снимок стандартов у большинства прогонов в
+    тестах пуст, и вывод со ссылками на стандарты там не прошёл бы собственную проверку.
+    """
+    data: dict[str, Any] = json.loads(source)
+    for stamped in ("mode", "stack_named", "searches"):
+        del data[stamped]
+    del data["recommendation"]["provisional"]
+    for reference in data["recommendation"]["standards_refs"]:
+        del reference["in_snapshot"]
+    for found in data["sources"]:
+        del found["found_by_search"]
+    change(data)
+    return f'<file path="outputs/approach.json">\n{json.dumps(data, ensure_ascii=False)}\n</file>'
+
+
 MARK = re.compile(r"\[уточнить:[^\]]*\]\s*")
 
 

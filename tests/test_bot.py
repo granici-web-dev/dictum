@@ -21,6 +21,8 @@ from app import bot
 from app.answers import Answers, answers_file, read_answers
 from app.bot import (
     ANSWERS_STAGE,
+    APPROACH_STAGE,
+    STEPS_STAGE,
     APPROVAL_TEXT,
     ASSEMBLE,
     ASSEMBLE_ASKED,
@@ -44,7 +46,6 @@ from app.bot import (
     LOST,
     GREETING,
     HEARD,
-    LABEL,
     MAX_VOICE_SECONDS,
     ASK_AGAIN,
     NOTHING_HEARD,
@@ -58,6 +59,7 @@ from app.bot import (
     QUESTIONS_PARKED,
     REPLY_NOT_QUESTIONS,
     STALE_REPLY,
+    TASK_BARE_BUTTON,
     TASK_BUTTON,
     TASK_ROUTE_END,
     TASK_ROUTE_START,
@@ -65,6 +67,7 @@ from app.bot import (
     IDEA_ALREADY_PUBLISHED,
     IDEA_BOARD_MISSING,
     IDEA_BUTTON,
+    LABEL,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
     allowed_chats,
@@ -100,6 +103,9 @@ from app.config import ConfigError, MissingApiKey, settings
 from app.ingest import Source
 from app.pipeline import (
     ANSWERS,
+    APPROACH_JSON,
+    APPROACH_MD,
+    APPROACH_SKIPPED,
     BRIEF,
     BRIEF_QUESTION,
     CANDIDATES,
@@ -118,6 +124,7 @@ from app.pipeline import (
     stage_named,
     stages_between,
 )
+from app.approach import Approach
 from app.project import project_snapshot, read_project, read_standards
 from app.run import Pause, Redo, Run, walk
 from app.dialog import Turn
@@ -139,6 +146,7 @@ from app.store import (
     Stopped,
 )
 from app.render import (
+    research_line,
     questions_copy_text,
     questions_note,
     review_lead,
@@ -150,7 +158,14 @@ from app.render import (
 )
 from app.steps import Steps
 from app.review import Review
-from tests.helpers import CLARIFY_DE, FIXTURES, REAL_BRIEF, REAL_ISSUES, STEPS_DE
+from tests.helpers import (
+    APPROACH_NEW_DE,
+    CLARIFY_DE,
+    FIXTURES,
+    REAL_BRIEF,
+    REAL_ISSUES,
+    STEPS_DE,
+)
 from tests.test_review import REVIEW_DE, REVIEW_NONE
 from tests.test_candidates import MULTIPLE, NONE, NONE_EMPTY
 
@@ -2886,7 +2901,13 @@ def walk_task(seen: list[tuple[str, str, str]]) -> Walking:
     ) -> Pause | None:
         seen.append((run.run_id, start, stop))
         (run.root / "outputs").mkdir(parents=True, exist_ok=True)
-        if start == "assignment":
+        if start in ("assignment", ANSWERS_STAGE, APPROACH_STAGE, STEPS_STAGE):
+            (run.root / APPROACH_JSON).write_text(
+                APPROACH_SKIPPED if APPROACH_STAGE in run.skip else APPROACH_NEW_DE,
+                encoding="utf-8",
+            )
+            if APPROACH_STAGE not in run.skip:
+                (run.root / APPROACH_MD).write_text("# Approach\n", encoding="utf-8")
             (run.root / STEPS_JSON).write_text(STEPS_DE, encoding="utf-8")
             (run.root / STEPS_MD).write_text("# Schritte\n", encoding="utf-8")
             if not run.auto_approve:
@@ -2931,9 +2952,9 @@ async def test_every_task_message_carries_its_button_under_its_last_part_only(
     ]
     assert buttons == [
         *[None] * (len(first) - 1),
-        [(TASK_BUTTON, f"task:{root.name}:1")],
+        [(TASK_BUTTON, f"task:{root.name}:1"), (TASK_BARE_BUTTON, f"task:{root.name}:1:bare")],
         *[None] * (len(second) - 1),
-        [(TASK_BUTTON, f"task:{root.name}:2")],
+        [(TASK_BUTTON, f"task:{root.name}:2"), (TASK_BARE_BUTTON, f"task:{root.name}:2:bare")],
     ]
     assert chat.sent[len(first) + len(second) :] == [root / REVIEW_MD, root / TRANSCRIPT]
 
@@ -2964,14 +2985,15 @@ async def test_task_button_starts_a_child_run_that_stops_at_the_steps_gate(
     root = tmp_path / "runs" / "ребёнок"
     steps = Steps.model_validate_json(STEPS_DE)
     assert chat.edits[-1] == (
-        f"{steps_digest(steps)}\nВопросов без ответа: {len(steps.unanswered)}.\n\n{GATE_TAIL}"
+        f"{steps_digest(steps)}\nВопросов без ответа: {len(steps.unanswered)}.\n"
+        f"{research_line(Approach.model_validate_json(APPROACH_NEW_DE))}\n\n{GATE_TAIL}"
     )
     assert chat.replies[1:] == [steps_copy_text(steps)]
-    assert chat.documents == [root / STEPS_MD]
+    assert chat.documents == [root / STEPS_MD, root / APPROACH_MD]
     assert store.stops[12].stage == "steps"
     assert store.status["ребёнок"] == AWAITING_GATE
     assert (
-        "start=task run=ребёнок parent=разбор task=1 chat=12 resume=-" in caplog.text
+        "start=task run=ребёнок parent=разбор task=1 research=on chat=12 resume=-" in caplog.text
     )
 
 
@@ -2999,6 +3021,55 @@ async def test_the_child_run_takes_its_parent_folder_and_the_pressed_task(
     # Ворота в этом чате включены умолчанием настроек, значит вопросы есть кому отбирать.
     assert run.asks_teamlead is True
     assert store.research[run.run_id] is True
+
+
+@pytest.mark.asyncio
+async def test_the_bare_button_writes_the_choice_into_the_row_and_skips_the_research(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Решение о ресёрче принимается по задаче и живёт в строке: прогон паркуется на дни."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    seen: list[Run] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append(run.model_copy())
+        return walk_task([])(run, start, stop, on_done, redo)
+
+    monkeypatch.setattr(bot, "walk", walking)
+    monkeypatch.setattr(bot, "new_run_id", lambda: "ребёнок")
+
+    await on_child_button(a_press(ButtonChat(f"task:{PARENT}:1:bare")), NO_CONTEXT)
+
+    (run,) = seen
+    assert run.skip == frozenset({APPROACH_STAGE})
+    assert store.research["ребёнок"] is False
+    approach = (tmp_path / "runs" / "ребёнок" / APPROACH_JSON).read_text(encoding="utf-8")
+    assert Approach.model_validate_json(approach).status == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_the_other_button_on_a_live_child_does_not_change_its_research_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Режим ресёрча живёт в строке, как режим ворот: нажатие на сорванном его не переигрывает."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    a_child_in(tmp_path, store, FAILED, journal=False, research=False)
+    seen: list[Run] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append(run.model_copy())
+        return None
+
+    monkeypatch.setattr(bot, "walk", walking)
+
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+
+    (run,) = seen
+    assert run.skip == frozenset({APPROACH_STAGE})
 
 
 @pytest.mark.asyncio
@@ -3142,10 +3213,17 @@ async def test_task_button_without_a_message_still_leaves_a_line(
 
 
 def a_child_in(
-    tmp_path: Path, store: FakeStore, status: str, journal: bool, number: int = 1
+    tmp_path: Path,
+    store: FakeStore,
+    status: str,
+    journal: bool,
+    number: int = 1,
+    research: bool = True,
 ) -> Path:
     """Дочерний прогон поручения, уже бывший: строка и, если просят, журнал публикации."""
-    store.start_run("ребёнок", 12, "voice", "de", True, None, "assignment", PARENT, number, True)
+    store.start_run(
+        "ребёнок", 12, "voice", "de", True, None, "assignment", PARENT, number, research
+    )
     store.status["ребёнок"] = status
     root = tmp_path / "runs" / "ребёнок"
     (root / "outputs").mkdir(parents=True)
@@ -3198,7 +3276,10 @@ async def test_a_task_broken_during_publishing_resumes_from_the_card_under_the_s
     assert list(store.children) == ["ребёнок"]
     assert store.status["ребёнок"] == PUBLISHED
     assert 12 not in store.stops
-    assert "start=task run=ребёнок parent=разбор task=1 chat=12 resume=card" in caplog.text
+    assert (
+        "start=task run=ребёнок parent=разбор task=1 research=on chat=12 resume=card"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -3442,7 +3523,7 @@ async def test_idea_button_starts_a_child_run_that_asks_brief_questions(
     assert chat.replies[0].splitlines()[2] == f"▸ {LABEL['handoff']}"
     assert chat.edits[-1] == f"{QUESTION_ASKED.strip()}\n\n{QUESTION_TAIL}"
     assert store.status["идея"] == AWAITING_ANSWER
-    assert "start=idea run=идея parent=разбор task=- chat=12 resume=-" in caplog.text
+    assert "start=idea run=идея parent=разбор task=- research=- chat=12 resume=-" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3548,7 +3629,10 @@ async def test_a_broken_idea_resumes_under_the_same_run_from_where_the_board_was
     ((run, started, _, _),) = seen
     assert (run.run_id, started) == ("идея", start)
     assert list(store.children) == ["идея"]
-    assert f"start=idea run=идея parent=разбор task=- chat=12 resume={start}" in caplog.text
+    assert (
+        f"start=idea run=идея parent=разбор task=- research=- chat=12 resume={start}"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
@@ -3675,9 +3759,16 @@ def walk_teamlead(
             (run.root / ANSWERS).write_text(
                 answers_file(run.answers or Answers(status="not_sent")), encoding="utf-8"
             )
+            skipped = APPROACH_STAGE in run.skip
+            (run.root / APPROACH_JSON).write_text(
+                APPROACH_SKIPPED if skipped else APPROACH_NEW_DE, encoding="utf-8"
+            )
+            if not skipped:
+                (run.root / APPROACH_MD).write_text("# Approach\n", encoding="utf-8")
             (run.root / STEPS_JSON).write_text(STEPS_DE, encoding="utf-8")
             (run.root / STEPS_MD).write_text("# Schritte\n", encoding="utf-8")
             on_done(stage_named(ANSWERS_STAGE))
+            on_done(stage_named(APPROACH_STAGE))
             on_done(stage_named("steps"))
             if not run.auto_approve:
                 return Pause(stage="steps", artifact=STEPS_MD, kind="gate")
@@ -4052,21 +4143,29 @@ async def test_with_gates_off_a_task_does_not_park_and_its_questions_go_to_the_c
     assert 12 not in store.stops
 
 
-def test_a_child_broken_after_the_teamlead_answered_resumes_from_the_steps(
+def test_a_child_broken_after_the_teamlead_answered_resumes_past_the_questions(
     tmp_path: Path,
 ) -> None:
-    """Иначе прогон спросил бы тимлида заново и выбросил ответ, которого ждали днями."""
+    """Иначе прогон спросил бы тимлида заново и выбросил ответ, которого ждали днями.
+
+    Оплаченный ресёрч так же не повторяется: с лежащим `approach.json` обход идёт сразу к шагам.
+    """
     root = tmp_path / "runs" / "ребёнок"
     (root / "inputs").mkdir(parents=True)
+    (root / "outputs").mkdir(parents=True)
     assert bot.resumed_start(root, TASK_ROUTE_START) == TASK_ROUTE_START
 
     (root / ANSWERS).write_text(answers_file(Answers(status="without_answers")), encoding="utf-8")
 
-    assert bot.resumed_start(root, TASK_ROUTE_START) == "steps"
+    assert bot.resumed_start(root, TASK_ROUTE_START) == APPROACH_STAGE
+
+    (root / APPROACH_JSON).write_text(APPROACH_SKIPPED, encoding="utf-8")
+
+    assert bot.resumed_start(root, TASK_ROUTE_START) == STEPS_STAGE
 
 
 @pytest.mark.asyncio
-async def test_a_broken_child_with_an_answer_walks_from_the_steps_and_not_from_the_assignment(
+async def test_a_broken_child_with_an_answer_walks_past_the_questions_not_from_the_assignment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
     a_review_in_chat(tmp_path, monkeypatch, store)
@@ -4078,7 +4177,7 @@ async def test_a_broken_child_with_an_answer_walks_from_the_steps_and_not_from_t
 
     await on_child_button(a_press(a_task_button()), NO_CONTEXT)
 
-    assert seen == [("ребёнок", "steps", TASK_ROUTE_END)]
+    assert seen == [("ребёнок", APPROACH_STAGE, TASK_ROUTE_END)]
 
 
 def test_the_bot_writes_to_no_chat_of_its_own_choosing() -> None:
@@ -4107,7 +4206,7 @@ async def test_unset_standards_are_named_before_research_is_paid(
 async def test_without_questions_the_standards_line_stands_in_the_progress_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
-    """Сообщения с вопросами нет, а строку владелец обязан увидеть до следующей стадии."""
+    """Сообщения с вопросами нет, а строку владелец обязан увидеть до оплаты ресёрча."""
     a_task_asking_the_teamlead(tmp_path, monkeypatch, store, clarify=NO_QUESTIONS)
     chat = a_task_button()
 
@@ -4115,7 +4214,12 @@ async def test_without_questions_the_standards_line_stands_in_the_progress_messa
 
     after_clarify = chat.edits[1]
     assert after_clarify.endswith(standards_line(read_project(NO_STANDARDS)))
-    assert "Стандарты проекта не заданы: шаги пишутся без стандартов проекта" in after_clarify
+    assert (
+        "Стандарты проекта не заданы: ресёрч будет подбирать стек как для нового проекта"
+        in after_clarify
+    )
+    # Ресёрч в этом сообщении ещё не начинался: последствие названо до того, как за него платят.
+    assert f"· {LABEL[APPROACH_STAGE]}" in after_clarify
     # Сообщения с вопросами нет вовсе: за ним сразу текст для копирования на воротах шагов.
     assert chat.replies[1:] == [steps_copy_text(Steps.model_validate_json(STEPS_DE))]
 
@@ -4161,7 +4265,7 @@ async def test_the_steps_gate_names_the_snapshot_when_the_standards_folder_is_go
     await on_child_button(a_press(chat), NO_CONTEXT)
 
     assert standards_snapshot_line(read_project(NO_STANDARDS)) in chat.edits[-1]
-    assert "Вопросов без ответа: 2." in chat.edits[-1]
+    assert "Вопросов без ответа: 3." in chat.edits[-1]
 
 
 @pytest.mark.asyncio

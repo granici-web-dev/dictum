@@ -90,6 +90,9 @@ class Run(BaseModel):
     asks_teamlead: bool = False
     # Ответ тимлида или отказ его ждать: приносит тот, кто продолжает припаркованный прогон.
     answers: Answers | None = None
+    # Стадии, пропущенные решением человека (P3-11: кнопка «Шаги без ресёрча»). Прогон паркуется
+    # на дни, и продолжить его обязано тем же выбором, поэтому приносит его строка, а не кнопка.
+    skip: frozenset[str] = frozenset()
 
 
 class Pause(BaseModel):
@@ -351,7 +354,10 @@ def walk(
     артефакт стартовой.
     """
     for stage in stages_between(start, stop):
-        if stage.runs == "code":
+        if stage.skipped_output is not None and stage.name in run.skip:
+            path, content = stage.skipped_output
+            files = {path: content}
+        elif stage.runs == "code":
             files = BODIES[stage.name](run)
         else:
             files = run_llm_stage(run, stage, redo if stage.name == start else None).files

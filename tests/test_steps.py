@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from app.answers import read_answers
+from app.approach import Approach
 from app.clarify import Clarify
 from app.review import Review
 from app.stages import COMMANDS_DIR
@@ -35,6 +36,10 @@ PARENT = "3f9c1a7e5b2d8c40"
 CHILD = "7b2e0d91c4a3f615"
 CLARIFY = Clarify.model_validate_json((FIXTURES / "clarify_de.json").read_text(encoding="utf-8"))
 ASKED = [Pair(text=asked.text, translation=asked.translation) for asked in CLARIFY.questions]
+APPROACH = Approach.model_validate_json(
+    (FIXTURES / "approach_existing_de.json").read_text(encoding="utf-8")
+)
+FOUND = [Pair(text=found.text, translation=found.translation) for found in APPROACH.new_questions]
 PARTIAL = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"))
 
 
@@ -53,7 +58,9 @@ def model_answer() -> dict[str, Any]:
 
 
 def problems_of(data: dict[str, Any], meeting_lang: str | None = "de") -> list[str]:
-    return check_steps(json.dumps(data, ensure_ascii=False), assignment(meeting_lang), len(ASKED))
+    return check_steps(
+        json.dumps(data, ensure_ascii=False), assignment(meeting_lang), len(ASKED) + len(FOUND)
+    )
 
 
 def stamped(
@@ -61,8 +68,11 @@ def stamped(
     given: Assignment | None = None,
     answered: bool = True,
     asked: list[Pair] = ASKED,
+    found: list[Pair] = FOUND,
 ) -> Steps:
-    stamp = stamp_steps(json.dumps(data), given or assignment(), CLARIFY.title, asked, answered)
+    stamp = stamp_steps(
+        json.dumps(data), given or assignment(), CLARIFY.title, asked, found, answered
+    )
     return Steps.model_validate_json(stamp)
 
 
@@ -99,7 +109,7 @@ def test_a_review_without_the_owner_language_is_refused() -> None:
 
 
 def test_the_german_steps_pass_the_check() -> None:
-    assert check_steps(STEPS_DE, assignment(), len(ASKED)) == []
+    assert check_steps(STEPS_DE, assignment(), len(ASKED) + len(FOUND)) == []
     assert problems_of(model_answer()) == []
 
 
@@ -140,8 +150,8 @@ def test_a_mark_naming_a_question_nobody_asked_is_named_by_its_place() -> None:
     data = marked(model_answer(), "[уточнить: Frage 9] Schema anbinden", "[уточнить: вопрос 9] Ц")
 
     assert problems_of(data) == [
-        "steps.1.text: пометка называет вопрос 9, а вопросы тимлиду пронумерованы от 1 до 3",
-        "steps.1.translation: пометка называет вопрос 9, а вопросы тимлиду пронумерованы от 1 до 3",
+        "steps.1.text: пометка называет вопрос 9, а вопросы пронумерованы от 1 до 4",
+        "steps.1.translation: пометка называет вопрос 9, а вопросы пронумерованы от 1 до 4",
     ]
 
 
@@ -173,8 +183,8 @@ def test_a_mark_is_pointless_when_the_teamlead_was_asked_nothing() -> None:
     data["unanswered"] = []
 
     assert check_steps(json.dumps(data, ensure_ascii=False), assignment(), 0) == [
-        "steps.1.text: пометка называет вопрос 1, а тимлиду вопросов не задавали",
-        "steps.1.translation: пометка называет вопрос 1, а тимлиду вопросов не задавали",
+        "steps.1.text: пометка называет вопрос 1, а вопросов не задавали",
+        "steps.1.translation: пометка называет вопрос 1, а вопросов не задавали",
     ]
 
 
@@ -242,7 +252,7 @@ def test_the_steps_fixture_is_the_stamped_model_answer() -> None:
     assert PARTIAL.status == "answered"
     answer = json.dumps(model_answer(), ensure_ascii=False)
 
-    assert stamp_steps(answer, assignment(), CLARIFY.title, ASKED, True) == STEPS_DE
+    assert stamp_steps(answer, assignment(), CLARIFY.title, ASKED, FOUND, True) == STEPS_DE
 
 
 def test_the_stamp_carries_the_ticket_and_its_acceptance_criteria_from_the_review() -> None:
@@ -268,7 +278,7 @@ def test_an_unanswered_number_outside_the_questions_is_a_problem() -> None:
     data["unanswered"] = [1, 9]
 
     assert problems_of(data) == [
-        "unanswered: вопроса 9 нет, вопросы тимлиду пронумерованы от 1 до 3"
+        "unanswered: вопроса 9 нет, вопросы пронумерованы от 1 до 4"
     ]
 
 
@@ -279,15 +289,17 @@ def test_any_unanswered_number_is_a_problem_when_nothing_was_asked() -> None:
 
     problems = check_steps(json.dumps(data), assignment(), 0)
 
-    assert problems == ["unanswered: вопроса 1 нет, тимлиду вопросов не задавали"]
+    assert problems == ["unanswered: вопроса 1 нет, вопросов не задавали"]
 
 
 @pytest.mark.parametrize("unanswered", [[2, 3], [1, 2, 3], []])
-def test_partial_answer_leaves_any_subset_unanswered(unanswered: list[int]) -> None:
+def test_partial_answer_leaves_any_subset_of_the_teamlead_questions_unanswered(
+    unanswered: list[int],
+) -> None:
     """Тимлид ответил «zu 1» на второй вопрос бота: какие вопросы закрыты, решает стадия по смыслу.
 
-    Код не сверяет ответ с номерами: любое подмножество валидно, и при пришедшем ответе штамп
-    оставляет его как есть.
+    Код не сверяет ответ с номерами: любое подмножество валидно. Вопрос ресёрча (4) остаётся
+    открытым при любом ответе: ресёрч шёл после ответа, и тимлид его не видел.
     """
     data = model_answer()
     without_marks(data)
@@ -295,9 +307,9 @@ def test_partial_answer_leaves_any_subset_unanswered(unanswered: list[int]) -> N
 
     assert problems_of(data) == []
     result = stamped(data)
-    assert result.unanswered == unanswered
+    assert result.unanswered == sorted({*unanswered, 4})
     assert [question.answered for question in result.questions] == [
-        number not in unanswered for number in (1, 2, 3)
+        number not in {*unanswered, 4} for number in (1, 2, 3, 4)
     ]
 
 
@@ -308,7 +320,7 @@ def test_without_an_answer_every_question_stays_unanswered_whatever_the_model_sa
 
     result = stamped(data, answered=False)
 
-    assert result.unanswered == [1, 2, 3]
+    assert result.unanswered == [1, 2, 3, 4]
     assert not any(question.answered for question in result.questions)
 
 
@@ -316,9 +328,23 @@ def test_nothing_asked_leaves_no_questions_and_nothing_unanswered() -> None:
     data = model_answer()
     data["unanswered"] = []
 
-    result = stamped(data, answered=False, asked=[])
+    result = stamped(data, answered=False, asked=[], found=[])
 
     assert (result.unanswered, result.questions) == ([], [])
+
+
+def test_a_question_the_research_found_goes_to_the_card_open() -> None:
+    """Ресёрч идёт после ответа тимлида: закрытым его вопрос на карточке был бы неправдой."""
+    data = model_answer()
+    data["unanswered"] = []
+
+    result = stamped(data)
+
+    assert [(question.number, question.origin) for question in result.questions][-1] == (
+        4,
+        "research",
+    )
+    assert result.unanswered == [4]
 
 
 def test_the_questions_are_numbered_and_copied_by_the_code_over_the_model() -> None:
@@ -330,7 +356,11 @@ def test_the_questions_are_numbered_and_copied_by_the_code_over_the_model() -> N
     result = stamped(data)
 
     assert [(asked.number, asked.text, asked.origin) for asked in result.questions] == [
-        (number, pair.text, "clarify") for number, pair in enumerate(ASKED, start=1)
+        *((number, pair.text, "clarify") for number, pair in enumerate(ASKED, start=1)),
+        *(
+            (number, pair.text, "research")
+            for number, pair in enumerate(FOUND, start=len(ASKED) + 1)
+        ),
     ]
 
 

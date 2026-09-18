@@ -257,7 +257,7 @@ def test_the_steps_file_marks_every_question_left_without_an_answer() -> None:
     rendered = steps_markdown(steps_de(), PARTIAL, UNSET)
 
     marked = [line for line in rendered.splitlines() if line.endswith("*(no answer)*")]
-    assert [line.split(".", 1)[0] for line in marked] == ["1", "3"]
+    assert [line.split(".", 1)[0] for line in marked] == ["1", "3", "4"]
 
 
 @pytest.mark.parametrize(
@@ -399,11 +399,11 @@ def test_unset_standards_are_named_with_their_consequence(tmp_path: Path) -> Non
     empty = read_project(project_snapshot(read_standards(tmp_path), TAKEN_AT))
 
     assert standards_line(UNSET) == (
-        "Стандарты проекта не заданы: шаги пишутся без стандартов проекта"
+        "Стандарты проекта не заданы: ресёрч будет подбирать стек как для нового проекта"
     )
     assert standards_line(empty) == (
         f"Стандарты проекта не заданы: в каталоге {tmp_path.name} нет STACK.md, PRINCIPLES.md, "
-        "TESTING.md, шаги пишутся без стандартов проекта"
+        "TESTING.md, ресёрч будет подбирать стек как для нового проекта"
     )
 
 

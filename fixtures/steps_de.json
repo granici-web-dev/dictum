@@ -66,9 +66,13 @@
   "open_questions": [],
   "unanswered": [
     1,
-    3
+    3,
+    4
   ],
-  "approach": null,
+  "approach": {
+    "text": "React Hook Form mit zod-Schema über den Resolver",
+    "translation": "React Hook Form со схемой zod через резолвер"
+  },
   "questions": [
     {
       "number": 1,
@@ -89,6 +93,13 @@
       "text": "Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?",
       "translation": "Ждут ли для проверки формы входа ещё и автотесты?",
       "origin": "clarify",
+      "answered": false
+    },
+    {
+      "number": 4,
+      "text": "Soll die Fehlermeldung schon beim Tippen erscheinen oder erst beim Absenden des Login-Formulars?",
+      "translation": "Показывать ошибку уже при вводе или только при отправке формы входа?",
+      "origin": "research",
       "answered": false
     }
   ]

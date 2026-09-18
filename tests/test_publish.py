@@ -850,10 +850,11 @@ def test_the_translation_block_keeps_the_open_questions(board: FakeBoard, tmp_pa
 
     lines = task_card(board)["desc"].splitlines()
     translation = lines.index("Translation (ru):")
-    assert lines[translation + 3 : translation + 7] == [
+    assert lines[translation + 3 : translation + 8] == [
         "Open questions:",
         "- Проверка до отправки только для формы входа или и для формы регистрации?",
         "- Ждут ли для проверки формы входа ещё и автотесты?",
+        "- Показывать ошибку уже при вводе или только при отправке формы входа?",
         "- Где форма?",
     ]
     assert "- Wo liegt das Formular?" in lines[:translation]

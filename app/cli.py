@@ -65,7 +65,16 @@ def read_input(text: str) -> tuple[str, str | None]:
 # С чего локальный прогон может начать повтор: стадии модели и ресёрч, у которого есть свой файл.
 # Стадии-коды, которые берут вход у разбора или пишут на доску, так не запускаются: у поручения
 # для этого есть --task, у публикации своя команда.
-FROM_STAGES = ("review", "intake", "brief", "research", "prd", "decompose", "steps")
+FROM_STAGES = (
+    "review",
+    "intake",
+    "brief",
+    "research",
+    "prd",
+    "decompose",
+    "approach",
+    "steps",
+)
 
 
 def local_stop(start: str) -> str:
@@ -111,7 +120,7 @@ def start_pipeline(run: Run, start: str) -> int:
     return EXIT_OK
 
 
-def task_run(parser: CommandLineParser, number: int) -> Run:
+def task_run(parser: CommandLineParser, number: int, research: bool) -> Run:
     """Прогон поручения N из разбора в текущем каталоге: он же и каталог родителя."""
     for needed in (REVIEW_JSON, TRANSCRIPT):
         if not Path(needed).exists():
@@ -130,6 +139,7 @@ def task_run(parser: CommandLineParser, number: int) -> Run:
                 "parent_root": Path("."),
                 "parent_run_id": run_id_of(transcript),
                 "assignment": number,
+                "skip": frozenset() if research else frozenset({"approach"}),
             }
         )
     except ValidationError:
@@ -153,15 +163,15 @@ def task_run(parser: CommandLineParser, number: int) -> Run:
     return run
 
 
-def steps_run(parser: CommandLineParser, answers_path: str | None) -> Run:
-    """Повтор шагов по лежащему assignment.json: run_id прогона поручения берётся оттуда.
+def steps_run(parser: CommandLineParser, start: str, answers_path: str | None) -> Run:
+    """Повтор ресёрча или шагов по лежащим артефактам: run_id берётся из assignment.json.
 
     С `answers_path` ответ тимлида из файла ложится в inputs/answers.md как пришедший: так
     локальный прогон проходит ту ветку, которую в боте открывает reply на вопросы.
     """
-    for needed in stage_named("steps").inputs:
+    for needed in stage_named(start).inputs:
         if not Path(needed).exists():
-            parser.error(f"для --from steps нужен {needed}: его пишет --task N")
+            parser.error(f"для --from {start} нужен {needed}: его пишет --task N")
     if answers_path is not None:
         try:
             text = Path(answers_path).read_text(encoding="utf-8")
@@ -207,6 +217,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Разложить на шаги поручение N из лежащего outputs/review.json.",
     )
     parser.add_argument(
+        "--no-research",
+        dest="research",
+        action="store_false",
+        help="С --task: идти к шагам без ресёрча и без единого платного поиска.",
+    )
+    parser.add_argument(
         "--answers",
         metavar="FILE",
         help="С --from steps: ответ тимлида из файла, как его прислали, и шаги заново.",
@@ -224,17 +240,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.answers is not None and args.start != "steps":
         parser.error("--answers повторяет шаги с ответом тимлида и идёт только с --from steps")
 
+    if not args.research and args.task is None:
+        parser.error("--no-research выбирает режим для --task N и без него ничего не значит")
+
     if args.task is not None:
         if args.start or args.gates or args.text or args.file:
             # Ворота после последней стадии локального обхода не срабатывают, а вход берётся
             # из разбора: и --gates, и --from, и текст здесь ничего бы не сделали.
             parser.error("--task берёт вход из outputs/review.json и идёт без --from и --gates")
-        return start_pipeline(task_run(parser, args.task), "assignment")
+        return start_pipeline(task_run(parser, args.task, args.research), "assignment")
 
-    if args.start == "steps":
+    if args.start in ("approach", "steps"):
         if args.text or args.file:
             parser.error("--from берёт вход из outputs/, текст и --file с ним не нужны")
-        return start_pipeline(steps_run(parser, args.answers), "steps")
+        return start_pipeline(steps_run(parser, args.start, args.answers), args.start)
 
     if args.start:
         if args.text or args.file:

@@ -83,6 +83,9 @@ class Stage(BaseModel):
     # какой была. Стадия с поиском обязана держать во входах снимок стандартов: по нему код
     # выбирает предел поисков, и тест списка стадий это стережёт.
     web_search: WebSearch | None = None
+    # Что кладёт обход вместо вызова модели, когда человек пропустил стадию (`Run.skip`, P3-11):
+    # путь артефакта и его содержимое. None — стадию не пропускают.
+    skipped_output: tuple[str, str] | None = None
 
 
 STAGES: tuple[Stage, ...] = (
@@ -178,11 +181,21 @@ STAGES: tuple[Stage, ...] = (
         inputs=(CLARIFY_JSON, PROJECT),
         outputs=(frozenset({ANSWERS, PROJECT}),),
     ),
+    # Ресёрч решений после ответа тимлида: ответ («делаем на X») сужает поиск, и платить за
+    # варианты, которые он убивает, незачем. Предел поисков код берёт по флагу `stack` снимка.
+    Stage(
+        name="approach",
+        runs="llm",
+        inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, PROJECT),
+        outputs=(frozenset({APPROACH_JSON}),),
+        web_search=WebSearch(max_uses_with_stack=3, max_uses_without_stack=5),
+        skipped_output=(APPROACH_JSON, APPROACH_SKIPPED),
+    ),
     # Язык встречи стадия берёт из assignment.json, а не `lang` прогона: у текста это не язык.
     Stage(
         name="steps",
         runs="llm",
-        inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, PROJECT),
+        inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, APPROACH_JSON, PROJECT),
         outputs=(frozenset({STEPS_JSON}),),
         gate_after=STEPS_MD,
         thinking="disabled",

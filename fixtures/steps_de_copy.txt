@@ -10,3 +10,7 @@ Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geh
 ❓ Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?
 
 ❓ Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?
+
+❓ Soll die Fehlermeldung schon beim Tippen erscheinen oder erst beim Absenden des Login-Formulars?
+
+→ React Hook Form mit zod-Schema über den Resolver

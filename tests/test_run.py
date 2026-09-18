@@ -7,12 +7,15 @@ from typing import Any
 
 import pytest
 
+from app.approach import Approach
 from app.answers import read_answers
 from app.config import settings
 from app.dialog import Turn
 from app.ingest import Source, run_id_of
 from app.pipeline import (
     ANSWERS,
+    APPROACH_JSON,
+    APPROACH_MD,
     ASSIGNMENT_JSON,
     BRIEF,
     BRIEF_QUESTION,
@@ -51,10 +54,12 @@ from tests.helpers import (
     FIXTURES,
     FakeBoard,
     InstallResponses,
+    approach_answer,
     clarify_answer,
     no_questions,
     without_marks,
     ok,
+    searched,
     real_issues,
     request_body,
     steps_answer,
@@ -629,7 +634,7 @@ def test_an_assignment_walk_writes_the_task_and_its_stamped_steps(
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
     child = tmp_path / "child"
-    llm([ok(clarify_answer()), ok(steps_answer())])
+    llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     assert walk(a_task_run(child, parent, "voice"), "assignment", "steps") is None
 
@@ -652,7 +657,7 @@ def test_a_text_parent_gives_the_steps_the_language_its_review_named(
     parent = a_review_on_disk(tmp_path / "parent")
     # Язык прогона нарочно не немецкий: иначе не видно, откуда стадия взяла язык встречи.
     run = a_task_run(tmp_path / "child", parent, "text").model_copy(update={"lang": "ru"})
-    requests = llm([ok(clarify_answer()), ok(steps_answer())])
+    requests = llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     walk(run, "assignment", "steps")
 
@@ -669,7 +674,7 @@ def test_a_review_that_named_no_language_leaves_a_text_task_without_one(
     older = json.loads(read_artifact(parent, REVIEW_JSON))
     del older["meeting_lang"]
     (parent / REVIEW_JSON).write_text(json.dumps(older, ensure_ascii=False), encoding="utf-8")
-    llm([ok(clarify_answer()), ok(steps_answer())])
+    llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
 
@@ -692,7 +697,7 @@ def test_a_task_walk_with_gates_stops_on_the_steps_before_the_card(
     llm: InstallResponses, board: FakeBoard, tmp_path: Path
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
-    llm([ok(clarify_answer()), ok(steps_answer())])
+    llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     waiting = walk(
         a_task_run(tmp_path / "child", parent, "voice", auto_approve=False), "assignment", "card"
@@ -706,7 +711,7 @@ def test_an_auto_approved_task_walk_ends_with_one_card(
     llm: InstallResponses, board: FakeBoard, tmp_path: Path
 ) -> None:
     parent = a_review_on_disk(tmp_path / "parent")
-    llm([ok(clarify_answer()), ok(steps_answer())])
+    llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     assert walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "card") is None
 
@@ -751,7 +756,14 @@ def test_walk_parks_after_clarify_only_when_the_run_asks_teamlead(
     parent = a_review_on_disk(tmp_path / "parent")
     asking = a_task_run(tmp_path / "asking", parent, "voice", auto_approve=False)
     asking.asks_teamlead = True
-    requests = llm([ok(clarify_answer()), ok(clarify_answer()), ok(steps_answer())])
+    requests = llm(
+        [
+            ok(clarify_answer()),
+            ok(clarify_answer()),
+            searched(approach_answer()),
+            ok(steps_answer()),
+        ]
+    )
 
     assert walk(asking, "assignment", "card") == Pause(
         stage="clarify", artifact=CLARIFY_JSON, kind="questions"
@@ -763,7 +775,8 @@ def test_walk_parks_after_clarify_only_when_the_run_asks_teamlead(
     assert walk(silent, "assignment", "steps") is None
     assert read_answers(read_artifact(silent.root, ANSWERS)).status == "not_sent"
     steps = Steps.model_validate_json(read_artifact(silent.root, STEPS_JSON))
-    assert steps.unanswered == [1, 2, 3]
+    # Три вопроса тимлиду и один, открытый ресёрчем: он тоже доезжает до карточки открытым.
+    assert steps.unanswered == [1, 2, 3, 4]
 
 
 def nothing_unanswered(data: dict[str, Any]) -> None:
@@ -777,12 +790,21 @@ def test_a_task_without_questions_walks_on_without_a_pause(
     parent = a_review_on_disk(tmp_path / "parent")
     run = a_task_run(tmp_path / "child", parent, "voice", auto_approve=False)
     run.asks_teamlead = True
-    llm([ok(clarify_answer(no_questions)), ok(steps_answer(nothing_unanswered))])
+    llm(
+        [
+            ok(clarify_answer(no_questions)),
+            searched(approach_answer()),
+            ok(steps_answer(nothing_unanswered)),
+        ]
+    )
 
     waiting = walk(run, "assignment", "card")
 
     assert waiting == Pause(stage="steps", artifact=STEPS_MD, kind="gate")
     assert read_answers(read_artifact(run.root, ANSWERS)).status == "nothing_asked"
+    # Тимлида не спрашивали, но ресёрч нашёл свой вопрос, и он идёт первым в общем списке.
+    steps = Steps.model_validate_json(read_artifact(run.root, STEPS_JSON))
+    assert [(asked.number, asked.origin) for asked in steps.questions] == [(1, "research")]
 
 
 def test_a_parked_run_continues_from_answers_with_the_reply_it_was_given(
@@ -791,7 +813,7 @@ def test_a_parked_run_continues_from_answers_with_the_reply_it_was_given(
     parent = a_review_on_disk(tmp_path / "parent")
     run = a_task_run(tmp_path / "child", parent, "voice", auto_approve=False)
     run.asks_teamlead = True
-    llm([ok(clarify_answer()), ok(steps_answer())])
+    llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
     walk(run, "assignment", "card")
     reply = read_answers((FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"))
     run.answers = reply
@@ -801,7 +823,24 @@ def test_a_parked_run_continues_from_answers_with_the_reply_it_was_given(
     assert waiting == Pause(stage="steps", artifact=STEPS_MD, kind="gate")
     assert read_answers(read_artifact(run.root, ANSWERS)) == reply
     steps = Steps.model_validate_json(read_artifact(run.root, STEPS_JSON))
-    assert steps.unanswered == [1, 3]
+    assert steps.unanswered == [1, 3, 4]
+
+
+def test_a_skipped_research_writes_its_file_without_calling_the_model(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """«Шаги без ресёрча»: стадия есть в маршруте, но платного поиска не случается."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    run = a_task_run(tmp_path / "child", parent, "voice")
+    run.skip = frozenset({"approach"})
+    requests = llm([ok(clarify_answer()), ok(steps_answer(nothing_unanswered))])
+
+    assert walk(run, "assignment", "steps") is None
+
+    assert len(requests) == 2
+    approach = Approach.model_validate_json(read_artifact(run.root, APPROACH_JSON))
+    assert (approach.status, approach.options, approach.new_questions) == ("skipped", [], [])
+    assert not (run.root / APPROACH_MD).exists()
 
 
 def test_a_run_that_asks_but_brings_no_answer_to_answers_is_refused(tmp_path: Path) -> None:

@@ -37,6 +37,8 @@ Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geh
    → Нужна ли для проверки формы входа определённая библиотека, или выбор свободный?
 3. Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet? *(no answer)*
    → Ждут ли для проверки формы входа ещё и автотесты?
+4. Soll die Fehlermeldung schon beim Tippen erscheinen oder erst beim Absenden des Login-Formulars? *(no answer)*
+   → Показывать ошибку уже при вводе или только при отправке формы входа?
 
 ## Teamlead answers
 

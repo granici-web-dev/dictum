@@ -129,7 +129,8 @@ def repairable_problems(
     if stage == "steps":
         assignment = Assignment.model_validate_json(inputs[ASSIGNMENT_JSON])
         asked = Clarify.model_validate_json(inputs[CLARIFY_JSON]).questions
-        return check_steps(files[STEPS_JSON], assignment, len(asked))
+        found = Approach.model_validate_json(inputs[APPROACH_JSON]).new_questions
+        return check_steps(files[STEPS_JSON], assignment, len(asked) + len(found))
     if CANDIDATES in files:
         return check_candidates(files[CANDIDATES])
     if BRIEF_QUESTION in files:
@@ -535,6 +536,7 @@ def run_stage(
     if stage == "steps":
         clarify = parsed_input(stage, inputs, CLARIFY_JSON, Clarify.model_validate_json)
         answers = parsed_input(stage, inputs, ANSWERS, read_answers)
+        researched = parsed_input(stage, inputs, APPROACH_JSON, Approach.model_validate_json)
     messages: list[MessageParam] = [
         *(history or []),
         {"role": "user", "content": build_user_message(inputs, user_edit, params)},
@@ -631,6 +633,10 @@ def run_stage(
             assignment,
             clarify.title,
             [Pair(text=asked.text, translation=asked.translation) for asked in clarify.questions],
+            [
+                Pair(text=found.text, translation=found.translation)
+                for found in researched.new_questions
+            ],
             answers.status == "answered",
         )
         files[STEPS_MD] = steps_markdown(

@@ -400,9 +400,9 @@ def questions_copy_text(clarify: Clarify) -> str:
     )
 
 
-# Последствие незаданных стандартов называется до того, как за него заплачено. Пока ресёрча в
-# маршруте нет, платят за него шаги.
-MISSING_STANDARDS_CONSEQUENCE = "шаги пишутся без стандартов проекта"
+# Последствие незаданных стандартов называется до того, как за него заплачено: забытая настройка
+# иначе оплачивает подбор стека проекту, у которого стек давно есть.
+MISSING_STANDARDS_CONSEQUENCE = "ресёрч будет подбирать стек как для нового проекта"
 
 
 def standards_line(project: Project) -> str:
@@ -478,6 +478,40 @@ def steps_copy_text(steps: Steps) -> str:
     if steps.approach:
         blocks.append(f"{APPROACH_MARK} {steps.approach.text}")
     return "\n\n".join(blocks)
+
+
+RESEARCH_MODE_TEXT: dict[Mode, str] = {
+    "existing": "внутри стека проекта",
+    "new": "новый проект",
+}
+
+RESEARCH_SKIPPED_TEXT = "Ресёрч пропущен."
+
+
+def sources_count(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        word = "источник"
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = "источника"
+    else:
+        word = "источников"
+    return f"{count} {word}"
+
+
+def research_line(approach: Approach) -> str:
+    """Ресёрч на воротах одной строкой: режим, выбор и сколько ссылок правда пришло из поиска."""
+    if approach.recommendation is None:
+        return RESEARCH_SKIPPED_TEXT
+    mode = (
+        "предварительно, стек не подтверждён"
+        if approach.recommendation.provisional
+        else RESEARCH_MODE_TEXT[approach.mode or "new"]
+    )
+    found = len(confirmed_source_ids(approach))
+    return (
+        f"Ресёрч: {mode}, {approach.recommendation.option}, "
+        f"{sources_count(len(approach.sources))}, из поиска {found}."
+    )
 
 
 SNAPSHOT_TAKEN_AT = "%d.%m %H:%M UTC"

@@ -1,4 +1,5 @@
 import json
+from typing import Any
 import logging
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from app.ingest import build_transcript, run_id_of
 from app.answers import read_answers
 from app.pipeline import (
     ANSWERS,
+    APPROACH_JSON,
     ASSIGNMENT_JSON,
     BRIEF,
     CANDIDATES,
@@ -36,9 +38,12 @@ from tests.helpers import (
     FIXTURES,
     CLARIFY_DE,
     InstallResponses,
+    APPROACH_NEW_DE,
+    approach_answer,
     clarify_answer,
     decompose_answer,
     ok,
+    searched,
     request_body,
     server_error,
     steps_answer,
@@ -606,7 +611,7 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
 ) -> None:
     monkeypatch.chdir(tmp_path)
     a_review_of_an_earlier_run(tmp_path)
-    requests = llm([ok(clarify_answer()), ok(steps_answer())])
+    requests = llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
     with caplog.at_level(logging.INFO, logger="app.cli"):
         assert main(["--task", "1"]) == EXIT_OK
@@ -617,9 +622,9 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
     assert assignment["meeting_lang"] == "de"
     steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
     assert steps["run_id"] == assignment["run_id"]
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert read_answers((tmp_path / ANSWERS).read_text(encoding="utf-8")).status == "not_sent"
-    assert steps["unanswered"] == [1, 2, 3]
+    assert steps["unanswered"] == [1, 2, 3, 4]
     assert not (tmp_path / "outputs/publish.json").exists()
     assert STEPS_MD in caplog.text
 
@@ -660,6 +665,35 @@ def test_a_task_that_cannot_be_walked_is_a_usage_error_before_any_call(
     assert not (tmp_path / ASSIGNMENT_JSON).exists()
 
 
+def test_no_research_walks_to_the_steps_without_a_single_paid_search(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    a_review_of_an_earlier_run(tmp_path)
+    def only_the_teamlead_questions(data: dict[str, Any]) -> None:
+        data["unanswered"] = [1, 3]
+        data["approach"] = None
+
+    requests = llm([ok(clarify_answer()), ok(steps_answer(only_the_teamlead_questions))])
+
+    assert main(["--task", "1", "--no-research"]) == EXIT_OK
+
+    assert len(requests) == 2
+    approach = json.loads((tmp_path / APPROACH_JSON).read_text(encoding="utf-8"))
+    assert approach["status"] == "skipped"
+
+
+def test_no_research_without_a_task_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--no-research", "--from", "steps"])
+
+    assert exit_info.value.code == EXIT_USAGE
+
+
 def a_task_asked_on_disk(root: Path) -> None:
     """Поручение, по которому --task N уже задал вопросы и не отправил их: всё, что читают шаги."""
     (root / "inputs").mkdir(exist_ok=True)
@@ -669,6 +703,7 @@ def a_task_asked_on_disk(root: Path) -> None:
     )
     (root / CLARIFY_JSON).write_text(CLARIFY_DE, encoding="utf-8")
     (root / ANSWERS).write_text("---\nstatus: not_sent\n---\n", encoding="utf-8")
+    (root / APPROACH_JSON).write_text(APPROACH_NEW_DE, encoding="utf-8")
     (root / PROJECT).write_text(
         '---\nconfigured: false\nsource: null\ntaken_at: "2026-09-17T10:02:00+00:00"\n'
         "stack: false\nprinciples: false\ntesting: false\nsame_as: {}\n---\n",
@@ -705,7 +740,7 @@ def test_steps_with_answers_take_the_reply_as_it_was_written_and_run_again(
     assert (answers.status, answers.text) == ("answered", reply)
     assert reply in request_body(requests[0])["messages"][0]["content"]
     steps = json.loads((tmp_path / STEPS_JSON).read_text(encoding="utf-8"))
-    assert steps["unanswered"] == [1, 3]
+    assert steps["unanswered"] == [1, 3, 4]
 
 
 @pytest.mark.parametrize("content", [None, "  \n"])
