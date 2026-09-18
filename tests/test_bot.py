@@ -179,8 +179,8 @@ class FakeStore:
         # Кто чей ребёнок и по какому поручению: (родитель, номер) у строки из кнопки разбора.
         self.children: dict[str, tuple[str, int | None]] = {}
         self.research: dict[str, bool | None] = {}
-        # Сообщения с вопросами для тимлида: по любому из двух id узнаётся припаркованный прогон.
-        self.questions: dict[str, tuple[int, int]] = {}
+        # Все сообщения с вопросами для тимлида: по любому id узнаётся припаркованный прогон.
+        self.questions: dict[str, list[int]] = {}
 
     def stop(self, chat_id: int, stopped: Stopped) -> None:
         self.stops[chat_id] = stopped
@@ -284,13 +284,13 @@ class FakeStore:
     def park_run(self, run_id: str) -> None:
         self.status[run_id] = QUESTIONS_SENT
 
-    def note_questions(self, run_id: str, message_id: int, note_id: int) -> None:
-        self.questions[run_id] = (message_id, note_id)
+    def note_questions(self, run_id: str, message_ids: list[int]) -> None:
+        self.questions.setdefault(run_id, []).extend(message_ids)
 
     def parked_by_reply(self, chat_id: int, message_id: int) -> Parked | None:
         """Прогон, на чьё сообщение с вопросами ответили: статус любой, его разбирает бот."""
-        for run_id, ids in self.questions.items():
-            if self.chats.get(run_id) != chat_id or message_id not in ids:
+        for run_id, sent in self.questions.items():
+            if self.chats.get(run_id) != chat_id or message_id not in sent:
                 continue
             parent_id, assignment = self.children[run_id]
             if assignment is None:
@@ -3754,7 +3754,7 @@ async def test_task_with_questions_parks_and_sends_a_copy_text_and_a_translation
         ("Продолжить без ответов", "asked:ребёнок:without"),
         ("Стоп", "asked:ребёнок:stop"),
     ]
-    assert store.questions["ребёнок"] == (2, 3)
+    assert store.questions["ребёнок"] == [2, 3]
     assert chat.edits[-1] == QUESTIONS_PARKED.format(run_id="ребёнок")
     assert "stop=questions run=ребёнок questions=3" in caplog.text
 
@@ -3952,15 +3952,42 @@ async def test_pressing_the_parked_task_again_resends_the_questions_without_a_ca
     seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
     await on_child_button(a_press(a_task_button()), NO_CONTEXT)
     chat = a_task_button()
+    # Двойник чата считает свои отправки с нуля, а Telegram нумерует сообщения подряд: копия
+    # ложится после тех трёх, что уже ушли.
+    chat.message_id = 3
 
     with caplog.at_level(logging.INFO, logger="app.bot"):
         await on_child_button(a_press(chat), NO_CONTEXT)
 
     assert [run_id for run_id, _, _ in seen] == ["ребёнок"]
     assert chat.replies == asked_questions()
-    assert store.questions["ребёнок"] == (1, 2)
+    assert store.questions["ребёнок"] == [2, 3, 4, 5]
     assert store.status["ребёнок"] == QUESTIONS_SENT
     assert "questions=resent run=ребёнок chat=12" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_the_first_copy_after_a_resend_continues_the_same_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Копии вопросов в чате неотличимы на вид, и старая больше не уходит новым разбором."""
+    seen = a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    resent = a_task_button()
+    resent.message_id = 3
+    await on_child_button(a_press(resent), NO_CONTEXT)
+    chat = a_reply(ANSWER_DE, 2)
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert seen[-1] == ("ребёнок", ANSWERS_STAGE, TASK_ROUTE_END)
+    assert answers_of(tmp_path).status == "answered"
+    assert store.started == [(PARENT, 12, "voice"), ("ребёнок", 12, "voice")]
+    assert "answer=teamlead run=ребёнок chat=12" in caplog.text
 
 
 @pytest.mark.asyncio

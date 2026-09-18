@@ -791,7 +791,7 @@ async def send_questions(answering: Message, run_id: str, root: Path, number: in
             answering.chat_id,
         )
         return
-    await asyncio.to_thread(note_questions, run_id, sent[0], sent[1])
+    await asyncio.to_thread(note_questions, run_id, sent)
 
 
 async def on_questions_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

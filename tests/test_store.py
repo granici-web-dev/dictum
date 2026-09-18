@@ -579,7 +579,7 @@ def test_a_reopened_run_is_back_at_work_under_the_same_id(db: None) -> None:
 def a_parked_task(run_id: str = "поручение", number: int = 1, chat_id: int = 12) -> None:
     a_task_run(run_id, number)
     park_run(run_id)
-    note_questions(run_id, 501, 502)
+    note_questions(run_id, [501, 502])
 
 
 def test_research_belongs_to_a_task_child_and_only_to_it(db: None) -> None:
@@ -596,7 +596,7 @@ def test_questions_are_sent_only_about_a_task(db: None) -> None:
     a_review()
 
     with pytest.raises(sqlalchemy.exc.IntegrityError, match="ck_runs_questions_of_task"):
-        note_questions("разбор", 501, 502)
+        note_questions("разбор", [501, 502])
 
 
 def test_parked_run_does_not_block_a_stop_in_the_same_chat(db: None) -> None:
@@ -657,13 +657,17 @@ def test_a_reply_to_questions_already_closed_still_names_the_run(db: None) -> No
     assert parked is not None and parked.status == "answers"
 
 
-def test_resent_questions_replace_the_messages_a_reply_is_matched_against(db: None) -> None:
+def test_resent_questions_add_to_the_messages_a_reply_is_matched_against(db: None) -> None:
+    """Прежние копии остаются в чате и выглядят так же: reply на любую продолжает тот же прогон."""
     a_review()
     a_parked_task()
 
-    note_questions("поручение", 601, 602)
+    note_questions("поручение", [601, 602])
 
-    assert parked_by_reply(12, 501) is None
+    with session() as opened:
+        row = opened.get(RunRow, "поручение")
+        assert row is not None and row.questions_message_ids == [501, 502, 601, 602]
+    assert parked_by_reply(12, 501) is not None
     assert parked_by_reply(12, 602) is not None
 
 
@@ -720,10 +724,13 @@ def test_the_downgrade_refuses_while_rows_sit_in_statuses_the_old_code_does_not_
     a_review()
     a_task_run("поручение", 1)
     mark_stage("поручение", status, "de")
+    with engine().connect() as connection:
+        head = MigrationContext.configure(connection).get_current_revision()
 
     with pytest.raises(sqlalchemy.exc.ProgrammingError, match="P3-11 statuses"):
         command.downgrade(Config("alembic.ini"), "0005_child_runs")
 
     with engine().connect() as connection:
-        context = MigrationContext.configure(connection)
-        assert context.get_current_revision() == "0006_teamlead_questions"
+        # Всю цепочку alembic ведёт одной транзакцией: отказ на `0006` откатывает и ступени,
+        # которые успели пройти, поэтому схема остаётся ровно той, что была.
+        assert MigrationContext.configure(connection).get_current_revision() == head

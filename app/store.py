@@ -14,6 +14,7 @@ from functools import cache
 from pydantic import BaseModel
 from sqlalchemy import (
     BigInteger,
+    any_,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -22,11 +23,12 @@ from sqlalchemy import (
     String,
     create_engine,
     func,
+    literal,
     select,
     text,
     update,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -107,9 +109,12 @@ class RunRow(Base):
     # Ресёрч поручения выбран кнопкой и должен пережить парковку на дни, как auto_approve. Есть
     # ровно у ребёнка-поручения.
     research: Mapped[bool | None]
-    # Сообщения с вопросами для тимлида: ответом (reply) на любое из них приходит ответ тимлида.
-    questions_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    questions_note_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Все сообщения с вопросами для тимлида, в порядке отправки: ответом (reply) на любое из них
+    # приходит ответ тимлида. Список, а не последняя пара: повторная отправка оставляет в чате
+    # прежние копии, неотличимые на вид, и reply на них терял ответ (живая проверка части D).
+    questions_message_ids: Mapped[list[int]] = mapped_column(
+        ARRAY(BigInteger), server_default=text("'{}'::bigint[]")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -131,8 +136,7 @@ class RunRow(Base):
             "(assignment IS NULL) = (research IS NULL)", name="ck_runs_research_of_task"
         ),
         CheckConstraint(
-            "(questions_message_id IS NULL AND questions_note_id IS NULL)"
-            " OR assignment IS NOT NULL",
+            "cardinality(questions_message_ids) = 0 OR assignment IS NOT NULL",
             name="ck_runs_questions_of_task",
         ),
         # Остановку ищут по чату и статусу: единственный запрос бота на горячем пути.
@@ -390,14 +394,16 @@ def park_run(run_id: str) -> None:
         )
 
 
-def note_questions(run_id: str, message_id: int, note_id: int) -> None:
-    """Сообщения, ответом на которые придёт ответ тимлида. Повторная отправка их переписывает."""
+def note_questions(run_id: str, message_ids: list[int]) -> None:
+    """Сообщения, ответом на которые придёт ответ тимлида. Повторная отправка дописывает свои.
+
+    Прежние копии никуда из чата не деваются и выглядят точно так же, поэтому reply на любую из
+    них обязан продолжать тот же прогон. Пишется целым списком, как `add_turn`: правку внутри
+    массива SQLAlchemy не заметит.
+    """
     with session() as opened:
-        opened.execute(
-            update(RunRow)
-            .where(RunRow.id == run_id)
-            .values(questions_message_id=message_id, questions_note_id=note_id)
-        )
+        row = opened.scalars(select(RunRow).where(RunRow.id == run_id)).one()
+        row.questions_message_ids = [*row.questions_message_ids, *message_ids]
 
 
 def parked_by_reply(chat_id: int, message_id: int) -> Parked | None:
@@ -406,8 +412,7 @@ def parked_by_reply(chat_id: int, message_id: int) -> Parked | None:
         row = opened.scalars(
             select(RunRow).where(
                 RunRow.chat_id == chat_id,
-                (RunRow.questions_message_id == message_id)
-                | (RunRow.questions_note_id == message_id),
+                literal(message_id) == any_(RunRow.questions_message_ids),
             )
         ).one_or_none()
         if row is None or row.parent_id is None or row.assignment is None:
