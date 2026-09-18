@@ -22,8 +22,8 @@ Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geh
 
 1. Validierungsschema mit zod für E-Mail-Format und Pflichtfelder anlegen
    → Описать схему проверки на zod для e-mail и обязательных полей
-2. Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern
-   → Подключить схему к форме входа через React Hook Form и не отправлять форму с ошибками
+2. [уточнить: Frage 1] Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern
+   → [уточнить: вопрос 1] Подключить схему к форме входа через React Hook Form и не отправлять форму с ошибками
 3. Fehlermeldung unter dem jeweiligen Feld anzeigen
    → Показывать сообщение об ошибке под полем
 4. Prüfen, dass bei ungültigen Feldern keine Anfrage an die API geht

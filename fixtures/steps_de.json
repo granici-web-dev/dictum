@@ -51,8 +51,8 @@
       "translation": "Описать схему проверки на zod для e-mail и обязательных полей"
     },
     {
-      "text": "Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern",
-      "translation": "Подключить схему к форме входа через React Hook Form и не отправлять форму с ошибками"
+      "text": "[уточнить: Frage 1] Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern",
+      "translation": "[уточнить: вопрос 1] Подключить схему к форме входа через React Hook Form и не отправлять форму с ошибками"
     },
     {
       "text": "Fehlermeldung unter dem jeweiligen Feld anzeigen",
