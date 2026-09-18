@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import TypeVar
 
 import anthropic
-from anthropic import DefaultHttpxClient
-from anthropic.types import Message, MessageParam
+from anthropic import DefaultHttpxClient, Omit, omit
+from anthropic.types import Message, MessageParam, ThinkingConfigParam, Usage
 from pydantic import BaseModel, ValidationError
 
 from app.answers import read_answers
@@ -256,6 +256,24 @@ def parse_file_blocks(text: str) -> dict[str, str]:
     return files
 
 
+def thinking_of(stage: str) -> ThinkingConfigParam | Omit:
+    """Размышление стадии словами API. Без записи параметр не отправляется вовсе (SPEC §7)."""
+    mode = stage_named(stage).thinking
+    if mode is None:
+        return omit
+    return {"type": "adaptive"} if mode == "adaptive" else {"type": "disabled"}
+
+
+def thinking_tokens(usage: Usage) -> str:
+    """Сколько токенов выхода ушло на размышление, если API это сказал. Иначе прочерк."""
+    details = usage.output_tokens_details
+    return str(details.thinking_tokens) if details is not None else "-"
+
+
+def text_length(response: Message) -> int:
+    return sum(len(block.text) for block in response.content if block.type == "text")
+
+
 def ask_model(
     stage: str, run_id: str, model: str, messages: list[MessageParam]
 ) -> tuple[Message, int]:
@@ -266,6 +284,7 @@ def ask_model(
             max_tokens=settings.anthropic_max_tokens,
             system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
             messages=messages,
+            thinking=thinking_of(stage),
         )
     except anthropic.APIError as error:
         logger.warning(
@@ -278,13 +297,20 @@ def ask_model(
         )
         raise
     duration_ms = int((time.perf_counter() - started) * 1000)
+    # Размышление тарифицируется как выход и по умолчанию идёт у модели само (SPEC §7), а в
+    # ответе виден только его блок, часто с пустым текстом. Без этих трёх полей разницу между
+    # «модель много написала» и «модель долго думала» в логе не увидеть.
     logger.info(
-        "stage=%s run=%s model=%s input_tokens=%d output_tokens=%d duration_ms=%d",
+        "stage=%s run=%s model=%s input_tokens=%d output_tokens=%d thinking=%s "
+        "thinking_tokens=%s text_chars=%d duration_ms=%d",
         stage,
         run_id,
         response.model,
         response.usage.input_tokens,
         response.usage.output_tokens,
+        "yes" if any(block.type == "thinking" for block in response.content) else "no",
+        thinking_tokens(response.usage),
+        text_length(response),
         duration_ms,
     )
     return response, duration_ms

@@ -38,6 +38,7 @@ from tests.helpers import (
     request_body,
     server_error,
     steps_answer,
+    thought,
 )
 from tests.test_review import MEETING_DE, REVIEW_DE, REVIEW_TICKET_DE, TICKET_DE
 
@@ -314,6 +315,31 @@ def test_every_call_of_the_model_names_the_run_it_was_paid_for(
     assert f"stage=intake run={RUN} model=" in caplog.text
 
 
+def test_the_call_line_counts_the_thinking_beside_the_text_it_paid_for(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Размышление тарифицируется как выход, и без этих полей его не отличить от дела."""
+    llm([thought(IDEA_BLOCK, thinking_tokens=1200)])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        result = run_stage("intake", INPUTS, RUN)
+
+    assert "thinking=yes thinking_tokens=1200 " in caplog.text
+    assert f"text_chars={len(IDEA_BLOCK)} " in caplog.text
+    assert set(result.files) == {"inputs/idea.md"}
+
+
+def test_the_call_line_says_no_thinking_when_the_answer_carries_no_such_block(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    llm([ok(IDEA_BLOCK)])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("intake", INPUTS, RUN)
+
+    assert "thinking=no thinking_tokens=- " in caplog.text
+
+
 def test_an_extra_file_beside_the_whole_expected_set_is_dropped_with_a_line(
     llm: InstallResponses, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -449,6 +475,15 @@ def test_an_invented_ticket_key_gets_the_repair_and_is_dropped_if_it_stays(
     assert "ABC-124" in request_body(requests[1])["messages"][-1]["content"]
     [task] = Review.model_validate_json(result.files["outputs/review.json"]).tasks
     assert (task.ticket_key, task.ticket_url) == (None, "https://jira.example.com/browse/ABC-123")
+
+
+def test_a_stage_without_a_thinking_mode_sends_no_such_parameter(llm: InstallResponses) -> None:
+    """Умолчание записи — прежнее поведение: ни одна стадия не меняется молча."""
+    requests = llm([ok(said_verbatim())])
+
+    run_stage("review", REVIEW_INPUTS, RUN, params=OWNER_RU)
+
+    assert "thinking" not in request_body(requests[0])
 
 
 UNSET_PROJECT = project_snapshot(None, datetime(2026, 9, 17, 10, 2, tzinfo=UTC))

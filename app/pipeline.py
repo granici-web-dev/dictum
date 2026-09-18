@@ -59,6 +59,10 @@ class Stage(BaseModel):
     # Артефакт, который человек читает на воротах после стадии (SPEC §3.2); None — ворот нет.
     # Из outputs его не вывести: у decompose на воротах читают issues.md, а он там не объявлен.
     gate_after: str | None = None
+    # Сколько модели размышлять на этой стадии, словами API (`thinking.type`, SPEC §7). None —
+    # параметр не отправляется вовсе, и стадия остаётся ровно такой, какой была. `adaptive` это
+    # то же самое, сказанное явно, `disabled` — минимально возможное.
+    thinking: Literal["adaptive", "disabled"] | None = None
 
 
 STAGES: tuple[Stage, ...] = (

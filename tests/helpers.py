@@ -32,6 +32,18 @@ def ok(text: str, stop_reason: str = "end_turn") -> httpx2.Response:
     return httpx2.Response(200, json=message_body(text, stop_reason))
 
 
+def thought(text: str, thinking_tokens: int = 900) -> httpx2.Response:
+    """Ответ с блоком размышления впереди текста: так отвечает модель, когда думает.
+
+    Текст блока пуст, потому что `display` по умолчанию `omitted`: наружу выходит подпись, а
+    счёт размышления приходит отдельным полем `usage`.
+    """
+    body = message_body(text)
+    body["content"] = [{"type": "thinking", "thinking": "", "signature": "sig"}, *body["content"]]
+    body["usage"]["output_tokens_details"] = {"thinking_tokens": thinking_tokens}
+    return httpx2.Response(200, json=body)
+
+
 def server_error() -> httpx2.Response:
     return httpx2.Response(
         500,
