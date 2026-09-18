@@ -21,6 +21,7 @@ from app import bot
 from app.answers import Answers, answers_file, read_answers
 from app.bot import (
     ANSWERS_STAGE,
+    APPROVAL_TEXT,
     ASSEMBLE,
     ASSEMBLE_ASKED,
     ASSEMBLE_BUTTON,
@@ -4091,3 +4092,74 @@ async def test_the_steps_gate_names_the_snapshot_when_the_standards_folder_is_go
 
     assert standards_snapshot_line(read_project(NO_STANDARDS)) in chat.edits[-1]
     assert "Вопросов без ответа: 2." in chat.edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_short_approval_text_at_the_steps_gate_is_refused_without_a_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ворота стоят против публикации без явного решения, а вызов за «Passt» вернул бы то же."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    await on_questions_button(a_press(a_questions_button("ребёнок", "without")), NO_CONTEXT)
+    walked: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_teamlead(walked))
+    chat = TextChat("Passt so!")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.replies == [APPROVAL_TEXT]
+    assert walked == []
+    assert store.stops[12].stage == "steps"
+    assert store.status["ребёнок"] == AWAITING_GATE
+    assert "refusal=approval_text chat=12 run=ребёнок" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_approval_with_a_remark_goes_back_into_the_stage_as_an_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store)
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    await on_questions_button(a_press(a_questions_button("ребёнок", "without")), NO_CONTEXT)
+    walked: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_teamlead(walked))
+
+    await on_text(an_update(TextChat("ok, aber Schritt 3 weglassen")), NO_CONTEXT)
+
+    assert walked == [("ребёнок", "steps", TASK_ROUTE_END)]
+
+
+@pytest.mark.parametrize(
+    ("written", "approval"),
+    [
+        ("Passt so!", True),
+        ("ок.", True),
+        ("  ВСЁ ОК  ", True),
+        ("go", True),
+        ("ok, aber Schritt 3 weglassen", False),
+        ("окей бы, но шаг 3 лишний", False),
+    ],
+)
+def test_only_a_whole_short_agreement_counts_as_approval(written: str, approval: bool) -> None:
+    assert bot.sounds_like_approval(written) is approval
+
+
+@pytest.mark.asyncio
+async def test_the_same_words_at_the_brief_gate_are_still_an_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Отказ живёт на воротах шагов: у брифа своя история правок, и её эта задача не трогает."""
+    stopped = a_stopped_gate(tmp_path, monkeypatch)
+    store.stop(12, stopped)
+    listed(monkeypatch, "12")
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE, seen))
+
+    await on_text(an_update(TextChat("ok")), NO_CONTEXT)
+
+    assert seen == [("brief", "publish")]

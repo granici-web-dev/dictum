@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+import unicodedata
 from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import suppress
@@ -261,6 +262,27 @@ BROKEN_REDO: dict[StopKind, str] = {
 GATE_TAIL = "Дальше — кнопкой. Правку пришлите текстом, я переделаю этот шаг."
 
 GATE_EDIT_ASKED = "Пришлите правку одним сообщением: что поменять в этом шаге."
+
+# Короткое согласие текстом на воротах шагов (P3-11). За нажатие его принять нельзя: ворота
+# существуют ровно против публикации без явного решения, а список фраз промахнётся на «ок,
+# только…» и положит карточку, которой никто не подтверждал. Правкой тоже нельзя: вызов модели
+# за «passt» стоит $0.03–0.06 и возвращает те же шаги.
+APPROVALS = frozenset(
+    {
+        "ok",
+        "ок",
+        "окей",
+        "всё ок",
+        "все ок",
+        "passt",
+        "passt so",
+        "alles gut",
+        "sieht gut aus",
+        "go",
+    }
+)
+
+APPROVAL_TEXT = "Похоже на согласие. Нажмите «Дальше» выше, и карточка ляжет на доску."
 
 GATE_STOPPED = "Остановил прогон {run_id}."
 
@@ -655,6 +677,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             logger.info("start=text run=%s chat=%s", run.run_id, message.chat_id)
         elif stopped.kind == "gate":
+            if stopped.stage == STEPS_STAGE and sounds_like_approval(message.text):
+                # Остановка остаётся на месте: человеку сказано, чем подтвердить, а стадия не
+                # вызвана — повтор вернул бы те же шаги за те же деньги.
+                await refuse(message, "approval_text", APPROVAL_TEXT, run=stopped.run_id)
+                return
             # Текст на воротах и есть правка: тот же уговор, что и на выборе, и второго
             # состояния ожидания («нажал Править, теперь жду текст») он не заводит.
             run = continued(stopped)
@@ -1508,6 +1535,18 @@ async def brief_answer(
         turns=stopped.turns,
         closes_branch=BRIEF_QUESTION if over else None,
     )
+
+
+def sounds_like_approval(written: str) -> bool:
+    """Согласие ли это целиком: «ok, aber Schritt 3 weglassen» согласием не считается.
+
+    Пунктуация выбрасывается любая, не только ASCII: «Passt so!» и «ок.» это то же самое слово.
+    """
+    bare = "".join(
+        " " if unicodedata.category(character).startswith("P") else character
+        for character in written.casefold()
+    )
+    return " ".join(bare.split()) in APPROVALS
 
 
 def out_of_range(found: Candidates) -> str:
