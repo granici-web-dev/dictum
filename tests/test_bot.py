@@ -142,6 +142,8 @@ from app.render import (
     review_lead,
     review_messages,
     standards_line,
+    standards_snapshot_line,
+    steps_copy_text,
     steps_digest,
 )
 from app.steps import Steps
@@ -2958,8 +2960,11 @@ async def test_task_button_starts_a_child_run_that_stops_at_the_steps_gate(
     assert seen == [("ребёнок", "assignment", "card")]
     assert chat.reply_quoted[0] is True
     root = tmp_path / "runs" / "ребёнок"
-    digest = steps_digest(Steps.model_validate_json(STEPS_DE))
-    assert chat.edits[-1] == f"{digest}\n\n{GATE_TAIL}"
+    steps = Steps.model_validate_json(STEPS_DE)
+    assert chat.edits[-1] == (
+        f"{steps_digest(steps)}\nВопросов без ответа: {len(steps.unanswered)}.\n\n{GATE_TAIL}"
+    )
+    assert chat.replies[1:] == [steps_copy_text(steps)]
     assert chat.documents == [root / STEPS_MD]
     assert store.stops[12].stage == "steps"
     assert store.status["ребёнок"] == AWAITING_GATE
@@ -4040,7 +4045,8 @@ async def test_without_questions_the_standards_line_stands_in_the_progress_messa
     after_clarify = chat.edits[1]
     assert after_clarify.endswith(standards_line(read_project(NO_STANDARDS)))
     assert "Стандарты проекта не заданы: шаги пишутся без стандартов проекта" in after_clarify
-    assert chat.replies[1:] == []
+    # Сообщения с вопросами нет вовсе: за ним сразу текст для копирования на воротах шагов.
+    assert chat.replies[1:] == [steps_copy_text(Steps.model_validate_json(STEPS_DE))]
 
 
 @pytest.mark.asyncio
@@ -4070,3 +4076,18 @@ async def test_found_standards_are_named_by_their_folder_and_files(
 
     assert "Стандарты проекта: project_frontend (STACK.md, TESTING.md)" in chat.replies[2]
     assert "Стандарты проекта не заданы" not in chat.replies[2]
+
+
+@pytest.mark.asyncio
+async def test_the_steps_gate_names_the_snapshot_when_the_standards_folder_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Шаги написаны по снимку двухдневной давности, и подтверждают их, зная об этом."""
+    a_task_asking_the_teamlead(tmp_path, monkeypatch, store, clarify=NO_QUESTIONS)
+    monkeypatch.setattr(settings, "project_context_dir", str(tmp_path / "нет-такого"))
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert standards_snapshot_line(read_project(NO_STANDARDS)) in chat.edits[-1]
+    assert "Вопросов без ответа: 2." in chat.edits[-1]

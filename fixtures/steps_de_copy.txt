@@ -1,0 +1,12 @@
+Login-Formular vor dem Absenden im Browser prüfen
+
+Die Felder des Login-Formulars im Browser prüfen, bevor etwas an den Server geht: E-Mail-Format und Pflichtfelder. Die API bleibt unverändert.
+
+1. Validierungsschema mit zod für E-Mail-Format und Pflichtfelder anlegen
+2. [уточнить: Frage 1] Schema über React Hook Form an das Login-Formular anbinden und Absenden mit Fehlern verhindern
+3. Fehlermeldung unter dem jeweiligen Feld anzeigen
+4. Prüfen, dass bei ungültigen Feldern keine Anfrage an die API geht
+
+❓ Gilt die Prüfung vor dem Absenden nur für das Login-Formular oder auch für das Registrierungsformular?
+
+❓ Werden für die Prüfung des Login-Formulars zusätzlich automatisierte Tests erwartet?

@@ -64,7 +64,7 @@ from app.pipeline import (
     route_of,
     stages_between,
 )
-from app.project import read_project
+from app.project import ProjectContextError, read_project
 from app.publish import ASSIGNMENTS_LIST, PublishedCard, journal_of
 from app.render import (
     backlog_digest,
@@ -74,10 +74,12 @@ from app.render import (
     review_lead,
     review_messages,
     standards_line,
+    standards_snapshot_line,
+    steps_copy_text,
     steps_digest,
 )
 from app.review import Review
-from app.run import Pause, Redo, Run, read_artifact, walk
+from app.run import Pause, Redo, Run, current_standards, read_artifact, walk
 from app.steps import Steps
 from app.store import (
     DROPPED,
@@ -124,7 +126,7 @@ logger = logging.getLogger("app.bot")
 RUNS = Path("runs")
 FIRST_STAGE = "ingest"
 TASK_ROUTE_START, TASK_ROUTE_END = "assignment", "card"
-CLARIFY_STAGE, ANSWERS_STAGE = "clarify", "answers"
+CLARIFY_STAGE, ANSWERS_STAGE, STEPS_STAGE = "clarify", "answers", "steps"
 IDEA_ROUTE_START = "handoff"
 # Журнал публикации лежит рядом с файлом, который путь кладёт на доску: у каждого пути свой.
 BOARD_CONTRACT = {TASK_ROUTE_START: STEPS_JSON, IDEA_ROUTE_START: ISSUES_JSON}
@@ -1376,6 +1378,13 @@ async def follow(
         # Но после кнопок и под тем же прикрытием, что и правки прогресса: строка уже стоит в
         # `awaiting_gate`, и сорванная отправка файла оставляла человека с одними галочками —
         # без содержания, без кнопок и без единого способа понять, чего от него ждут.
+        if ending.stop.stage == STEPS_STAGE:
+            # Текст для копирования отдельным сообщением и до файла: в нём ни подписей бота, ни
+            # кнопок, чтобы владелец мог показать его тимлиду как есть.
+            with suppress(TelegramError):
+                await note.reply_text(
+                    steps_copy_text(Steps.model_validate_json(read_artifact(run.root, STEPS_JSON)))
+                )
         with suppress(TelegramError):
             await note.reply_document(run.root / ending.stop.artifact)
     if ending.parked and run.assignment is not None:
@@ -1597,7 +1606,16 @@ def backlog_of(run: Run) -> str:
 
 
 def steps_of(run: Run) -> str:
-    return steps_digest(Steps.model_validate_json(read_artifact(run.root, STEPS_JSON)))
+    """Шаги на воротах: числа из steps.json и стандарты, если снимок прогона уже не свежий."""
+    steps = Steps.model_validate_json(read_artifact(run.root, STEPS_JSON))
+    lines = [steps_digest(steps), f"Вопросов без ответа: {len(steps.unanswered)}."]
+    try:
+        current_standards()
+    except ProjectContextError:
+        # Каталог перестал читаться между вопросами и шагами: шаги написаны по снимку, и
+        # владелец должен видеть, по какому, прежде чем подтвердить их кнопкой.
+        lines.append(standards_snapshot_line(read_project(read_artifact(run.root, PROJECT))))
+    return "\n".join(lines)
 
 
 def stopping(pause: Pause) -> StopKind:

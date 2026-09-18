@@ -19,12 +19,14 @@ from app.render import (
     questions_copy_text,
     questions_note,
     standards_line,
+    standards_snapshot_line,
+    steps_copy_text,
     steps_digest,
     steps_markdown,
     task_in_message,
 )
 from app.review import Quote, Review
-from app.steps import Steps
+from app.steps import Pair, Steps
 from pathlib import Path
 
 from tests.helpers import FIXTURES, REAL_BRIEF, real_issues
@@ -410,3 +412,52 @@ def test_found_standards_are_named_by_the_directory_and_the_files() -> None:
     frontend = read_project(project_snapshot(standards, TAKEN_AT))
 
     assert standards_line(frontend) == "Стандарты проекта: project_frontend (STACK.md, TESTING.md)"
+
+
+def test_the_copy_text_at_the_steps_gate_matches_the_snapshot() -> None:
+    expected = (FIXTURES / "steps_de_copy.txt").read_text(encoding="utf-8")
+
+    assert steps_copy_text(steps_de()) + "\n" == expected
+
+
+def test_the_copy_text_carries_nothing_but_the_task_in_the_language_of_the_meeting() -> None:
+    """Владелец показывает его тимлиду как есть: ни подписей бота, ни обращений, ни кнопок."""
+    written = steps_copy_text(steps_de())
+
+    assert not re.search("[а-яё]", written.replace("[уточнить:", ""), re.IGNORECASE)
+    assert "Дальше" not in written and "Поручение" not in written
+    assert written.startswith(steps_de().title.text)
+
+
+def test_the_copy_text_shows_the_questions_that_are_still_open_and_no_others() -> None:
+    steps = steps_de()
+    open_ones = [asked.text for asked in steps.questions if not asked.answered]
+    answered = next(asked.text for asked in steps.questions if asked.answered)
+
+    written = steps_copy_text(steps)
+
+    assert [line[2:] for line in written.splitlines() if line.startswith("❓ ")] == open_ones
+    assert answered not in written
+
+
+def test_the_copy_text_names_the_ticket_and_the_approach_when_they_are_there() -> None:
+    steps = steps_de()
+    assert steps.task is not None
+    with_ticket = steps.model_copy(
+        update={
+            "task": steps.task.model_copy(update={"ticket_key": "ABC-123"}),
+            "approach": Pair(text="React Hook Form mit zod", translation="React Hook Form и zod"),
+        }
+    )
+
+    written = steps_copy_text(with_ticket)
+
+    assert written.startswith(f"ABC-123 {steps.title.text}")
+    assert written.endswith("→ React Hook Form mit zod")
+
+
+def test_the_old_snapshot_is_named_by_the_day_it_was_taken() -> None:
+    """Каталог отвалился между вопросами и шагами: по какому снимку написаны шаги, видно."""
+    assert standards_snapshot_line(read_project(project_snapshot(None, TAKEN_AT))) == (
+        "Стандарты проекта: снимок от 17.09 10:02 UTC, каталог сейчас недоступен"
+    )

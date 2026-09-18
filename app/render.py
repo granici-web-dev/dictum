@@ -441,3 +441,42 @@ def questions_note(clarify: Clarify, number: int, project: Project) -> str:
         "вопросы без ответа останутся открытыми на шагах и на карточке.",
     ]
     return "\n".join(lines)
+
+
+# Разделов в тексте для копирования нет: заголовок на языке встречи потребовал бы словаря на
+# каждый язык, а от словаря проект отказался. Разделы различают первая строка, номера у шагов и
+# эти две пометки.
+UNANSWERED_MARK = "❓"
+APPROACH_MARK = "→"
+
+
+def steps_copy_text(steps: Steps) -> str:
+    """Шаги на языке встречи одним куском: владелец копирует его и показывает тимлиду сам.
+
+    Ни подписей бота, ни фраз-обращений: текст пишется владельцу, а кому и в каком виде его
+    показать, решает он. Вопросы самому владельцу (`open_questions`) сюда не идут — тимлиду они
+    не адресованы.
+    """
+    ticket = steps.task.ticket_key if steps.task else None
+    blocks = [
+        " ".join(filter(None, (ticket, steps.title.text))),
+        steps.summary.text,
+        "\n".join(f"{number}. {step.text}" for number, step in enumerate(steps.steps, start=1)),
+    ]
+    blocks += [
+        f"{UNANSWERED_MARK} {asked.text}" for asked in steps.questions if not asked.answered
+    ]
+    if steps.approach:
+        blocks.append(f"{APPROACH_MARK} {steps.approach.text}")
+    return "\n\n".join(blocks)
+
+
+SNAPSHOT_TAKEN_AT = "%d.%m %H:%M UTC"
+
+
+def standards_snapshot_line(project: Project) -> str:
+    """Каталог стандартов перестал читаться: шаги написаны по снимку, и по какому — видно."""
+    return (
+        f"Стандарты проекта: снимок от {project.taken_at:{SNAPSHOT_TAKEN_AT}}, "
+        "каталог сейчас недоступен"
+    )
