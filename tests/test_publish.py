@@ -8,6 +8,7 @@ import respx
 
 from app.config import InvalidProjectKey, LiveApiNotAllowed, MissingApiKey, settings
 from app.models import Issue, IssuesFile
+from app.pipeline import ANSWERS, APPROACH_JSON, SHAPE_PROMPT, STEPS_JSON
 from app.publish import (
     CardOutcome,
     PublishedCard,
@@ -671,9 +672,22 @@ STEPS_RUN = "7b2e0d91c4a3f615"
 
 
 def steps_file(directory: Path, change: Callable[[Steps], None] = lambda steps: None) -> Path:
+    """Каталог прогона поручения, как его оставил обход: шаги, ответ тимлида и ресёрч.
+
+    Раскладка настоящая (`inputs/`, `outputs/`), а не один файл в каталоге: задание для
+    `/rigorous shape` публикация собирает из соседних артефактов, и плоский каталог их не нашёл бы.
+    """
     steps = Steps.model_validate_json(STEPS_DE)
     change(steps)
-    path = directory / "steps.json"
+    (directory / "inputs").mkdir(parents=True, exist_ok=True)
+    (directory / "outputs").mkdir(parents=True, exist_ok=True)
+    (directory / ANSWERS).write_text(
+        (FIXTURES / "answers_de_partial.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (directory / APPROACH_JSON).write_text(
+        (FIXTURES / "approach_existing_de.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    path = directory / STEPS_JSON
     path.write_text(steps.model_dump_json(indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -877,6 +891,41 @@ def test_questions_the_teamlead_answered_do_not_reach_the_card(
     assert "Ask back" not in description
 
 
+def test_publishing_a_task_writes_the_shape_prompt_next_to_the_steps(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """Задание для `/rigorous shape` появляется вместе с карточкой, а не на воротах (SPEC §7.3)."""
+    publish_task(steps_file(tmp_path))
+
+    written = (tmp_path / SHAPE_PROMPT).read_text(encoding="utf-8")
+    assert written == (FIXTURES / "shape_prompt_de.md").read_text(encoding="utf-8")
+
+
+def test_the_card_description_carries_neither_the_research_nor_the_shape_prompt(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """Карточку владелец может показать тимлиду, а ресёрч и задание ему не предназначены."""
+    publish_task(steps_file(tmp_path))
+
+    description = task_card(board)["desc"]
+    assert "Research" not in description
+    assert "Plan this task" not in description
+    assert "React Hook Form mit zod-Schema über den Resolver" not in description
+
+
+def test_a_task_without_its_research_on_disk_fails_before_the_card(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """Вход задания читается до Trello: неполный прогон обязан упасть раньше карточки."""
+    path = steps_file(tmp_path)
+    (tmp_path / APPROACH_JSON).unlink()
+
+    with pytest.raises(OSError):
+        publish_task(path)
+
+    assert board.posted("/1/cards") == []
+
+
 def test_publishing_the_same_task_again_finds_its_card(board: FakeBoard, tmp_path: Path) -> None:
     path = steps_file(tmp_path)
     publish_task(path)
@@ -885,7 +934,7 @@ def test_publishing_the_same_task_again_finds_its_card(board: FakeBoard, tmp_pat
 
     assert len(board.posted("/1/cards")) == 1
     assert (again.key, again.status) == ("DCT-1", "existing")
-    journal = json.loads((tmp_path / "publish.json").read_text(encoding="utf-8"))
+    journal = json.loads((tmp_path / "outputs/publish.json").read_text(encoding="utf-8"))
     assert list(journal) == ["A1"]
 
 

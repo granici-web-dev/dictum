@@ -59,6 +59,7 @@ from app.pipeline import (
     PROJECT,
     REVIEW_JSON,
     REVIEW_MD,
+    SHAPE_PROMPT,
     STEPS_JSON,
     TRANSCRIPT,
     Stage,
@@ -1490,6 +1491,14 @@ async def follow(
         if ending.stop.stage == STEPS_STAGE and (run.root / APPROACH_MD).exists():
             with suppress(TelegramError):
                 await note.reply_document(run.root / APPROACH_MD)
+    if ending.status == PUBLISHED and route_end(start) == TASK_ROUTE_END:
+        # Задание для `/rigorous shape` ответом на сообщение с карточкой, а не в её описании:
+        # карточку владелец может показать тимлиду, а ресёрч и задание ему не предназначены.
+        # Прикрыто, как разбор: карточка уже на доске, и сорванная отправка её не отнимает.
+        prompt = read_artifact(run.root, SHAPE_PROMPT)
+        with suppress(TelegramError):
+            await note.reply_document(run.root / SHAPE_PROMPT)
+            logger.info("shape_prompt=sent run=%s chars=%d", run.run_id, len(prompt))
     if ending.parked and run.assignment is not None:
         await send_questions(answering or note, run.run_id, run.root, run.assignment)
     if ending.review is not None:

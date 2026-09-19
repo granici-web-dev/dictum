@@ -35,6 +35,7 @@ APPROACH_JSON = "outputs/approach.json"
 APPROACH_MD = "outputs/approach.md"
 STEPS_JSON = "outputs/steps.json"
 STEPS_MD = "outputs/steps.md"
+SHAPE_PROMPT = "outputs/shape_prompt.md"
 
 RESEARCH_SKIPPED = "Ресёрч не запускался: локальный прогон через make run-text.\n"
 # Что ложится в outputs/approach.json вместо вызова модели, когда человек выбрал шаги без

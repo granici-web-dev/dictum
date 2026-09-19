@@ -22,8 +22,12 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel
 
+from app.answers import read_answers
+from app.approach import Approach
 from app.config import ConfigError, InvalidProjectKey, settings
 from app.models import Area, Issue, IssuesFile, Phase
+from app.pipeline import ANSWERS, APPROACH_JSON, SHAPE_PROMPT
+from app.render import shape_prompt
 from app.review import Said
 from app.steps import Pair, Steps, TaskRef, schema_problems
 from app.trello import Trello, TrelloCard, TrelloChecklist, TrelloError, open_trello
@@ -478,6 +482,15 @@ def publish_task(steps_path: Path) -> CardOutcome:
     run_id = steps.run_id
     local_id = f"A{steps.task.number}"
     log_path = journal_of(steps_path)
+    root = steps_path.parent.parent
+    # Задание для `/rigorous shape` собирается до Trello: не хватает входа — прогон обязан
+    # упасть раньше карточки, а не после неё. На доску и в её описание оно не идёт: карточку
+    # владелец может показать тимлиду, а ресёрч и задание ему не предназначены (SPEC §6).
+    prompt = shape_prompt(
+        steps,
+        read_answers((root / ANSWERS).read_text(encoding="utf-8")),
+        Approach.model_validate_json((root / APPROACH_JSON).read_text(encoding="utf-8")),
+    )
 
     with closing(open_trello(settings.trello_board_id, "TRELLO_BOARD_ID")) as board:
         on_board = marked_cards(board.cards())
@@ -512,7 +525,8 @@ def publish_task(steps_path: Path) -> CardOutcome:
             key = f"{prefix}-{next_number(on_board, prefix)}"
             outcome = make_card(board, key, run_id, planned, published)
         write_log(log_path, published, [local_id])
-        return outcome
+    (root / SHAPE_PROMPT).write_text(prompt, encoding="utf-8")
+    return outcome
 
 
 def publish(issues_path: Path) -> list[CardOutcome]:

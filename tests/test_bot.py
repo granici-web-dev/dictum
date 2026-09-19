@@ -116,6 +116,7 @@ from app.pipeline import (
     NAMES,
     PROJECT,
     REVIEW_JSON,
+    SHAPE_PROMPT,
     REVIEW_MD,
     STEPS_JSON,
     STEPS_MD,
@@ -2896,8 +2897,11 @@ def card_of(number: int) -> dict[str, dict[str, str]]:
     }
 
 
+SHAPE_PROMPT_DE = (FIXTURES / "shape_prompt_de.md").read_text(encoding="utf-8")
+
+
 def walk_task(seen: list[tuple[str, str, str]]) -> Walking:
-    """Обход поручения: с воротами встаёт после шагов, до карточки кладёт журнал публикации."""
+    """Обход поручения: с воротами встаёт после шагов, до карточки кладёт журнал и задание."""
 
     def walking(
         run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
@@ -2920,6 +2924,8 @@ def walk_task(seen: list[tuple[str, str, str]]) -> Walking:
         (run.root / "outputs/publish.json").write_text(
             json.dumps(card_of(number)), encoding="utf-8"
         )
+        # Задание для /rigorous shape пишет публикация вместе с карточкой (SPEC §7.3).
+        (run.root / SHAPE_PROMPT).write_text(SHAPE_PROMPT_DE, encoding="utf-8")
         return None
 
     return walking
@@ -3096,6 +3102,48 @@ async def test_next_at_the_steps_gate_puts_one_card_on_the_board_and_links_it(
     assert chat.edits[-1] == (
         "Готово: карточка DCT-42 в списке Assignments.\nhttps://trello.com/c/card1"
     )
+
+
+@pytest.mark.asyncio
+async def test_next_at_the_steps_gate_answers_the_card_with_the_shape_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Задание уходит файлом ответом на карточку: в её описании его не место (SPEC §7.3)."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_task([]))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "ребёнок")
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_gate_button("ребёнок", "next", stage="steps")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.documents == [tmp_path / "runs" / "ребёнок" / SHAPE_PROMPT]
+    assert f"shape_prompt=sent run=ребёнок chars={len(SHAPE_PROMPT_DE)}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_shape_prompt_that_did_not_reach_the_chat_leaves_the_task_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Карточка уже на доске, и сорванный файл её не отнимает."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    gates_on(monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_task([]))
+    monkeypatch.setattr(bot, "new_run_id", lambda: "ребёнок")
+    await on_child_button(a_press(a_task_button()), NO_CONTEXT)
+    chat = a_gate_button("ребёнок", "next", stage="steps")
+    chat.document_fails = True
+
+    await on_gate_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.documents == []
+    assert store.status["ребёнок"] == PUBLISHED
+    assert chat.edits[-1] == CARD_FINISHED.format(key="DCT-42", url="https://trello.com/c/card1")
 
 
 @pytest.mark.asyncio
@@ -3821,6 +3869,7 @@ def walk_teamlead(
         (run.root / "outputs/publish.json").write_text(
             json.dumps(card_of(run.assignment or 1)), encoding="utf-8"
         )
+        (run.root / SHAPE_PROMPT).write_text(SHAPE_PROMPT_DE, encoding="utf-8")
         return None
 
     return walking
