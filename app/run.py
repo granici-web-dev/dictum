@@ -55,7 +55,7 @@ from app.stages import (
     previous_answer,
     run_stage,
 )
-from app.steps import assignment_of, meeting_lang_of
+from app.steps import assignment_of
 from app.transcribe import transcribe
 
 logger = logging.getLogger(__name__)
@@ -204,11 +204,7 @@ def assignment_body(run: Run) -> dict[str, str]:
         raise ValueError(f"Прогон {run.run_id} не знает разбора, из которого взять поручение")
     review = Review.model_validate_json(read_artifact(run.parent_root, REVIEW_JSON))
     built = assignment_of(
-        review,
-        run.assignment,
-        run.run_id,
-        run.parent_run_id,
-        meeting_lang_of(run.source, run.lang, review.meeting_lang),
+        review, run.assignment, run.run_id, run.parent_run_id, run.source, run.lang
     )
     # Заданный, но сломанный каталог роняет прогон до вызова модели: владелец рассчитывает на
     # стандарты, и тихий прогон без них потратил бы деньги на шаги не по его стеку.

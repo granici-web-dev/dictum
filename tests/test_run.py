@@ -48,7 +48,7 @@ from app.run import (
 )
 from app.project import project_snapshot, read_project, read_standards
 from app.stages import StageError
-from app.steps import Assignment, Steps
+from app.steps import Assignment, ReviewUnusable, Steps
 from app.transcribe import Transcription
 from tests.helpers import (
     FIXTURES,
@@ -666,20 +666,36 @@ def test_a_text_parent_gives_the_steps_the_language_its_review_named(
     assert '"meeting_lang": "de"' in request_body(requests[0])["messages"][0]["content"]
 
 
-def test_a_review_that_named_no_language_leaves_a_text_task_without_one(
+def test_a_text_task_from_a_review_without_a_language_fails_before_the_model(
     llm: InstallResponses, tmp_path: Path
 ) -> None:
-    """Разбор до P3-11 языка не называл, и его текст остаётся без языка встречи, как было."""
+    """Разбор до P3-11 языка не называл, и шаги вышли бы на языке владельца (SPEC §7.3)."""
+    parent = a_review_on_disk(tmp_path / "parent")
+    older = json.loads(read_artifact(parent, REVIEW_JSON))
+    del older["meeting_lang"]
+    (parent / REVIEW_JSON).write_text(json.dumps(older, ensure_ascii=False), encoding="utf-8")
+    requests = llm([])
+
+    with pytest.raises(ReviewUnusable, match="нет языка встречи"):
+        walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
+
+    assert requests == []
+
+
+def test_a_recording_from_a_review_without_a_language_keeps_the_one_whisper_named(
+    llm: InstallResponses, tmp_path: Path
+) -> None:
+    """Язык записи называет Whisper, и старый разбор голосового пути не касается."""
     parent = a_review_on_disk(tmp_path / "parent")
     older = json.loads(read_artifact(parent, REVIEW_JSON))
     del older["meeting_lang"]
     (parent / REVIEW_JSON).write_text(json.dumps(older, ensure_ascii=False), encoding="utf-8")
     llm([ok(clarify_answer()), searched(approach_answer()), ok(steps_answer())])
 
-    walk(a_task_run(tmp_path / "child", parent, "text"), "assignment", "steps")
+    walk(a_task_run(tmp_path / "child", parent, "voice"), "assignment", "steps")
 
     assignment = json.loads(read_artifact(tmp_path / "child", ASSIGNMENT_JSON))
-    assert assignment["meeting_lang"] is None
+    assert assignment["meeting_lang"] == "de"
 
 
 def test_an_assignment_without_the_review_of_its_parent_fails_before_the_model(

@@ -120,11 +120,20 @@ def meeting_lang_of(source: Source, lang: str, named_by_review: str | None) -> s
 
 
 def assignment_of(
-    review: Review, number: int, run_id: str, parent_run_id: str, meeting_lang: str | None
+    review: Review, number: int, run_id: str, parent_run_id: str, source: Source, lang: str
 ) -> Assignment:
     if review.owner_lang is None:
         raise ReviewUnusable(
             f"в разборе {parent_run_id} нет owner_lang: файл правили руками, повторите разбор"
+        )
+    meeting_lang = meeting_lang_of(source, lang, review.meeting_lang)
+    # Разбор текста до P3-11 языка встречи не называет, и `lang` прогона у текста это не язык:
+    # шаги такого поручения вышли бы на языке владельца с пустым переводом вместо языка встречи
+    # (живой прогон 072282f7103dc014). Отказ стоит здесь, до первого платного вызова.
+    if meeting_lang is None:
+        raise ReviewUnusable(
+            f"в разборе {parent_run_id} нет языка встречи: разбор сделан до того, как бот начал "
+            "называть язык встречи, пришлите текст заново"
         )
     if not 1 <= number <= len(review.tasks):
         raise ReviewUnusable(

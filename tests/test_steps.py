@@ -79,24 +79,33 @@ def stamped(
 def test_the_assignment_fixture_is_task_one_of_the_german_review() -> None:
     review = Review.model_validate_json(REVIEW_DE)
 
-    built = assignment_of(review, 1, CHILD, PARENT, "de")
+    built = assignment_of(review, 1, CHILD, PARENT, "text", "ru")
 
     assert (built.number, built.owner_lang, built.meeting_lang) == (1, "ru", "de")
     assert built.task == review.tasks[0]
     assert built.model_dump_json(indent=2) + "\n" == ASSIGNMENT_DE
 
 
-def test_the_assignment_carries_the_meeting_language_it_was_given() -> None:
-    """У текста язык встречи никто не распознавал: null, а не DEFAULT_LANG."""
+def test_the_assignment_takes_the_meeting_language_from_whisper_for_a_recording() -> None:
+    """У голосового и записи язык называет Whisper, и разбор его не перебивает."""
     review = Review.model_validate_json(REVIEW_DE)
 
-    assert assignment_of(review, 2, CHILD, PARENT, None).meeting_lang is None
+    assert assignment_of(review, 2, CHILD, PARENT, "voice", "ru").meeting_lang == "ru"
+
+
+def test_a_text_review_that_never_named_the_meeting_language_is_refused() -> None:
+    """Разбор текста до P3-11 языка не называл, и шаги вышли бы на языке владельца (SPEC §7.3)."""
+    review = Review.model_validate_json(REVIEW_DE)
+    review.meeting_lang = None
+
+    with pytest.raises(ReviewUnusable, match="нет языка встречи"):
+        assignment_of(review, 1, CHILD, PARENT, "text", "ru")
 
 
 @pytest.mark.parametrize("number", [0, 3])
 def test_a_number_outside_the_review_is_refused(number: int) -> None:
     with pytest.raises(ReviewUnusable, match=f"номер {number}"):
-        assignment_of(Review.model_validate_json(REVIEW_DE), number, CHILD, PARENT, "de")
+        assignment_of(Review.model_validate_json(REVIEW_DE), number, CHILD, PARENT, "text", "ru")
 
 
 def test_a_review_without_the_owner_language_is_refused() -> None:
@@ -105,7 +114,7 @@ def test_a_review_without_the_owner_language_is_refused() -> None:
     review.owner_lang = None
 
     with pytest.raises(ReviewUnusable, match="owner_lang"):
-        assignment_of(review, 1, CHILD, PARENT, "de")
+        assignment_of(review, 1, CHILD, PARENT, "text", "ru")
 
 
 def test_the_german_steps_pass_the_check() -> None:
@@ -260,7 +269,7 @@ def test_the_stamp_carries_the_ticket_and_its_acceptance_criteria_from_the_revie
     review = Review.model_validate_json(
         (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
     )
-    ticket_assignment = assignment_of(review, 1, CHILD, PARENT, None)
+    ticket_assignment = assignment_of(review, 1, CHILD, PARENT, "text", "ru")
 
     result = stamped(model_answer(), ticket_assignment)
 

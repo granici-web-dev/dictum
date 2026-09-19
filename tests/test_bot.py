@@ -56,6 +56,7 @@ from app.bot import (
     ALREADY_PUBLISHED,
     CARD_FINISHED,
     PARENT_GONE,
+    REVIEW_WITHOUT_MEETING_LANG,
     QUESTIONS_PARKED,
     REPLY_NOT_QUESTIONS,
     STALE_REPLY,
@@ -2867,15 +2868,17 @@ def a_review_in_chat(
     store: FakeStore,
     status: str = REVIEWED,
     chat_id: int = 12,
+    source: Source = "voice",
+    review: str = REVIEW_DE,
 ) -> Path:
     """Разбор голосового, законченный в чате: строка в базе и review.json на диске."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    store.start_run(PARENT, chat_id, "voice", "de", False, None, "ingest")
+    store.start_run(PARENT, chat_id, source, "de", False, None, "ingest")
     store.status[PARENT] = status
     root = tmp_path / "runs" / PARENT
     (root / "outputs").mkdir(parents=True)
-    (root / REVIEW_JSON).write_text(REVIEW_DE, encoding="utf-8")
+    (root / REVIEW_JSON).write_text(review, encoding="utf-8")
     return root
 
 
@@ -3136,6 +3139,49 @@ async def test_task_button_of_a_review_whose_files_are_gone_says_so(
     assert chat.replies == [PARENT_GONE]
     assert "refusal=parent_gone chat=12 run=разбор task=1" in caplog.text
     assert store.children == {}
+
+
+@pytest.mark.asyncio
+async def test_task_button_of_a_text_review_without_the_meeting_language_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Разбор текста до P3-11 языка встречи не называл, а кнопка под ним осталась (SPEC §7.3)."""
+    older = json.loads(REVIEW_DE)
+    del older["meeting_lang"]
+    a_review_in_chat(
+        tmp_path, monkeypatch, store, source="text", review=json.dumps(older, ensure_ascii=False)
+    )
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [REVIEW_WITHOUT_MEETING_LANG]
+    assert "refusal=review_without_lang chat=12 run=разбор task=1" in caplog.text
+    assert store.children == {}
+
+
+@pytest.mark.asyncio
+async def test_task_button_of_a_voice_review_without_the_meeting_language_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Язык записи назвал Whisper, и старый разбор голосового пути не касается."""
+    older = json.loads(REVIEW_DE)
+    del older["meeting_lang"]
+    a_review_in_chat(
+        tmp_path, monkeypatch, store, review=json.dumps(older, ensure_ascii=False)
+    )
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert REVIEW_WITHOUT_MEETING_LANG not in chat.replies
+    assert list(store.children.values()) == [(PARENT, 1)]
 
 
 @pytest.mark.asyncio

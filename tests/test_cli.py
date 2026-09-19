@@ -629,6 +629,33 @@ def test_task_writes_the_assignment_under_a_run_id_of_its_own_and_stops_at_the_s
     assert STEPS_MD in caplog.text
 
 
+def test_a_task_from_a_text_review_without_the_meeting_language_is_a_usage_error(
+    llm: InstallResponses,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Разбор текста до P3-11 языка встречи не называл: отказ до первого платного вызова."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "inputs").mkdir(parents=True)
+    (tmp_path / TRANSCRIPT).write_text(
+        build_transcript("Erstens das Login-Formular.", "ru", MEETING_RUN, "text", None, None),
+        encoding="utf-8",
+    )
+    (tmp_path / "outputs").mkdir()
+    older = json.loads((FIXTURES / "review_de.json").read_text(encoding="utf-8"))
+    del older["meeting_lang"]
+    (tmp_path / REVIEW_JSON).write_text(json.dumps(older, ensure_ascii=False), encoding="utf-8")
+    requests = llm([])
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--task", "1"])
+
+    assert exit_info.value.code == EXIT_USAGE
+    assert "нет языка встречи" in capsys.readouterr().err
+    assert requests == []
+
+
 @pytest.mark.parametrize(
     ("argv", "with_review"),
     [

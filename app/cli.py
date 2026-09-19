@@ -36,7 +36,7 @@ from app.pipeline import (
 from app.review import Review
 from app.run import Run, missing_before, read_artifact, walk, write_artifact
 from app.stages import StageError
-from app.steps import Assignment, ReviewUnusable, assignment_of, meeting_lang_of
+from app.steps import Assignment, ReviewUnusable, assignment_of
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
 # "__main__", мимо дерева "app", которому в конце файла поднимают уровень до INFO. С __name__
@@ -149,13 +149,7 @@ def task_run(parser: CommandLineParser, number: int, research: bool) -> Run:
     # Номер вне разбора проверяется до обхода: иначе прогон упал бы стадией, а это ошибка запуска.
     try:
         review = Review.model_validate_json(read_artifact(Path("."), REVIEW_JSON))
-        assignment_of(
-            review,
-            number,
-            run.run_id,
-            run.parent_run_id,
-            meeting_lang_of(run.source, run.lang, review.meeting_lang),
-        )
+        assignment_of(review, number, run.run_id, run.parent_run_id, run.source, run.lang)
     except ValidationError as error:
         parser.error(f"{REVIEW_JSON} не проходит схему: {error}")
     except ReviewUnusable as error:

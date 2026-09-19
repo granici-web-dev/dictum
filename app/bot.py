@@ -85,7 +85,7 @@ from app.render import (
 )
 from app.review import Review
 from app.run import Pause, Redo, Run, current_standards, read_artifact, walk
-from app.steps import Steps
+from app.steps import Steps, meeting_lang_of
 from app.store import (
     DROPPED,
     FAILED,
@@ -353,6 +353,13 @@ IDEA_BOARD_MISSING = (
 
 PARENT_GONE = (
     "Файлы этого разбора удалены с диска, кнопка больше не работает. Пришлите запись заново."
+)
+
+# Разбор текста до P3-11 языка встречи не называл, и шаги такого поручения вышли бы на языке
+# владельца вместо языка встречи. Кнопки под такими разборами живут в чате владельца (SPEC §7.3).
+REVIEW_WITHOUT_MEETING_LANG = (
+    "Этот разбор сделан до того, как бот начал называть язык встречи, и шаги вышли бы не на том "
+    "языке. Пришлите текст встречи заново — новый разбор язык назовёт."
 )
 
 ALREADY_PUBLISHED = "Поручение {number} уже на доске: карточка {key}.\n{url}"
@@ -1142,6 +1149,15 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.info("questions=resent run=%s chat=%s", child.run_id, message.chat_id)
             await send_questions(message, child.run_id, RUNS / child.run_id, number)
             return
+        if number is not None and not names_meeting_lang(parent):
+            await refuse(
+                message,
+                "review_without_lang",
+                REVIEW_WITHOUT_MEETING_LANG,
+                run=parent_id,
+                task=number,
+            )
+            return
         first = IDEA_ROUTE_START if number is None else TASK_ROUTE_START
         if child is None:
             run = child_run(
@@ -1188,6 +1204,16 @@ async def on_child_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Вопросы для тимлида уходят ответом на само поручение, а не на сообщение о ходе прогона:
         # так первое нажатие и повторное отвечают в одно место.
         await follow(note, run, datetime.now(timezone.utc), start, answering=message)
+
+
+def names_meeting_lang(parent: Parent) -> bool:
+    """Знает ли разбор язык встречи: у голосового и записи его назвал Whisper, у текста — разбор.
+
+    Проверяется до заведения прогона, потому что стадия `assignment` на таком разборе откажет
+    (`app.steps.assignment_of`), а человеку нужен не сорванный прогон, а что делать дальше.
+    """
+    review = Review.model_validate_json(read_artifact(RUNS / parent.run_id, REVIEW_JSON))
+    return meeting_lang_of(parent.source, parent.lang, review.meeting_lang) is not None
 
 
 async def refuse_published(
