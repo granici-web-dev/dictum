@@ -811,7 +811,7 @@ def test_the_research_tool_is_called_directly_with_the_limit_of_its_mode(
         {
             "type": "web_search_20260318",
             "name": "web_search",
-            "max_uses": 3,
+            "max_uses": 2,
             "allowed_callers": ["direct"],
         }
     ]

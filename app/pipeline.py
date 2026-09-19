@@ -200,7 +200,7 @@ STAGES: tuple[Stage, ...] = (
         runs="llm",
         inputs=(ASSIGNMENT_JSON, CLARIFY_JSON, ANSWERS, PROJECT),
         outputs=(frozenset({APPROACH_JSON}),),
-        web_search=WebSearch(max_uses_with_stack=3, max_uses_without_stack=5),
+        web_search=WebSearch(max_uses_with_stack=2, max_uses_without_stack=5),
         skipped_output=(APPROACH_JSON, APPROACH_SKIPPED),
     ),
     # Язык встречи стадия берёт из assignment.json, а не `lang` прогона: у текста это не язык.
