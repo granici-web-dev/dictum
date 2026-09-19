@@ -44,6 +44,7 @@ from app.approach import Approach
 from app.candidates import Candidates, Idea, parse_candidates
 from app.clarify import Clarify, has_questions
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
+from app.deliver import BARE, IDEA, idea_keyboard, send_tasks_and_documents
 from app.dialog import budget_spent
 from app.ingest import Source, new_run_id
 from app.models import IssuesFile
@@ -58,7 +59,6 @@ from app.pipeline import (
     NAMES,
     PROJECT,
     REVIEW_JSON,
-    REVIEW_MD,
     SHAPE_PROMPT,
     STEPS_JSON,
     TRANSCRIPT,
@@ -78,7 +78,6 @@ from app.render import (
     questions_note,
     research_line,
     review_lead,
-    review_messages,
     standards_line,
     standards_snapshot_line,
     steps_copy_text,
@@ -285,14 +284,6 @@ STOP_ALIVE = (
     "затем повторите."
 )
 
-TASK_BUTTON = "Разложить на шаги"
-
-# Вторая кнопка под тем же поручением: решение о ресёрче принимается по задаче и на глазах у неё,
-# а не режимом чата, который забылся бы включённым.
-BARE = "bare"
-
-TASK_BARE_BUTTON = "Шаги без ресёрча"
-
 # Вопросы для тимлида (P3-11). Прогон не занимает места остановки: пока тимлид молчит, чат
 # принимает новые записи и другие поручения, поэтому сообщение о ходе прогона говорит об этом
 # вслух — иначе парковка неотличима от повисшего прогона.
@@ -323,10 +314,6 @@ QUESTIONS_BUTTONS = (
     (QUESTIONS_WITHOUT, "Продолжить без ответов"),
     (QUESTIONS_STOP, "Стоп"),
 )
-
-IDEA = "idea"
-
-IDEA_BUTTON = "Проработать как идею"
 
 # Отказ до замка и до строки: без доски путь идеи оплатил бы бриф, PRD и декомпозицию, чтобы
 # упасть на публикации.
@@ -1445,31 +1432,12 @@ async def follow(
     if ending.parked and run.assignment is not None:
         await send_questions(answering or note, run.run_id, run.root, run.assignment)
     if ending.review is not None:
-        await send_review(note, run, ending.review)
+        await send_tasks_and_documents(note, run.run_id, run.root, ending.review)
     # Сколько человек прождал ответа: отчёт серии живых прогонов (P2-06) отвечает на этот вопрос
     # числом, а из длительностей стадий его не сложить — между ними скачивание, публикация и
     # правки.
     waited = datetime.now(timezone.utc) - asked_at
     logger.info("run=%s seconds=%d", run.run_id, round(waited.total_seconds()))
-
-
-async def send_review(note: Message, run: Run, review: Review) -> None:
-    """Поручения сообщениями в порядке встречи, затем разбор и расшифровка файлами (SPEC §7.3).
-
-    Строка уже закрыта, и каждая отправка прикрыта отдельно: сорванное сообщение одного
-    поручения не должно отнять у человека остальные и расшифровку, по которой их проверяют.
-    Расшифровка уходит и при пустом разборе: «заданий нет» проверяют как раз по ней.
-    """
-    for number, parts in enumerate(review_messages(review), start=1):
-        for text in parts[:-1]:
-            with suppress(TelegramError):
-                await note.reply_text(text)
-        # Кнопка на последней части: под ней поручение уже прочитано целиком.
-        with suppress(TelegramError):
-            await note.reply_text(parts[-1], reply_markup=task_keyboard(run.run_id, number))
-    for document in (REVIEW_MD, TRANSCRIPT):
-        with suppress(TelegramError):
-            await note.reply_document(run.root / document)
 
 
 def done_before(start: str) -> list[str]:
@@ -1630,12 +1598,6 @@ def gate_keyboard(run_id: str, stage: str) -> InlineKeyboardMarkup:
     )
 
 
-def idea_keyboard(run_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(IDEA_BUTTON, callback_data=f"{IDEA}:{run_id}")]]
-    )
-
-
 def questions_keyboard(run_id: str) -> InlineKeyboardMarkup:
     # Кнопка называет прогон, но не место: вопросы у прогона одни, второго круга не бывает.
     return InlineKeyboardMarkup(
@@ -1643,19 +1605,6 @@ def questions_keyboard(run_id: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(title, callback_data=f"asked:{run_id}:{decision}")
                 for decision, title in QUESTIONS_BUTTONS
-            ]
-        ]
-    )
-
-
-def task_keyboard(run_id: str, number: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(TASK_BUTTON, callback_data=f"task:{run_id}:{number}"),
-                InlineKeyboardButton(
-                    TASK_BARE_BUTTON, callback_data=f"task:{run_id}:{number}:{BARE}"
-                ),
             ]
         ]
     )

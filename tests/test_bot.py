@@ -17,7 +17,7 @@ from telegram import Audio, Document, InlineKeyboardMarkup, Message, Update, Voi
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
-from app import bot
+from app import bot, deliver
 from app.answers import Answers, answers_file, read_answers
 from app.bot import (
     ANSWERS_STAGE,
@@ -57,14 +57,11 @@ from app.bot import (
     QUESTIONS_PARKED,
     REPLY_NOT_QUESTIONS,
     STALE_REPLY,
-    TASK_BARE_BUTTON,
-    TASK_BUTTON,
     TASK_ROUTE_END,
     TASK_ROUTE_START,
     TASK_FILES_GONE,
     IDEA_ALREADY_PUBLISHED,
     IDEA_BOARD_MISSING,
-    IDEA_BUTTON,
     LABEL,
     VOICE_INGEST_LABEL,
     VOICE_NOT_TAKEN,
@@ -95,6 +92,7 @@ from app.bot import (
     started_run,
 )
 from app.candidates import parse_candidates
+from app.deliver import IDEA_BUTTON, TASK_BARE_BUTTON, TASK_BUTTON
 from app.clarify import Clarify
 from app.config import ConfigError, MissingApiKey, settings
 from app.ingest import Source
@@ -322,6 +320,16 @@ class FakeStore:
             return None
         self.status[left.run_id] = DROPPED
         return left.run_id
+
+
+@pytest.fixture(autouse=True)
+def without_pauses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Темп доставки проверяет tests/test_deliver.py; здесь он только тратил бы секунды."""
+
+    async def at_once() -> None:
+        return None
+
+    monkeypatch.setattr(deliver, "wait_between_task_messages", at_once)
 
 
 @pytest.fixture(autouse=True)
