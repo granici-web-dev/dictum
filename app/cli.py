@@ -51,7 +51,7 @@ from app.review import Review
 from app.run import Run, missing_before, read_artifact, walk, write_artifact
 from app.stages import StageError
 from app.steps import Assignment, ReviewUnusable, assignment_of
-from app.store import NO_TASK, REVIEWED, ensure_schema, start_run
+from app.store import NO_TASK, REVIEWED, ensure_schema, parent_of, start_run
 from app.transcribe import (
     FFMPEG_MISSING,
     FFPROBE_MISSING,
@@ -515,15 +515,18 @@ def meeting_run(given: str | None, asked_chat: str | None, resumed: str | None) 
     review = Review.model_validate_json(read_artifact(root, REVIEW_JSON))
     # Строка заводится один раз и сразу законченной: в рабочем статусе она не бывает ни секунды,
     # и уборка бота на старте (`fail_orphans`) не может счесть локальный прогон сорванным.
-    start_run(
-        run_id,
-        chat_id,
-        "file",
-        run.lang,
-        auto_approve=True,
-        consent_confirmed=True,
-        status=REVIEWED if review.tasks else NO_TASK,
-    )
+    # Второй раз её не пишут: `make meeting RUN=<id>` по прогону, который дошёл до конца, —
+    # это повторная доставка, а не второй прогон, и падать на первичном ключе ему незачем.
+    if parent_of(run_id, chat_id) is None:
+        start_run(
+            run_id,
+            chat_id,
+            "file",
+            run.lang,
+            auto_approve=True,
+            consent_confirmed=True,
+            status=REVIEWED if review.tasks else NO_TASK,
+        )
     logger.info("run=%s reviewed tasks=%d", run_id, len(review.tasks))
     return deliver_meeting(chat_id, run_id, root)
 

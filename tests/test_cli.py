@@ -890,6 +890,7 @@ def meeting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SentReview:
     monkeypatch.setattr(cli, "installed", lambda tool: True)
     monkeypatch.setattr(cli, "ensure_schema", lambda: None)
     monkeypatch.setattr(cli, "start_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "parent_of", lambda run_id, chat_id: None)
     monkeypatch.setattr(cli, "recording_seconds", lambda path: 3600)
     sent = SentReview()
     monkeypatch.setattr(cli, "deliver_meeting", sent.deliver)
@@ -903,9 +904,13 @@ def a_recording(tmp_path: Path) -> Path:
 
 
 def walking_to_a_review(review_json: str = REVIEW_DE) -> Callable[..., None]:
+    """Обход, который кладёт то же, что кладёт настоящий: расшифровку и разбор."""
+
     def walking(
         run: Run, start: str, stop: str, on_done: Callable[[Stage], None] = lambda stage: None
     ) -> None:
+        if start == "ingest":
+            transcript_of_an_earlier_run(run.root)
         (run.root / "outputs").mkdir(parents=True, exist_ok=True)
         (run.root / REVIEW_JSON).write_text(review_json, encoding="utf-8")
 
@@ -1161,3 +1166,22 @@ def test_meeting_row_is_never_written_in_a_working_status(
     assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_OK
 
     assert swept == [[]]
+
+
+@pytest.mark.db
+@pytest.mark.timeout(30)
+def test_meeting_on_a_finished_run_delivers_instead_of_writing_the_row_twice(
+    db: None, meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RUN=<id> по дошедшему до конца прогону — повторная доставка, а не второй прогон."""
+    monkeypatch.setattr(cli, "start_run", store.start_run)
+    monkeypatch.setattr(cli, "parent_of", store.parent_of)
+    Terminal("да").install(monkeypatch)
+    monkeypatch.setattr(cli, "walk", walking_to_a_review())
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_OK
+    [(_, run_id)] = meeting.calls
+
+    assert main(["--run", run_id]) == EXIT_OK
+
+    assert meeting.calls == [(12, run_id), (12, run_id)]
