@@ -342,6 +342,31 @@ def search_result_urls(response: Message) -> set[str]:
     return urls
 
 
+def results_in_context(response: Message) -> int:
+    """Сколько результатов поиска легло в контекст модели.
+
+    Считаются только результаты прямого вызова: у блока с `caller` кода они уходят
+    фильтрующему коду в песочницу, а до модели не доходят — ровно так дефект живой проверки
+    части E и остался незаметным (SPEC §7). Ошибка поиска приходит объектом вместо списка.
+    """
+    return sum(
+        len(block.content)
+        for block in response.content
+        if block.type == "web_search_tool_result"
+        and isinstance(block.content, list)
+        and (block.caller is None or block.caller.type == "direct")
+    )
+
+
+def citations_made(response: Message) -> int:
+    """Сколько раз текст ответа сослался на найденную страницу."""
+    return sum(
+        sum(1 for citation in block.citations if citation.type == "web_search_result_location")
+        for block in response.content
+        if block.type == "text" and block.citations
+    )
+
+
 def search_queries(response: Message) -> list[str]:
     """Запросы, ушедшие в поиск. Владелец должен видеть, что именно ушло наружу (SPEC §8)."""
     return [
@@ -389,6 +414,10 @@ class ModelTurn(BaseModel):
     duration_ms: int
     urls: set[str] = Field(default_factory=set)
     queries: list[str] = Field(default_factory=list)
+    # Результаты, дошедшие до контекста модели, и цитаты на них: по этой паре видно, что поиск
+    # был не только оплачен, но и прочитан (SPEC §7).
+    results: int = 0
+    citations: int = 0
 
 
 def ask_once(
@@ -455,7 +484,7 @@ def ask_model(
     единой правки. Пауза может повториться сколько угодно раз, и предел ставим мы.
     """
     paused: list[Message] = []
-    input_tokens = output_tokens = duration_ms = 0
+    input_tokens = output_tokens = duration_ms = results = citations = 0
     urls: set[str] = set()
     queries: list[str] = []
     while True:
@@ -466,6 +495,8 @@ def ask_model(
         duration_ms += step_ms
         urls |= search_result_urls(response)
         queries += search_queries(response)
+        results += results_in_context(response)
+        citations += citations_made(response)
         if response.stop_reason != "pause_turn":
             return ModelTurn(
                 response=response,
@@ -475,6 +506,8 @@ def ask_model(
                 duration_ms=duration_ms,
                 urls=urls,
                 queries=queries,
+                results=results,
+                citations=citations,
             )
         if len(paused) == MAX_SEARCH_CONTINUATIONS:
             raise StageError(
@@ -554,6 +587,8 @@ def run_stage(
     duration_ms = turn.duration_ms
     searched = turn.urls
     queries = turn.queries
+    results = turn.results
+    citations = turn.citations
 
     problems = repairable_problems(stage, files, outputs, inputs, given_params)
     if stage == "review" and frozenset(files) in outputs:
@@ -585,6 +620,8 @@ def run_stage(
         output_tokens += repair.output_tokens
         searched |= repair.urls
         queries += repair.queries
+        results += repair.results
+        citations += repair.citations
         response = repair.response
         if stage == "approach":
             log_query_leaks(run_id, repair.queries, assignment)
@@ -618,12 +655,20 @@ def run_stage(
             files[APPROACH_JSON], assignment, assignment_and_answers, project, searched, queries
         )
         approach = Approach.model_validate_json(files[APPROACH_JSON])
-        # По этой строке живые прогоны считают, как часто модель придумывает ссылку.
-        logger.info(
-            "stage=approach run=%s mode=%s searches=%d sources=%d unverified=%d",
+        # По этой строке живые прогоны считают, как часто модель придумывает ссылку. Оплаченный
+        # поиск без результатов и без цитат — это ресёрч по памяти, и он идёт предупреждением:
+        # живая проверка части E три часа выглядела удачной именно потому, что этой пары в
+        # строке не было (SPEC §7).
+        blind = bool(approach.searches) and not (results and citations)
+        logger.log(
+            logging.WARNING if blind else logging.INFO,
+            "stage=approach run=%s mode=%s searches=%d results=%d citations=%d "
+            "sources=%d unverified=%d",
             run_id,
             approach.mode,
             len(approach.searches),
+            results,
+            citations,
             len(approach.sources),
             unverified_sources(approach),
         )

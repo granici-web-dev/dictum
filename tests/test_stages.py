@@ -36,6 +36,7 @@ from tests.helpers import (
     approach_answer,
     clarify_answer,
     decompose_answer,
+    filtered_search,
     ok,
     paused_search,
     real_issues,
@@ -816,3 +817,43 @@ def test_the_research_tool_is_called_directly_with_the_limit_of_its_mode(
         }
     ]
     assert request_body(requests[1])["tools"][0]["max_uses"] == 5
+
+
+def approach_line(caplog: pytest.LogCaptureFixture) -> logging.LogRecord:
+    [line] = [record for record in caplog.records if " mode=" in record.getMessage()]
+    return line
+
+
+def without_sources(data: dict[str, Any]) -> None:
+    """Ресёрч, который ничего не нашёл: выводы остались мнением без единого источника."""
+    data["sources"] = []
+    data["recommendation"]["sources"] = []
+    for option in data["options"]:
+        option["sources"] = []
+
+
+def test_the_research_line_counts_the_results_that_reached_the_model_and_the_citations(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    llm([searched(approach_answer())])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("approach", APPROACH_INPUTS, RUN)
+
+    line = approach_line(caplog)
+    assert line.levelno == logging.INFO
+    assert "searches=2 results=2 citations=2 sources=3 unverified=0" in line.getMessage()
+
+
+def test_paid_searches_without_results_or_citations_are_a_warning(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Так выглядел ресёрч части E: поиски оплачены, а ответ написан по памяти (SPEC §7)."""
+    llm([filtered_search(approach_answer(change=without_sources))])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("approach", APPROACH_INPUTS, RUN)
+
+    line = approach_line(caplog)
+    assert line.levelno == logging.WARNING
+    assert "searches=1 results=0 citations=0 sources=0 unverified=0" in line.getMessage()

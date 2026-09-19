@@ -327,6 +327,21 @@ def searched(text: str, requests: int = 2) -> httpx2.Response:
     return httpx2.Response(200, json=body)
 
 
+def filtered_search(text: str, requests: int = 1) -> httpx2.Response:
+    """Ответ фильтрующего режима: запрос ушёл, а результаты остались у кода в песочнице.
+
+    Так выглядел ресёрч живой проверки части E: поиски оплачены, до модели не дошло ничего,
+    цитат нет (SPEC §7). Отличает его от удачного поля `caller` у блоков.
+    """
+    body = message_body(text)
+    body["content"] = [
+        *[block for block in WEB_SEARCH_BLOCKS if block.get("caller")],
+        *body["content"],
+    ]
+    body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
+    return httpx2.Response(200, json=body)
+
+
 def paused_search(requests: int = 1) -> httpx2.Response:
     """Ответ, которым API прервал серверный цикл: последний запрос поиска ещё не отработал."""
     body = message_body("", stop_reason="pause_turn")
