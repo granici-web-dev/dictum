@@ -306,8 +306,8 @@ def text_length(response: Message) -> int:
 def search_tools(stage: str, inputs: dict[str, str]) -> list[WebSearchTool20260318Param] | Omit:
     """Инструмент поиска стадии; предел поисков — по флагу `stack` снимка стандартов её входа.
 
-    Версия с динамической фильтрацией: модель отбирает результаты кодом до того, как они лягут
-    в контекст, а токены результатов и есть главная статья цены ресёрча (SPEC §8).
+    Кто зовёт поиск, объявляет запись стадии: у нас прямой вызов, а не включённая по умолчанию
+    версии динамическая фильтрация, которая отбирает результаты кодом в песочнице (SPEC §7).
     """
     budget = stage_named(stage).web_search
     if budget is None:
@@ -318,6 +318,7 @@ def search_tools(stage: str, inputs: dict[str, str]) -> list[WebSearchTool202603
             "type": "web_search_20260318",
             "name": "web_search",
             "max_uses": budget.max_uses_with_stack if stack else budget.max_uses_without_stack,
+            "allowed_callers": list(budget.callers),
         }
     ]
 
@@ -325,8 +326,8 @@ def search_tools(stage: str, inputs: dict[str, str]) -> list[WebSearchTool202603
 def search_result_urls(response: Message) -> set[str]:
     """URL из результатов поиска и из цитат ответа: всё, что модель в этом ходу видела.
 
-    Результаты, найденные фильтрующим кодом, приходят такими же блоками верхнего уровня, только
-    с полем `caller`, поэтому отдельного обхода вложенным не нужно.
+    Прямой режим блоков с `caller` не рождает, но обход их переживает смену режима и ничего не
+    стоит: они приходят такими же блоками верхнего уровня, отдельного обхода вложенным не нужно.
     """
     urls: set[str] = set()
     for block in response.content:

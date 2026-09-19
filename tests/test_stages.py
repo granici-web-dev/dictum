@@ -33,6 +33,7 @@ from tests.helpers import (
     STEPS_DE,
     WEB_SEARCH_BLOCKS,
     InstallResponses,
+    approach_answer,
     clarify_answer,
     decompose_answer,
     ok,
@@ -695,7 +696,12 @@ def test_search_budget_follows_the_stack_flag_of_the_snapshot(
     run_stage("clarify", CLARIFY_INPUTS, RUN)
 
     assert request_body(requests[0])["tools"] == [
-        {"type": "web_search_20260318", "name": "web_search", "max_uses": 3}
+        {
+            "type": "web_search_20260318",
+            "name": "web_search",
+            "max_uses": 3,
+            "allowed_callers": ["direct"],
+        }
     ]
     assert request_body(requests[1])["tools"][0]["max_uses"] == 5
 
@@ -779,3 +785,34 @@ def test_the_search_log_counts_requests_and_names_every_query(
     assert "web_search_requests=2" in caplog.text
     assert f"stage=clarify run={RUN} query=react hook form zod resolver validation" in caplog.text
     assert f"stage=clarify run={RUN} query=zod schema email required field" in caplog.text
+
+
+APPROACH_INPUTS = {
+    "inputs/assignment.json": CLARIFY_INPUTS["inputs/assignment.json"],
+    "outputs/clarify.json": CLARIFY_DE,
+    "inputs/answers.md": PARTIAL_ANSWERS,
+    "inputs/project.md": UNSET_PROJECT,
+}
+APPROACH_WITH_STANDARDS = {**APPROACH_INPUTS, "inputs/project.md": FRONTEND_PROJECT}
+
+
+def test_the_research_tool_is_called_directly_with_the_limit_of_its_mode(
+    llm: InstallResponses,
+) -> None:
+    """Фильтрующий режим отбирал результаты в песочнице, и до модели они не доходили (SPEC §7)."""
+    requests = llm(
+        [searched(approach_answer(APPROACH_EXISTING_DE)), searched(approach_answer())]
+    )
+
+    run_stage("approach", APPROACH_WITH_STANDARDS, RUN)
+    run_stage("approach", APPROACH_INPUTS, RUN)
+
+    assert request_body(requests[0])["tools"] == [
+        {
+            "type": "web_search_20260318",
+            "name": "web_search",
+            "max_uses": 3,
+            "allowed_callers": ["direct"],
+        }
+    ]
+    assert request_body(requests[1])["tools"][0]["max_uses"] == 5
