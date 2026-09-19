@@ -191,6 +191,16 @@ def tasks_count(count: int) -> str:
     return f"{count} {word}"
 
 
+def minutes_count(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        word = "минута"
+    elif 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        word = "минуты"
+    else:
+        word = "минут"
+    return f"{count} {word}"
+
+
 def review_lead(review: Review) -> str:
     """Оглавление разбора: оно встаёт в сообщение о ходе прогона вместо галочек."""
     if not review.tasks:

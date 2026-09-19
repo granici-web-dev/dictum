@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 from typing import Any
 import logging
 from pathlib import Path
@@ -6,14 +7,19 @@ from pathlib import Path
 import pytest
 
 from app.cli import (
+    CONSENT_QUESTION,
     EXIT_NEEDS_A_DECISION,
     EXIT_OK,
     EXIT_STAGE_FAILED,
     EXIT_USAGE,
     main,
+    price_line,
 )
-from app import bot, cli, publish, stages
-from app.config import settings
+from app import bot, cli, publish, stages, store, transcribe
+from app.config import ConfigError, settings
+from app.pipeline import Stage
+from app.run import Run
+from app.store import REVIEWED, fail_orphans, parent_of
 from app.ingest import build_transcript, run_id_of
 from app.answers import read_answers
 from app.pipeline import (
@@ -33,6 +39,7 @@ from app.pipeline import (
     STEPS_MD,
     TRANSCRIPT,
 )
+from tests.test_review import REVIEW_DE
 from tests.helpers import (
     BROKEN_ISSUES,
     FIXTURES,
@@ -824,3 +831,333 @@ def test_steps_without_an_assignment_on_disk_is_a_usage_error(
     assert exit_info.value.code == EXIT_USAGE
     assert "--task" in capsys.readouterr().err
     assert requests == []
+
+
+# --- make meeting: запись с ноутбука (P3-08, фаза 1) ---
+
+MEETING_CHAT = "12"
+
+
+def test_price_line_names_whisper_exactly() -> None:
+    assert "$0.36" in price_line(3600)
+
+
+def test_price_line_calls_the_review_unmeasured() -> None:
+    """Число за разбор часовой встречи никем не замерено, и придумать его нельзя (правило 5)."""
+    assert "не замерен ни разу" in price_line(3600)
+
+
+class Terminal:
+    """Терминал, который отвечает на вопрос о согласии. `answer=None` — ввод не с терминала."""
+
+    def __init__(self, answer: str | None) -> None:
+        self.answer = answer
+        self.asked: list[str] = []
+
+    def isatty(self) -> bool:
+        return self.answer is not None
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("sys.stdin", self)
+        monkeypatch.setattr("builtins.input", self.typed)
+
+    def typed(self, question: str = "") -> str:
+        self.asked.append(question)
+        assert self.answer is not None
+        return self.answer
+
+
+class SentReview:
+    """Доставка разбора без Telegram: помнит, в какой чат и по какому прогону её позвали."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str]] = []
+        self.failed = 0
+
+    def deliver(self, chat_id: int, run_id: str, root: Path) -> int:
+        self.calls.append((chat_id, run_id))
+        return EXIT_OK
+
+
+@pytest.fixture
+def meeting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> SentReview:
+    """Окружение прогона с ноутбука: ключи на месте, ffmpeg на месте, чат один, база есть."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "allow_live_api", True)
+    monkeypatch.setattr(settings, "openai_api_key", "test")
+    monkeypatch.setattr(settings, "telegram_bot_token", "test")
+    monkeypatch.setattr(settings, "telegram_allowed_chat_ids", MEETING_CHAT)
+    monkeypatch.setattr(cli, "installed", lambda tool: True)
+    monkeypatch.setattr(cli, "ensure_schema", lambda: None)
+    monkeypatch.setattr(cli, "start_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "recording_seconds", lambda path: 3600)
+    sent = SentReview()
+    monkeypatch.setattr(cli, "deliver_meeting", sent.deliver)
+    return sent
+
+
+def a_recording(tmp_path: Path) -> Path:
+    recording = tmp_path / "созвон.m4a"
+    recording.write_bytes(b"m4a")
+    return recording
+
+
+def walking_to_a_review(review_json: str = REVIEW_DE) -> Callable[..., None]:
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None] = lambda stage: None
+    ) -> None:
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        (run.root / REVIEW_JSON).write_text(review_json, encoding="utf-8")
+
+    return walking
+
+
+def test_meeting_refuses_when_stdin_is_not_a_terminal(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Иначе `echo да | make meeting` превращает вопрос обратно во флаг."""
+    Terminal(None).install(monkeypatch)
+    called = whisper_never_built(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_USAGE
+
+    assert not (tmp_path / "runs").exists()
+    assert meeting.calls == []
+    assert called == []
+
+
+def test_meeting_refuses_without_the_typed_word(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Ага» — это решение человека, а не ошибка запуска: код другой."""
+    Terminal("ага").install(monkeypatch)
+    called = whisper_never_built(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_NEEDS_A_DECISION
+
+    assert not (tmp_path / "runs").exists()
+    assert meeting.calls == []
+    assert called == []
+
+
+def whisper_never_built(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    built: list[float] = []
+
+    def never(timeout: float) -> None:
+        built.append(timeout)
+        raise AssertionError("клиент Whisper построен, а согласия не было")
+
+    monkeypatch.setattr(transcribe, "whisper_client", never)
+    return built
+
+
+def test_meeting_names_the_chat_when_several_are_allowed(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Соседний разрешённый чат бывает групповым, и запись встречи ушла бы не туда."""
+    monkeypatch.setattr(settings, "telegram_allowed_chat_ids", "12, -100500")
+    Terminal("да").install(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_USAGE
+
+    assert meeting.calls == []
+    assert not (tmp_path / "runs").exists()
+
+
+def test_meeting_refuses_a_chat_outside_the_allowlist(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Terminal("да").install(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path)), "--chat", "777"]) == EXIT_USAGE
+
+    assert meeting.calls == []
+
+
+def test_meeting_asks_before_the_first_paid_call(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Забытый make db не должен стоить расшифровки: схема проверяется до вопроса о согласии."""
+
+    def no_schema() -> None:
+        raise ConfigError("В базе нет таблицы runs. Накатите миграции: make db.")
+
+    monkeypatch.setattr(cli, "ensure_schema", no_schema)
+    terminal = Terminal("да")
+    terminal.install(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_USAGE
+
+    assert terminal.asked == []
+    assert meeting.calls == []
+
+
+def test_meeting_copies_the_recording_and_leaves_the_original(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Расшифровка удаляет то, что ей дали, а запись владельца лежит у него на диске."""
+    Terminal("да").install(monkeypatch)
+    recording = a_recording(tmp_path)
+    copies: list[Path] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None] = lambda stage: None
+    ) -> None:
+        assert run.audio is not None
+        copies.append(run.audio)
+        assert run.audio.exists()
+        run.audio.unlink()
+        walking_to_a_review()(run, start, stop)
+
+    monkeypatch.setattr(cli, "walk", walking)
+
+    assert main(["--meeting", str(recording), "--chat", MEETING_CHAT]) == EXIT_OK
+
+    assert recording.read_bytes() == b"m4a"
+    [copy] = copies
+    assert copy.name == "recording.m4a"
+    assert not copy.exists()
+    assert meeting.calls == [(12, copy.parent.parent.name)]
+
+
+def test_meeting_skips_transcription_when_the_run_already_has_one(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whisper за ту же запись второй раз — $0.36 на ветер."""
+    Terminal("да").install(monkeypatch)
+    root = tmp_path / "runs" / EARLIER_RUN
+    transcript_of_an_earlier_run(root)
+    started: list[str] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None] = lambda stage: None
+    ) -> None:
+        started.append(start)
+        walking_to_a_review()(run, start, stop)
+
+    monkeypatch.setattr(cli, "walk", walking)
+    called = whisper_never_built(monkeypatch)
+
+    assert main(["--run", EARLIER_RUN]) == EXIT_OK
+
+    assert started == ["review"]
+    assert called == []
+    assert meeting.calls == [(12, EARLIER_RUN)]
+
+
+def test_meeting_only_delivers_when_the_review_is_already_written(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Terminal("да").install(monkeypatch)
+    root = tmp_path / "runs" / EARLIER_RUN
+    transcript_of_an_earlier_run(root)
+    (root / REVIEW_JSON).parent.mkdir(parents=True, exist_ok=True)
+    (root / REVIEW_JSON).write_text(REVIEW_DE, encoding="utf-8")
+
+    def never_walks(*args: object, **kwargs: object) -> None:
+        raise AssertionError("прогон пошёл по стадиям, а разбор уже написан")
+
+    monkeypatch.setattr(cli, "walk", never_walks)
+
+    assert main(["--run", EARLIER_RUN]) == EXIT_OK
+
+    assert meeting.calls == [(12, EARLIER_RUN)]
+
+
+def test_meeting_that_has_nothing_to_resume_says_so(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Terminal("да").install(monkeypatch)
+
+    assert main(["--run", EARLIER_RUN]) == EXIT_USAGE
+
+    assert meeting.calls == []
+
+
+def test_deliver_sends_a_written_review_again_without_paying_for_anything(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Повторная доставка безопасна: второй набор карточек закрыт индексом одного прогона."""
+    root = tmp_path / "runs" / EARLIER_RUN
+    (root / REVIEW_JSON).parent.mkdir(parents=True)
+    (root / REVIEW_JSON).write_text(REVIEW_DE, encoding="utf-8")
+    terminal = Terminal("да")
+    terminal.install(monkeypatch)
+
+    assert main(["--deliver", EARLIER_RUN]) == EXIT_OK
+
+    assert terminal.asked == []
+    assert meeting.calls == [(12, EARLIER_RUN)]
+
+
+def test_deliver_without_a_review_on_disk_says_so(
+    meeting: SentReview, tmp_path: Path
+) -> None:
+    assert main(["--deliver", EARLIER_RUN]) == EXIT_USAGE
+
+    assert meeting.calls == []
+
+
+def test_the_consent_question_names_the_file_the_length_and_the_price(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Один вопрос на два факта: два подряд учат тому, что второй — формальность."""
+    Terminal("нет").install(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_NEEDS_A_DECISION
+
+    asked = capsys.readouterr().out
+    assert "созвон.m4a, 60 минут" in asked
+    assert "$0.36" in asked
+    assert CONSENT_QUESTION in asked
+    assert str(tmp_path) not in asked
+
+
+# Строка прогона с ноутбука против настоящего Postgres: у неё свой CHECK и своя уборка.
+
+
+@pytest.mark.db
+@pytest.mark.timeout(30)
+def test_meeting_row_lands_reviewed_with_consent(
+    db: None, meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CHECK ck_runs_consent_only_for_file пропускает строку, и кнопка под разбором сработает."""
+    monkeypatch.setattr(cli, "start_run", store.start_run)
+    Terminal("да").install(monkeypatch)
+    monkeypatch.setattr(cli, "walk", walking_to_a_review())
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_OK
+
+    [(_, run_id)] = meeting.calls
+    parent = parent_of(run_id, 12)
+    assert parent is not None
+    assert parent.status == REVIEWED
+    assert parent.source == "file"
+
+
+@pytest.mark.db
+@pytest.mark.timeout(30)
+def test_meeting_row_is_never_written_in_a_working_status(
+    db: None, meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Уборка бота на старте не может счесть идущий локальный прогон сорванным.
+
+    Поэтому команде и не нужна блокировка «один бот на базу»: пока она работает, брать у неё
+    в `runs` нечего.
+    """
+    monkeypatch.setattr(cli, "start_run", store.start_run)
+    Terminal("да").install(monkeypatch)
+    swept: list[list[object]] = []
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None] = lambda stage: None
+    ) -> None:
+        swept.append(list(fail_orphans()))
+        walking_to_a_review()(run, start, stop)
+
+    monkeypatch.setattr(cli, "walk", walking)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_OK
+
+    assert swept == [[]]

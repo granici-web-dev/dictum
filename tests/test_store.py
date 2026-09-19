@@ -8,7 +8,6 @@ SQLite подменил бы диалект и спрятал ровно то, �
 пропажу пришлось глазами.
 """
 
-from collections.abc import Iterator
 from typing import get_args
 
 import pytest
@@ -17,10 +16,8 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
-from sqlalchemy import delete, select, text
-from sqlalchemy.engine import make_url
+from sqlalchemy import select, text
 
-from app.config import settings
 from app.dialog import Turn
 from app.pipeline import StopKind
 from app.store import (
@@ -63,66 +60,7 @@ pytestmark = [pytest.mark.db, pytest.mark.timeout(30)]
 CANDIDATES = "outputs/candidates.md"
 BRIEF = "outputs/brief.md"
 QUESTION = "outputs/brief_question.md"
-TEST_DATABASE = "dictum_test"
 INGEST = "ingest"
-
-
-def address_of_test_database() -> str:
-    # render_as_string, а не str(): у SQLAlchemy `str(URL)` прячет пароль звёздочками, и
-    # подключение уходит с паролем «***», а отвечает на это сервер отказом в аутентификации.
-    return make_url(settings.database_url).set(database=TEST_DATABASE).render_as_string(
-        hide_password=False
-    )
-
-
-def created_test_database() -> bool:
-    """Заводит `dictum_test` рядом с рабочей базой. False — сервера нет, тестам нечего ждать.
-
-    Подключается к рабочей базе, а не к служебной `postgres`: `CREATE DATABASE` можно послать
-    из любой, а на этой машине служебная отвечает отказом в аутентификации.
-    """
-    server = sqlalchemy.create_engine(
-        settings.database_url,
-        connect_args={"connect_timeout": 2},
-        isolation_level="AUTOCOMMIT",
-    )
-    try:
-        with server.connect() as connection:
-            known = connection.scalar(
-                text("select 1 from pg_database where datname = :name"),
-                {"name": TEST_DATABASE},
-            )
-            if not known:
-                connection.execute(text(f'create database "{TEST_DATABASE}"'))
-        return True
-    except sqlalchemy.exc.OperationalError:
-        return False
-    finally:
-        server.dispose()
-
-
-@pytest.fixture(scope="session")
-def migrated() -> Iterator[None]:
-    if not created_test_database():
-        pytest.skip(f"Postgres недоступен на {settings.database_url}: сделайте make up")
-    working_database_url = settings.database_url
-    settings.database_url = address_of_test_database()
-    engine.cache_clear()
-    command.upgrade(Config("alembic.ini"), "head")
-    yield
-    engine().dispose()
-    engine.cache_clear()
-    settings.database_url = working_database_url
-
-
-@pytest.fixture
-def db(migrated: None) -> Iterator[None]:
-    # Проверка не церемония: строку `delete` без `where` отделяет от рабочей базы одна настройка,
-    # и однажды она уже смотрела не туда.
-    assert settings.database_url.endswith(TEST_DATABASE)
-    with session() as opened:
-        opened.execute(delete(RunRow))
-    yield
 
 
 def a_stopped_run(run_id: str = "прогон", chat_id: int = 12) -> None:

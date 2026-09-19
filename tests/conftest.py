@@ -1,13 +1,25 @@
+"""Двойники внешних границ и отдельная база под тесты, которым нужен настоящий Postgres.
+
+База стоит здесь, а не в tests/test_store.py: строку прогона пишет и бот, и команда с
+ноутбука, и проверять её приходится из двух модулей.
+"""
+
 from collections.abc import Iterator
 
 import httpx2
 import pytest
 import respx
+import sqlalchemy
+from alembic import command
+from alembic.config import Config
 from anthropic import DefaultHttpxClient
 from openai import DefaultHttpxClient as OpenAiHttpxClient
+from sqlalchemy import delete, text
+from sqlalchemy.engine import make_url
 
 from app import stages, transcribe
 from app.config import settings
+from app.store import RunRow, engine, session
 from tests.helpers import FakeBoard, InstallResponses
 
 
@@ -100,3 +112,64 @@ def board(respx_mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch) -> Fake
     monkeypatch.setattr(settings, "trello_idea_board_id", "board1")
     monkeypatch.setattr(settings, "project_key", "DCT")
     return FakeBoard(respx_mock)
+
+
+TEST_DATABASE = "dictum_test"
+
+
+def address_of_test_database() -> str:
+    # render_as_string, а не str(): у SQLAlchemy `str(URL)` прячет пароль звёздочками, и
+    # подключение уходит с паролем «***», а отвечает на это сервер отказом в аутентификации.
+    return make_url(settings.database_url).set(database=TEST_DATABASE).render_as_string(
+        hide_password=False
+    )
+
+
+def created_test_database() -> bool:
+    """Заводит `dictum_test` рядом с рабочей базой. False — сервера нет, тестам нечего ждать.
+
+    Подключается к рабочей базе, а не к служебной `postgres`: `CREATE DATABASE` можно послать
+    из любой, а на этой машине служебная отвечает отказом в аутентификации.
+    """
+    server = sqlalchemy.create_engine(
+        settings.database_url,
+        connect_args={"connect_timeout": 2},
+        isolation_level="AUTOCOMMIT",
+    )
+    try:
+        with server.connect() as connection:
+            known = connection.scalar(
+                text("select 1 from pg_database where datname = :name"),
+                {"name": TEST_DATABASE},
+            )
+            if not known:
+                connection.execute(text(f'create database "{TEST_DATABASE}"'))
+        return True
+    except sqlalchemy.exc.OperationalError:
+        return False
+    finally:
+        server.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated() -> Iterator[None]:
+    if not created_test_database():
+        pytest.skip(f"Postgres недоступен на {settings.database_url}: сделайте make up")
+    working_database_url = settings.database_url
+    settings.database_url = address_of_test_database()
+    engine.cache_clear()
+    command.upgrade(Config("alembic.ini"), "head")
+    yield
+    engine().dispose()
+    engine.cache_clear()
+    settings.database_url = working_database_url
+
+
+@pytest.fixture
+def db(migrated: None) -> Iterator[None]:
+    # Проверка не церемония: строку `delete` без `where` отделяет от рабочей базы одна настройка,
+    # и однажды она уже смотрела не туда.
+    assert settings.database_url.endswith(TEST_DATABASE)
+    with session() as opened:
+        opened.execute(delete(RunRow))
+    yield
