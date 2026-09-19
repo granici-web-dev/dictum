@@ -27,7 +27,7 @@
 - `make db` — миграции (`alembic upgrade head`), после `make up` и после каждого `git pull`
 - `make bot` — бот в polling-режиме
 - `make test` — ruff + mypy + pytest
-- `make run-text TEXT="…"` — разбор текста без Telegram, прогон кончается `outputs/review.md`; `ARGS="--task N"` задаёт вопросы для тимлида и раскладывает поручение N из лежащего разбора на шаги (`outputs/steps.md`), `ARGS="--task N --no-research"` идёт тем же путём без единого платного поиска, `ARGS="--from approach"` и `ARGS="--from steps --answers файл"` повторяют ресёрч и шаги, публикация `python -m app.publish outputs/steps.json`; `ARGS="--from intake"` гонит путь идеи до `decompose` по лежащему `inputs/transcript.md`, для отладки стадий, публикация `python -m app.publish outputs/issues.json` на доску `TRELLO_IDEA_BOARD_ID`
+- `make run-text TEXT="…"` — разбор текста без Telegram, прогон кончается `outputs/review.md`; `ARGS="--task N"` задаёт вопросы для тимлида и раскладывает поручение N из лежащего разбора на шаги (`outputs/steps.md`), `ARGS="--task N --no-research"` идёт тем же путём без единого платного поиска, `ARGS="--from approach"` и `ARGS="--from steps --answers файл"` повторяют ресёрч и шаги, публикация `python -m app.publish outputs/steps.json`, она же пишет `outputs/shape_prompt.md` — задание для `/rigorous shape`; `ARGS="--from intake"` гонит путь идеи до `decompose` по лежащему `inputs/transcript.md`, для отладки стадий, публикация `python -m app.publish outputs/issues.json` на доску `TRELLO_IDEA_BOARD_ID`
 
 ## Определение готовности задачи
 Тест есть и зелёный; `make test` чист; `PLAN.md` обновлён; если менялось поведение — `SPEC.md` тоже.
