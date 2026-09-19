@@ -36,9 +36,7 @@ from app.bot import (
     FILE_INGEST_LABEL,
     FILE_NOT_TAKEN,
     FILE_TOO_BIG,
-    FILE_TOO_LONG,
     MAX_FILE_BYTES,
-    MAX_FILE_SECONDS,
     FIRST_STAGE,
     GATE_EDIT_ASKED,
     GATE_STOPPED,
@@ -46,7 +44,6 @@ from app.bot import (
     LOST,
     GREETING,
     HEARD,
-    MAX_VOICE_SECONDS,
     ASK_AGAIN,
     NOTHING_HEARD,
     PICK_ONE,
@@ -96,7 +93,6 @@ from app.bot import (
     auto_approve_for,
     on_gates,
     started_run,
-    too_long,
 )
 from app.candidates import parse_candidates
 from app.clarify import Clarify
@@ -139,7 +135,6 @@ from app.store import (
     NO_TASK,
     PUBLISHED,
     QUESTIONS_SENT,
-    REFUSED,
     REVIEWED,
     STATUS_OF_STOP,
     Child,
@@ -466,9 +461,22 @@ def test_a_new_run_takes_the_gates_from_the_settings_and_not_from_the_code(
     assert started_run("прогон", 12, "text", text="Идея").auto_approve
 
 
-def test_a_voice_at_the_limit_runs_and_a_second_over_it_does_not() -> None:
-    assert not too_long(a_voice(MAX_VOICE_SECONDS))
-    assert too_long(a_voice(MAX_VOICE_SECONDS + 1))
+@pytest.mark.asyncio
+async def test_voice_longer_than_two_minutes_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Предел в две минуты ставился осторожностью до замеров, и с P3-09 его нет."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "save_voice", saved_empty)
+    monkeypatch.setattr(bot, "walk", walk_stopping_on_choice)
+    chat = VoiceChat(a_voice(600))
+
+    await on_voice(an_update(chat), NO_CONTEXT)
+
+    [(run_id, chat_id, source)] = store.started
+    assert (chat_id, source) == (12, "voice")
+    assert chat.replies[0].startswith(f"Прогон {run_id}")
 
 
 def test_the_progress_calls_the_first_step_transcription_for_a_voice_run() -> None:
@@ -2421,7 +2429,6 @@ async def test_consent_yes_starts_file_run_from_replied_message(
     """Согласие называет нажавшего (99), а не приславшего файл (7): в группе это разные люди."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
     seen: list[Run] = []
     monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
     recording = SentRecording()
@@ -2468,56 +2475,21 @@ async def test_recording_over_20_mb_refused_before_consent(
 
 
 @pytest.mark.asyncio
-async def test_audio_over_20_minutes_refused_before_consent(
+async def test_recording_is_refused_only_by_size(
     monkeypatch: pytest.MonkeyPatch, store: FakeStore, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """С P3-09 у Telegram-пути одна граница: 20 МБ. Час записи весит 11 МБ и проходит."""
     listed(monkeypatch, "12")
-    at_limit = RecordingChat(an_audio(seconds=MAX_FILE_SECONDS))
-    over = RecordingChat(an_audio(seconds=MAX_FILE_SECONDS + 1))
+    an_hour = RecordingChat(an_audio(seconds=3600))
+    over = RecordingChat(an_audio(size=MAX_FILE_BYTES + 1))
 
     with caplog.at_level(logging.INFO, logger="app.bot"):
-        await on_recording(an_update(at_limit), NO_CONTEXT)
+        await on_recording(an_update(an_hour), NO_CONTEXT)
         await on_recording(an_update(over), NO_CONTEXT)
 
-    assert at_limit.replies == [CONSENT_QUESTION]
-    assert over.replies == [FILE_TOO_LONG]
-    assert f"refusal=file_too_long chat=12 seconds={MAX_FILE_SECONDS + 1}" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_file_longer_than_the_limit_no_longer_touches_the_stop(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    store: FakeStore,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Длину документа клиент не называет, а у аудио она бывает неверной: мерит ffprobe.
-
-    Остановку файл после замера больше не снимает: при живой остановке «Да» отказано раньше.
-    """
-    listed(monkeypatch, "12")
-    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    monkeypatch.setattr(settings, "keep_audio", True)
-
-    def never_dropped(chat_id: int) -> str | None:
-        raise AssertionError("файл снял остановку")
-
-    monkeypatch.setattr(bot, "drop_stop", never_dropped)
-    monkeypatch.setattr(bot, "recording_seconds", lambda path: MAX_FILE_SECONDS + 1)
-    monkeypatch.setattr(bot, "walk", never_walks)
-    press = ConsentPress(CONSENT_YES, SentRecording())
-
-    with caplog.at_level(logging.INFO, logger="app.bot"):
-        await on_consent_button(a_press(press), NO_CONTEXT)
-
-    [(run_id, _, _)] = store.started
-    assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
-    assert store.status[run_id] == REFUSED
-    assert press.edits == [FILE_TOO_LONG]
-    assert (
-        f"refusal=file_too_long chat=12 run={run_id} seconds={MAX_FILE_SECONDS + 1}"
-        in caplog.text
-    )
+    assert an_hour.replies == [CONSENT_QUESTION]
+    assert over.replies == [FILE_TOO_BIG]
+    assert "refusal=file_too_long" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2530,7 +2502,6 @@ async def test_consent_question_that_could_not_be_edited_is_logged_and_the_run_g
     """Кнопки, оставшиеся под вопросом, зовут нажать «Да» второй раз: об этом должен знать лог."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    monkeypatch.setattr(bot, "recording_seconds", lambda path: 600)
     seen: list[Run] = []
     monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
     press = ConsentPress(CONSENT_YES, SentRecording())
@@ -2562,26 +2533,27 @@ async def test_recording_that_could_not_be_downloaded_fails_the_run(
 
 
 @pytest.mark.asyncio
-async def test_unreadable_file_is_deleted_after_download(
+async def test_a_recording_transcription_cannot_read_fails_the_run_with_its_own_words(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
 ) -> None:
+    """Длину меряет расшифровка (P3-09), и её отказ доходит до человека как написан."""
     listed(monkeypatch, "12")
     monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
-    monkeypatch.setattr(settings, "keep_audio", True)
+    refusal = "ffprobe не смог прочитать recording.m4a: Invalid data found"
 
-    def unreadable(path: Path) -> int:
-        raise TranscriptionError("ffprobe не смог прочитать recording.m4a: Invalid data found")
+    def unreadable(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        raise TranscriptionError(refusal)
 
-    monkeypatch.setattr(bot, "recording_seconds", unreadable)
-    monkeypatch.setattr(bot, "walk", never_walks)
+    monkeypatch.setattr(bot, "walk", unreadable)
     press = ConsentPress(CONSENT_YES, SentRecording())
 
     await on_consent_button(a_press(press), NO_CONTEXT)
 
     [(run_id, _, _)] = store.started
-    assert not (tmp_path / "runs" / run_id / "inputs/recording.m4a").exists()
     assert store.status[run_id] == FAILED
-    assert press.edits == ["ffprobe не смог прочитать recording.m4a: Invalid data found"]
+    assert press.edits == [refusal]
 
 
 @pytest.mark.asyncio

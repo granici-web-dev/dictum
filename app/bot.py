@@ -13,7 +13,7 @@ import unicodedata
 from collections.abc import Callable
 from concurrent.futures import Future
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +92,6 @@ from app.store import (
     FAILED,
     NO_TASK,
     QUESTIONS_SENT,
-    REFUSED,
     ensure_schema,
     one_bot_per_database,
     PUBLISHED,
@@ -121,7 +120,6 @@ from app.transcribe import (
     NothingHeard,
     TranscriptionError,
     installed,
-    recording_seconds,
 )
 
 # Имя задано строкой, а не __name__: модуль запускают как `python -m`, и там __name__ — это
@@ -139,15 +137,9 @@ IDEA_ROUTE_START = "handoff"
 BOARD_CONTRACT = {TASK_ROUTE_START: STEPS_JSON, IDEA_ROUTE_START: ISSUES_JSON}
 VOICE_FILE = "inputs/voice.oga"
 
-# TODO(P3-09): одна граница длины для голосового и файла.
-# В минутах, потому что в минутах об этом говорят человеку: с секундами отказ однажды сказал бы
-# «длиннее 1 минут» на лимите в 90 с.
-MAX_VOICE_MINUTES = 2
-MAX_VOICE_SECONDS = MAX_VOICE_MINUTES * 60
-# Запись созвона длиннее голосового, но расшифровывается одним запросом: нарезки ещё нет (P3-03).
-MAX_FILE_MINUTES = 20
-MAX_FILE_SECONDS = MAX_FILE_MINUTES * 60
-# Предел getFile у Bot API: файл крупнее бот скачать не может, и спрашивать о нём согласие незачем.
+# Единственная граница Telegram-пути (P3-09): предел getFile у Bot API. Файл крупнее бот скачать
+# не может, и спрашивать о нём согласие незачем. Границ в минутах у этого пути нет: 20 МБ заведомо
+# меньше 25 МБ, которые берёт Whisper, при любом кодеке, и длинного входа через Telegram не бывает.
 MAX_FILE_MEGABYTES = 20
 MAX_FILE_BYTES = MAX_FILE_MEGABYTES * 1024 * 1024
 
@@ -209,11 +201,6 @@ BUSY = "Прогон уже идёт, дождитесь его конца."
 
 EMPTY = "Пустое сообщение. Пришлите текст словами."
 
-TOO_LONG = (
-    f"Голосовое длиннее {MAX_VOICE_MINUTES} минут я пока не расшифровываю. "
-    "Наговорите покороче или пришлите текстом."
-)
-
 UNSUPPORTED = "Принимаю голосовое, текст и аудиофайл с записью, например mp3, m4a или wav."
 
 VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
@@ -221,10 +208,6 @@ VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram
 FILE_TOO_BIG = (
     f"Файл больше {MAX_FILE_MEGABYTES} МБ: такой Telegram боту не отдаёт. "
     "Пересохраните запись в mp3 или пришлите её частями."
-)
-
-FILE_TOO_LONG = (
-    f"Запись длиннее {MAX_FILE_MINUTES} минут я пока не расшифровываю. Пришлите её частями."
 )
 
 FILE_NOT_TAKEN = "Не смог забрать запись из Telegram. Пришлите её ещё раз."
@@ -621,18 +604,6 @@ async def refuse(
         await note.edit_text(text)
 
 
-def reported_seconds(recording: Voice | Audio) -> int:
-    # Сегодня PTB отдаёт число при любом входе, и ветка с timedelta недостижима. Она стоит
-    # потому, что тип объявлен `int | timedelta`, а с флагом PTB_TIMEDELTA (который станет
-    # умолчанием) станет достижимой. Тест на неё написать нечем: флаг читается при импорте.
-    duration = recording.duration
-    return round(duration.total_seconds()) if isinstance(duration, timedelta) else duration
-
-
-def too_long(voice: Voice) -> bool:
-    return reported_seconds(voice) > MAX_VOICE_SECONDS
-
-
 async def save_voice(voice: Voice, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     await (await voice.get_file()).download_to_drive(target)
@@ -896,11 +867,6 @@ async def on_questions_button(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or message.voice is None or not permitted(message):
-        return
-    if too_long(message.voice):
-        # Длительность в записи, а не только тег: по логу видно, насколько именно
-        # переговорили лимит, иначе непонятно, двигать его или оставить.
-        await refuse(message, "too_long", TOO_LONG, seconds=reported_seconds(message.voice))
         return
     if running.locked():
         await refuse(message, "busy", BUSY)
@@ -1271,11 +1237,6 @@ async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if recording.file_size is not None and recording.file_size > MAX_FILE_BYTES:
         await refuse(message, "too_big", FILE_TOO_BIG, bytes=recording.file_size)
         return
-    if message.audio and reported_seconds(message.audio) > MAX_FILE_SECONDS:
-        await refuse(
-            message, "file_too_long", FILE_TOO_LONG, seconds=reported_seconds(message.audio)
-        )
-        return
     stopped = await asyncio.to_thread(waiting_for, message.chat_id)
     if stopped is not None:
         await refuse(
@@ -1356,24 +1317,6 @@ async def on_consent_button(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             logger.exception("Прогон %s не забрал запись", run_id)
             await asyncio.to_thread(finish_run, run_id, FAILED)
             await note.edit_text(FILE_NOT_TAKEN)
-            return
-        try:
-            seconds = await asyncio.to_thread(recording_seconds, audio)
-        except TranscriptionError as error:
-            logger.warning("Прогон %s не узнал длину записи: %s", run_id, error)
-            # Как и длинная: расшифровывать её никто не будет, KEEP_AUDIO тут ни при чём.
-            audio.unlink()
-            await asyncio.to_thread(finish_run, run_id, FAILED)
-            await note.edit_text(str(error))
-            return
-        if seconds > MAX_FILE_SECONDS:
-            # Удаляется при любом KEEP_AUDIO: расшифровывать её никто не будет, а чужая запись
-            # не должна лежать у нас дольше, чем нужна.
-            audio.unlink()
-            await asyncio.to_thread(finish_run, run_id, REFUSED)
-            await refuse(
-                message, "file_too_long", FILE_TOO_LONG, note=note, run=run_id, seconds=seconds
-            )
             return
         await follow(note, run, datetime.now(timezone.utc))
 
