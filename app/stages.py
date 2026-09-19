@@ -752,13 +752,17 @@ def run_stage(
             files[APPROACH_JSON], assignment, assignment_and_answers, project, searched, queries
         )
         approach = Approach.model_validate_json(files[APPROACH_JSON])
-        # По этой строке живые прогоны считают, как часто модель придумывает ссылку. Оплаченный
-        # поиск без результатов и без цитат — это ресёрч по памяти, и он идёт предупреждением:
-        # живая проверка части E три часа выглядела удачной именно потому, что этой пары в
-        # строке не было (SPEC §7).
-        blind = bool(approach.searches) and not (results and citations)
+        # По этой строке живые прогоны считают, как часто модель придумывает ссылку.
+        # Предупреждение поднимают только поломки: оплаченный поиск, от которого до модели не
+        # дошло ни одного результата, и названные источники, из которых поиск не подтвердил ни
+        # одного. Ноль цитат поломкой не считается: модель привязывает их к тексту, а весь текст
+        # стадии лежит внутри JSON в теге <file>, и у обоих удачных живых прогонов части E цитат
+        # было ноль при 18 и 27 результатах (SPEC §7).
+        unverified = unverified_sources(approach)
+        blind = bool(approach.searches) and not results
+        unconfirmed = bool(approach.sources) and unverified == len(approach.sources)
         logger.log(
-            logging.WARNING if blind else logging.INFO,
+            logging.WARNING if blind or unconfirmed else logging.INFO,
             "stage=approach run=%s mode=%s searches=%d results=%d citations=%d "
             "sources=%d unverified=%d",
             run_id,
@@ -767,7 +771,7 @@ def run_stage(
             results,
             citations,
             len(approach.sources),
-            unverified_sources(approach),
+            unverified,
         )
         files[APPROACH_MD] = approach_markdown(approach, project, assignment_and_answers)
     if stage == "steps":

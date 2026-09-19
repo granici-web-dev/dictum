@@ -845,7 +845,7 @@ def test_the_research_line_counts_the_results_that_reached_the_model_and_the_cit
     assert "searches=2 results=2 citations=2 sources=3 unverified=0" in line.getMessage()
 
 
-def test_paid_searches_without_results_or_citations_are_a_warning(
+def test_paid_searches_without_a_single_result_are_a_warning(
     llm: InstallResponses, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Так выглядел ресёрч части E: поиски оплачены, а ответ написан по памяти (SPEC §7)."""
@@ -857,3 +857,61 @@ def test_paid_searches_without_results_or_citations_are_a_warning(
     line = approach_line(caplog)
     assert line.levelno == logging.WARNING
     assert "searches=1 results=0 citations=0 sources=0 unverified=0" in line.getMessage()
+
+
+def uncited(text: str) -> httpx2.Response:
+    """Удачный ресёрч без единой цитаты: весь текст стадии лежит внутри тега <file>.
+
+    Страница, на которую в фикстуре ссылается цитата, переезжает в результаты поиска: без цитат
+    модель её иначе не увидела бы, а источник S3 на неё ссылается.
+    """
+    body = json.loads(searched(text).content)
+    cited = [
+        {"type": "web_search_result", "url": citation["url"], "title": citation["title"]}
+        for block in body["content"]
+        for citation in block.pop("citations", [])
+    ]
+    for block in body["content"]:
+        if block["type"] == "web_search_tool_result":
+            block["content"].extend(cited)
+            break
+    return httpx2.Response(200, json=body)
+
+
+def test_research_without_citations_is_not_a_warning(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Цитаты не привязываются к тексту внутри <file>, и ноль у них — не поломка (SPEC §7)."""
+    llm([uncited(approach_answer())])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("approach", APPROACH_INPUTS, RUN)
+
+    line = approach_line(caplog)
+    assert line.levelno == logging.INFO
+    assert "results=4 citations=0 sources=3 unverified=0" in line.getMessage()
+
+
+def one_invented_url(data: dict[str, Any]) -> None:
+    """Все источники названы мимо поиска: подтвердить их нечем."""
+    for found in data["sources"]:
+        found["url"] = f"https://example.org/invented/{found['id']}"
+
+
+def test_sources_that_the_search_never_confirmed_are_a_warning(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ресёрч со ссылками, которых не было ни в одном результате, — тоже ресёрч по памяти."""
+    llm(
+        [
+            searched(approach_answer(change=one_invented_url)),
+            searched(approach_answer(change=one_invented_url)),
+        ]
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        run_stage("approach", APPROACH_INPUTS, RUN)
+
+    line = approach_line(caplog)
+    assert line.levelno == logging.WARNING
+    assert "sources=3 unverified=3" in line.getMessage()
