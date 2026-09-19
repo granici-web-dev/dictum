@@ -326,7 +326,7 @@ def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResu
         else None
     )
     try:
-        return run_stage(
+        result = run_stage(
             stage.name,
             inputs,
             run.run_id,
@@ -338,6 +338,11 @@ def run_llm_stage(run: Run, stage: Stage, redo: Redo | None = None) -> StageResu
     except StageError as error:
         write_artifact(run.root, f"outputs/{stage.name}.raw.md", error.raw)
         raise
+    # Сырой ответ удачной стадии нигде не остаётся, и причину дефекта части E P3-11 пришлось
+    # искать отдельным скриптом. Настройка кладёт рядом разбор ответов (SPEC §7).
+    if settings.trace_stage_calls:
+        write_artifact(run.root, f"outputs/{stage.name}.trace.json", result.trace)
+    return result
 
 
 def walk(

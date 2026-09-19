@@ -933,3 +933,52 @@ def test_answers_keep_the_snapshot_when_the_directory_is_gone(
 
     assert read_artifact(run.root, PROJECT) == taken
     assert "project_context=kept reason=missing" in caplog.text
+
+
+TRACE = "outputs/approach.trace.json"
+
+
+def test_no_diagnostics_file_without_the_setting(llm: InstallResponses, tmp_path: Path) -> None:
+    parent = a_review_on_disk(tmp_path / "parent")
+    child = tmp_path / "child"
+    llm([ok(clarify_answer()), searched(approach_answer())])
+
+    walk(a_task_run(child, parent, "voice"), "assignment", "approach")
+
+    assert (child / APPROACH_JSON).is_file()
+    assert not (child / TRACE).exists()
+
+
+def test_the_diagnostics_file_names_the_blocks_without_their_content(
+    llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сырой ответ удачной стадии нигде не остаётся, и причину дефекта ищут по форме ответа."""
+    monkeypatch.setattr(settings, "trace_stage_calls", True)
+    parent = a_review_on_disk(tmp_path / "parent")
+    child = tmp_path / "child"
+    llm([ok(clarify_answer()), searched(approach_answer())])
+
+    walk(a_task_run(child, parent, "voice"), "assignment", "approach")
+
+    written = (child / TRACE).read_text(encoding="utf-8")
+    assert "encrypted" not in written
+    traced = json.loads(written)
+    assert (traced["stage"], traced["run_id"]) == ("approach", RUN_ID)
+    [call] = traced["calls"]
+    assert call["stop_reason"] == "end_turn"
+    assert call["web_search_requests"] == 2
+    assert (call["input_tokens"], call["output_tokens"]) == (120, 30)
+    assert [block["type"] for block in call["blocks"]] == [
+        "text",
+        "server_tool_use",
+        "web_search_tool_result",
+        "server_tool_use",
+        "web_search_tool_result",
+        "text",
+        "text",
+    ]
+    direct, filtered = [
+        block for block in call["blocks"] if block["type"] == "web_search_tool_result"
+    ]
+    assert (direct.get("caller"), direct["results"]) == (None, 2)
+    assert (filtered["caller"], filtered["results"]) == ("code_execution_20260120", 1)

@@ -15,9 +15,13 @@ from typing import TypeVar, cast
 import anthropic
 from anthropic import DefaultHttpxClient, Omit, omit
 from anthropic.types import (
+    ContentBlock,
     ContentBlockParam,
+    DirectCaller,
     Message,
     MessageParam,
+    ServerToolCaller,
+    ServerToolCaller20260120,
     ThinkingConfigParam,
     Usage,
     WebSearchTool20260318Param,
@@ -222,6 +226,9 @@ class StageResult(BaseModel):
     input_tokens: int
     output_tokens: int
     duration_ms: int
+    # Разбор ответов стадии для диагностики (SPEC §7). На диск его кладёт вызывающий и только
+    # при включённой настройке: файлы прогона пишет он, а не стадия.
+    trace: str = ""
 
 
 class StageError(Exception):
@@ -401,6 +408,89 @@ def answered_turn(stage: str, response: Message, raw: str) -> MessageParam:
     return assistant_blocks(response)
 
 
+Caller = DirectCaller | ServerToolCaller | ServerToolCaller20260120
+
+
+def caller_name(caller: Caller | None) -> str | None:
+    """Кто позвал инструмент. Пусто у блока, который модель позвала сама."""
+    return caller.type if caller else None
+
+
+class BlockTrace(BaseModel):
+    """Блок ответа без содержимого: чем он был и сколько его. См. SPEC §7.
+
+    Содержимого здесь нет нарочно: в результатах поиска лежит `encrypted_content`, а в тексте
+    ответа — сам артефакт. Диагностике нужна форма ответа, а не его байты.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    name: str | None = None
+    caller: str | None = None
+    results: int | None = None
+    error: str | None = None
+    text_chars: int | None = None
+    citations: int | None = None
+
+
+class CallTrace(BaseModel):
+    """Один вызов модели: чем он кончился, что вернул и во сколько обошёлся."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    stop_reason: str | None
+    input_tokens: int
+    output_tokens: int
+    thinking_tokens: str
+    web_search_requests: int
+    duration_ms: int
+    blocks: list[BlockTrace]
+
+
+def trace_block(block: ContentBlock) -> BlockTrace:
+    if block.type == "text":
+        return BlockTrace(
+            type=block.type, text_chars=len(block.text), citations=len(block.citations or [])
+        )
+    if block.type == "server_tool_use":
+        return BlockTrace(type=block.type, name=block.name, caller=caller_name(block.caller))
+    if block.type == "web_search_tool_result":
+        caller = caller_name(block.caller)
+        if isinstance(block.content, list):
+            return BlockTrace(type=block.type, caller=caller, results=len(block.content))
+        return BlockTrace(type=block.type, caller=caller, error=block.content.error_code)
+    return BlockTrace(type=block.type)
+
+
+def trace_call(response: Message, duration_ms: int) -> CallTrace:
+    return CallTrace(
+        model=response.model,
+        stop_reason=response.stop_reason,
+        input_tokens=response.usage.input_tokens,
+        output_tokens=response.usage.output_tokens,
+        thinking_tokens=thinking_tokens(response.usage),
+        web_search_requests=searches_made(response.usage),
+        duration_ms=duration_ms,
+        blocks=[trace_block(block) for block in response.content],
+    )
+
+
+def trace_file(stage: str, run_id: str, calls: list[CallTrace]) -> str:
+    """Разбор ответов стадии для будущих диагностик (SPEC §7).
+
+    Сырой ответ удачной стадии нигде не остаётся, и причину дефекта части E пришлось искать
+    отдельным скриптом: по типам блоков и usage каждого вызова она видна сразу.
+    """
+    body = {
+        "stage": stage,
+        "run_id": run_id,
+        "calls": [call.model_dump(exclude_none=True) for call in calls],
+    }
+    return json.dumps(body, ensure_ascii=False, indent=2) + "\n"
+
+
 class ModelTurn(BaseModel):
     """Ход стадии целиком: последний ответ, приостановленные до него и счёт по всему ходу."""
 
@@ -418,6 +508,8 @@ class ModelTurn(BaseModel):
     # был не только оплачен, но и прочитан (SPEC §7).
     results: int = 0
     citations: int = 0
+    # Разбор каждого вызова хода для диагностики (SPEC §7).
+    calls: list[CallTrace] = Field(default_factory=list)
 
 
 def ask_once(
@@ -487,6 +579,7 @@ def ask_model(
     input_tokens = output_tokens = duration_ms = results = citations = 0
     urls: set[str] = set()
     queries: list[str] = []
+    calls: list[CallTrace] = []
     while True:
         history = [*messages, *(assistant_blocks(answer) for answer in paused)]
         response, step_ms = ask_once(stage, run_id, model, history, tools)
@@ -497,6 +590,7 @@ def ask_model(
         queries += search_queries(response)
         results += results_in_context(response)
         citations += citations_made(response)
+        calls.append(trace_call(response, step_ms))
         if response.stop_reason != "pause_turn":
             return ModelTurn(
                 response=response,
@@ -508,6 +602,7 @@ def ask_model(
                 queries=queries,
                 results=results,
                 citations=citations,
+                calls=calls,
             )
         if len(paused) == MAX_SEARCH_CONTINUATIONS:
             raise StageError(
@@ -589,6 +684,7 @@ def run_stage(
     queries = turn.queries
     results = turn.results
     citations = turn.citations
+    calls = turn.calls
 
     problems = repairable_problems(stage, files, outputs, inputs, given_params)
     if stage == "review" and frozenset(files) in outputs:
@@ -622,6 +718,7 @@ def run_stage(
         queries += repair.queries
         results += repair.results
         citations += repair.citations
+        calls += repair.calls
         response = repair.response
         if stage == "approach":
             log_query_leaks(run_id, repair.queries, assignment)
@@ -694,4 +791,5 @@ def run_stage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         duration_ms=duration_ms,
+        trace=trace_file(stage, run_id, calls),
     )

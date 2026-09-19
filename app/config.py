@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # что их надо искать где-то по умолчанию: чужой каталог ушёл бы в Anthropic без ведома
     # владельца.
     project_context_dir: str = ""
+    # Класть ли рядом с артефактами разбор ответов модели: типы блоков и usage по каждому вызову
+    # (SPEC §7). По умолчанию нет: файл нужен диагностике, а не прогону.
+    trace_stage_calls: bool = False
 
 
 class ConfigError(RuntimeError):
