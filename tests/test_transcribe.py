@@ -9,7 +9,13 @@ import pytest
 
 from app import transcribe
 from app.config import LiveApiNotAllowed, settings
-from app.transcribe import NOTHING_HEARD, TranscriptionError, convert_to_mp3, recording_seconds
+from app.transcribe import (
+    NOTHING_HEARD,
+    TranscriptionError,
+    convert_to_mp3,
+    recording_seconds,
+    request_timeout,
+)
 from tests.helpers import InstallResponses, heard
 
 RUN = "прогон-для-теста"
@@ -27,7 +33,45 @@ def recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         return target
 
     monkeypatch.setattr(transcribe, "convert_to_mp3", convert)
+    # Длина тоже мимо подпроцесса: её читает ffprobe, а в файле теста лежат три байта.
+    monkeypatch.setattr(transcribe, "recording_seconds", lambda path: 12)
     return voice
+
+
+def test_request_timeout_holds_the_old_floor_for_a_short_recording() -> None:
+    """База формулы — сегодняшние 120 с: короткий вход ждёт не меньше, чем ждал до неё."""
+    assert request_timeout(10) == 122.5
+    assert request_timeout(60) == 135.0
+
+
+def test_request_timeout_grows_with_the_recording() -> None:
+    assert request_timeout(1200) == 420.0
+    assert request_timeout(3600) == 1020.0
+
+
+def test_the_client_of_a_long_recording_waits_by_its_length(
+    whisper: InstallResponses, recording: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Иначе формула осталась бы числом, которое никуда не доходит."""
+    monkeypatch.setattr(transcribe, "recording_seconds", lambda path: 3600)
+    built = whisper_client_remembering(monkeypatch)
+    whisper([heard("Идея.")])
+
+    transcribe.transcribe(recording, RUN)
+
+    assert built == [1020.0]
+
+
+def whisper_client_remembering(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    asked: list[float] = []
+    building = transcribe.whisper_client
+
+    def remember(timeout: float) -> openai.OpenAI:
+        asked.append(timeout)
+        return building(timeout)
+
+    monkeypatch.setattr(transcribe, "whisper_client", remember)
+    return asked
 
 
 def test_the_transcript_takes_the_language_whisper_detected(

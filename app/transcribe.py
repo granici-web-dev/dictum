@@ -6,7 +6,6 @@
 import logging
 import subprocess
 import time
-from functools import cache
 from pathlib import Path
 
 import openai
@@ -20,7 +19,13 @@ logger = logging.getLogger(__name__)
 # verbose_json с языком и длительностью отдаёт только whisper-1: у gpt-4o-transcribe этого
 # формата нет, а язык прогона брать больше неоткуда.
 MODEL = "whisper-1"
-REQUEST_TIMEOUT_SECONDS = 120.0
+
+# Таймаут запроса считается от длины записи, а не берётся константой: константа, подобранная под
+# часовой созвон, превратила бы сорванное соединение на тридцатисекундном голосовом в час
+# молчания, а с двумя повторами SDK — в три часа. База это сегодняшнее значение и пол для
+# коротких входов; множитель взят запасом примерно вчетверо к замеренному на живых прогонах.
+TIMEOUT_BASE_SECONDS = 120.0
+TIMEOUT_PER_AUDIO_SECOND = 0.25
 
 # Whisper называет язык английским словом («russian»), а артефакты прогона несут код. Таблица
 # покрывает языки команды; незнакомое имя идёт дальше как есть — соврать про язык хуже.
@@ -142,8 +147,12 @@ def http_client() -> DefaultHttpxClient:
     return DefaultHttpxClient()
 
 
-@cache
-def whisper_client() -> openai.OpenAI:
+def request_timeout(audio_seconds: int) -> float:
+    return TIMEOUT_BASE_SECONDS + audio_seconds * TIMEOUT_PER_AUDIO_SECOND
+
+
+def whisper_client(timeout: float) -> openai.OpenAI:
+    """Свой клиент на прогон: таймаут у каждой записи свой, и кэшировать его нечем."""
     if not settings.allow_live_api:
         raise LiveApiNotAllowed(
             "ALLOW_LIVE_API is not true, nothing was sent. "
@@ -154,7 +163,7 @@ def whisper_client() -> openai.OpenAI:
     return openai.OpenAI(
         api_key=settings.openai_api_key,
         max_retries=2,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+        timeout=timeout,
         http_client=http_client(),
     )
 
@@ -170,10 +179,12 @@ def language_code(detected: str) -> str:
 
 
 def transcribe(audio: Path, run_id: str) -> Transcription:
-    # Клиент строится первым: он проверяет ALLOW_LIVE_API и ключ, и делать это после ffmpeg
-    # значит запустить подпроцесс ради прогона, который всё равно откажется.
+    # Клиент строится до ffmpeg: он проверяет ALLOW_LIVE_API и ключ, и делать это после
+    # перекодировки значит перемолоть часовую запись ради прогона, который всё равно откажется.
+    # Длина меряется ещё раньше: без неё не выбрать таймаут, и стоит этот замер один быстрый
+    # подпроцесс над заголовком файла.
     try:
-        client = whisper_client()
+        client = whisper_client(request_timeout(recording_seconds(audio)))
         mp3 = convert_to_mp3(audio)
         started = time.perf_counter()
         with mp3.open("rb") as recording:

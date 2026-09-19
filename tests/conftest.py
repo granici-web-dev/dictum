@@ -67,7 +67,7 @@ def llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
 
 
 @pytest.fixture
-def whisper(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
+def whisper(monkeypatch: pytest.MonkeyPatch) -> InstallResponses:
     """Whisper тем же способом, что и Anthropic: OpenAI SDK тоже на httpx2, мимо respx."""
 
     def install(responses: list[httpx2.Response]) -> list[httpx2.Request]:
@@ -84,11 +84,9 @@ def whisper(monkeypatch: pytest.MonkeyPatch) -> Iterator[InstallResponses]:
             "http_client",
             lambda: OpenAiHttpxClient(transport=httpx2.MockTransport(handler)),
         )
-        transcribe.whisper_client.cache_clear()
         return requests
 
-    yield install
-    transcribe.whisper_client.cache_clear()
+    return install
 
 
 @pytest.fixture
