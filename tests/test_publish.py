@@ -8,7 +8,7 @@ import respx
 
 from app.config import InvalidProjectKey, LiveApiNotAllowed, MissingApiKey, settings
 from app.models import Issue, IssuesFile
-from app.pipeline import ANSWERS, APPROACH_JSON, SHAPE_PROMPT, STEPS_JSON
+from app.pipeline import ANSWERS, APPROACH_JSON, APPROACH_SKIPPED, SHAPE_PROMPT, STEPS_JSON
 from app.publish import (
     CardOutcome,
     PublishedCard,
@@ -911,6 +911,20 @@ def test_the_card_description_carries_neither_the_research_nor_the_shape_prompt(
     assert "Research" not in description
     assert "Plan this task" not in description
     assert "React Hook Form mit zod-Schema über den Resolver" not in description
+
+
+def test_a_task_published_without_research_still_gets_its_shape_prompt(
+    board: FakeBoard, tmp_path: Path
+) -> None:
+    """«Шаги без ресёрча» задания не отнимают: без ресёрча в нём просто нет раздела Research."""
+    path = steps_file(tmp_path)
+    (tmp_path / APPROACH_JSON).write_text(APPROACH_SKIPPED, encoding="utf-8")
+
+    publish_task(path)
+
+    written = (tmp_path / SHAPE_PROMPT).read_text(encoding="utf-8")
+    assert "## Research" not in written
+    assert "## Steps" in written
 
 
 def test_a_task_without_its_research_on_disk_fails_before_the_card(

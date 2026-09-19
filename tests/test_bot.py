@@ -4236,6 +4236,8 @@ async def test_with_gates_off_a_task_does_not_park_and_its_questions_go_to_the_c
     assert answers_of(tmp_path).status == "not_sent"
     assert store.questions == {}
     assert 12 not in store.stops
+    # Ворот не было, но задание для /rigorous shape приходит тем же ходом: карточка есть.
+    assert chat.documents == [tmp_path / "runs" / "ребёнок" / SHAPE_PROMPT]
 
 
 def test_a_child_broken_after_the_teamlead_answered_resumes_past_the_questions(
