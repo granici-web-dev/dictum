@@ -7,15 +7,21 @@ from app.answers import Answers, AnswersStatus, read_answers
 from app.clarify import Clarify
 from app.models import Deferred
 from app.project import project_snapshot, read_project, read_standards
+from app.approach import Approach
 from app.render import (
     MAX_MESSAGE_CHARACTERS,
     NOT_FOUND_IN_MESSAGE,
+    NO_TEAMLEAD_ANSWERS,
+    OPEN_QUESTIONS_LEAD,
+    RESEARCH_CHANGED,
+    SHAPE_PROMPT_LEAD,
     backlog_digest,
     brief_digest,
     issues_markdown,
     review_lead,
     review_markdown,
     review_messages,
+    shape_prompt,
     questions_copy_text,
     questions_note,
     standards_line,
@@ -461,3 +467,92 @@ def test_the_old_snapshot_is_named_by_the_day_it_was_taken() -> None:
     assert standards_snapshot_line(read_project(project_snapshot(None, TAKEN_AT))) == (
         "Стандарты проекта: снимок от 17.09 10:02 UTC, каталог сейчас недоступен"
     )
+
+
+EXISTING_DE = Approach.model_validate_json(
+    (FIXTURES / "approach_existing_de.json").read_text(encoding="utf-8")
+)
+SKIPPED = Approach(status="skipped")
+
+
+def test_the_shape_prompt_matches_the_snapshot() -> None:
+    expected = (FIXTURES / "shape_prompt_de.md").read_text(encoding="utf-8")
+
+    assert shape_prompt(steps_de(), PARTIAL, EXISTING_DE) == expected
+
+
+def test_the_shape_prompt_opens_with_the_line_to_paste_and_never_types_the_command() -> None:
+    """Команду `/rigorous shape` владелец набирает сам: файл — это то, что он вставляет следом."""
+    written = shape_prompt(steps_de(), PARTIAL, EXISTING_DE)
+
+    assert written.startswith(f"{SHAPE_PROMPT_LEAD}\n")
+    assert "/rigorous" not in written
+
+
+def test_an_approach_changed_at_the_gate_marks_the_research_as_stale() -> None:
+    """Правка на воротах переписала шаги, а ресёрч сравнивал варианты для другого выбора."""
+    steps = steps_de()
+    # Второй вариант того же ресёрча: подход, на который владелец мог переправить шаги.
+    steps.approach = Pair(
+        text="Eingebaute Regeln von React Hook Form",
+        translation="Встроенные правила React Hook Form",
+    )
+    expected = (FIXTURES / "shape_prompt_de_changed.md").read_text(encoding="utf-8")
+
+    written = shape_prompt(steps, PARTIAL, EXISTING_DE)
+
+    assert written == expected
+    assert RESEARCH_CHANGED in written
+    assert "### How to write it" not in written
+    assert "### Project standards" not in written
+
+
+def test_a_source_the_search_never_returned_stays_out_of_the_shape_prompt() -> None:
+    approach = EXISTING_DE.model_copy(deep=True)
+    approach.sources[1].found_by_search = False
+
+    written = shape_prompt(steps_de(), PARTIAL, approach)
+
+    assert "https://example.org/react-hook-form/resolvers" in written
+    assert "https://example.org/zod/strings" not in written
+
+
+def test_a_skipped_research_leaves_the_shape_prompt_without_a_research_section() -> None:
+    written = shape_prompt(steps_de(), PARTIAL, SKIPPED)
+
+    assert "## Research" not in written
+    assert "## Steps" in written
+
+
+def test_the_shape_prompt_asks_only_about_the_questions_that_have_no_answer() -> None:
+    written = shape_prompt(steps_de(), PARTIAL, EXISTING_DE)
+
+    section = written.split("## Open questions\n\n", 1)[1]
+    assert section.startswith(f"{OPEN_QUESTIONS_LEAD}\n")
+    asked = [line.split(".", 1)[0] for line in section.splitlines() if line[:1].isdigit()]
+    assert asked == [str(number) for number in steps_de().unanswered]
+
+
+def test_the_shape_prompt_carries_the_ticket_and_its_acceptance_criteria() -> None:
+    [task] = Review.model_validate_json(
+        (FIXTURES / "review_ticket_de.json").read_text(encoding="utf-8")
+    ).tasks
+    steps = steps_de()
+    assert steps.task is not None
+    steps.task.ticket_key, steps.task.ticket_url = task.ticket_key, task.ticket_url
+    steps.task.acceptance = task.acceptance
+
+    written = shape_prompt(steps, PARTIAL, EXISTING_DE)
+
+    assert f"- **Ticket:** {task.ticket_key} — {task.ticket_url}" in written
+    assert "## Acceptance criteria" in written
+    assert all(said.original in written for said in task.acceptance)
+
+
+@pytest.mark.parametrize("status", ["without_answers", "not_sent", "nothing_asked"])
+def test_the_shape_prompt_says_plainly_that_the_teamlead_answered_nothing(
+    status: AnswersStatus,
+) -> None:
+    written = shape_prompt(steps_de(), Answers(status=status), EXISTING_DE)
+
+    assert f"## Teamlead answers\n\n{NO_TEAMLEAD_ANSWERS}\n" in written

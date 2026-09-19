@@ -650,3 +650,88 @@ def approach_markdown(approach: Approach, project: Project, assignment_and_answe
         lines += ["", "## Searches", ""]
         lines += [f"- {query}" for query in approach.searches]
     return "\n".join(lines) + "\n"
+
+
+# Задание для `/rigorous shape` в рабочем репозитории (P3-11, часть F). Команду владелец
+# набирает сам, поэтому её слов в файле нет: файл — это то, что он вставляет следом.
+SHAPE_PROMPT_LEAD = "Plan this task with the project's standards before writing any code."
+NO_TEAMLEAD_ANSWERS = "no answers"
+# Правка на воротах («делаем на Formik») меняет шаги, а approach.json остаётся прежним. Код
+# видит это без модели: строка подхода в шагах разошлась с рекомендацией ресёрча.
+RESEARCH_CHANGED = (
+    "Approach was changed at approval: the research below compared options for a different choice."
+)
+OPEN_QUESTIONS_LEAD = "The teamlead has not answered these. Do not assume an answer: ask."
+
+
+def research_in_prompt(approach: Approach, chosen: Pair | None) -> list[str]:
+    """Ресёрч в задании: выбранный подход, почему он, как это писать и чем это подтверждено."""
+    recommendation = approach.recommendation
+    if recommendation is None:
+        return []
+    headline = chosen or recommendation.headline
+    lines = ["## Research", "", *pair_in_file(headline, "", "")]
+    if chosen is not None and chosen.text != recommendation.headline.text:
+        lines += ["", RESEARCH_CHANGED]
+    else:
+        lines += ["", recommendation.why]
+        if recommendation.how_to_write:
+            lines += ["", "### How to write it", ""]
+            lines += [
+                f"{number}. {item}"
+                for number, item in enumerate(recommendation.how_to_write, start=1)
+            ]
+        if recommendation.standards_refs:
+            lines += ["", "### Project standards", ""]
+            for reference in recommendation.standards_refs:
+                missing = "" if reference.in_snapshot else f" {QUOTE_NOT_IN_STANDARDS}"
+                lines += [f"- `{reference.file}`{missing}", f"  > {reference.quote}"]
+    # Только подтверждённые поиском: непроверенная ссылка в задании выглядела бы источником.
+    found = [source for source in approach.sources if source.found_by_search]
+    if found:
+        lines += ["", "### Sources", ""]
+        lines += [f"- {source.title} — {source.url}" for source in found]
+    return lines
+
+
+def shape_prompt(steps: Steps, answers: Answers, approach: Approach) -> str:
+    """Задание для `/rigorous shape`, собранное кодом из проверенных артефактов прогона.
+
+    Модель его не пересказывает: всё, что здесь стоит, уже проверено и проштамповано своей
+    стадией, а пересказ разошёлся бы с артефактами, не поспорив об этом вслух (SPEC §7.3).
+    """
+    lines = [SHAPE_PROMPT_LEAD, "", "## Task", "", *pair_in_file(steps.title, "", "")]
+    lines += ["", *pair_in_file(steps.summary, "", "")]
+    task = steps.task
+    if task and task.ticket_key:
+        ticket = " — ".join(filter(None, (task.ticket_key, task.ticket_url)))
+        lines += ["", f"- **Ticket:** {ticket}"]
+    if task and task.deadline:
+        lines += ["", "## Deadline", "", said_in_file(task.deadline)]
+    if task:
+        for heading, said in (
+            ("Constraints", task.constraints),
+            ("Acceptance criteria", task.acceptance),
+            ("Do not", task.do_not),
+        ):
+            if said:
+                lines += ["", f"## {heading}", "", *(f"- {said_in_file(item)}" for item in said)]
+    lines += ["", "## Teamlead answers", ""]
+    if answers.text:
+        lines += [f"> {line}" for line in answers.text.splitlines()]
+    else:
+        lines.append(NO_TEAMLEAD_ANSWERS)
+    research = research_in_prompt(approach, steps.approach)
+    if research:
+        lines += ["", *research]
+    lines += ["", "## Steps", ""]
+    for number, step in enumerate(steps.steps, start=1):
+        lines += pair_in_file(step, f"{number}. ", "   ")
+    unanswered = [asked for asked in steps.questions if not asked.answered]
+    if unanswered:
+        lines += ["", "## Open questions", "", OPEN_QUESTIONS_LEAD, ""]
+        for asked in unanswered:
+            lines.append(f"{asked.number}. {asked.text}")
+            if asked.translation:
+                lines.append(f"   → {asked.translation}")
+    return "\n".join(lines) + "\n"
