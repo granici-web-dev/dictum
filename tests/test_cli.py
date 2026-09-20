@@ -7,14 +7,13 @@ from pathlib import Path
 import pytest
 
 from app.cli import (
-    CONSENT_QUESTION,
     EXIT_NEEDS_A_DECISION,
     EXIT_OK,
     EXIT_STAGE_FAILED,
     EXIT_USAGE,
     main,
-    price_line,
 )
+from app.meeting import CONSENT_QUESTION
 from app import bot, cli, publish, stages, store, transcribe
 from app.config import ConfigError, settings
 from app.pipeline import Stage
@@ -836,15 +835,6 @@ def test_steps_without_an_assignment_on_disk_is_a_usage_error(
 # --- make meeting: запись с ноутбука (P3-08, фаза 1) ---
 
 MEETING_CHAT = "12"
-
-
-def test_price_line_names_whisper_exactly() -> None:
-    assert "$0.36" in price_line(3600)
-
-
-def test_price_line_calls_the_review_unmeasured() -> None:
-    """Число за разбор часовой встречи никем не замерено, и придумать его нельзя (правило 5)."""
-    assert "не замерен ни разу" in price_line(3600)
 
 
 class Terminal:

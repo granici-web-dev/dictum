@@ -8,8 +8,6 @@
 import argparse
 import asyncio
 import logging
-import math
-import shutil
 import sys
 import threading
 import time
@@ -30,6 +28,11 @@ from app.bot import INGEST_LABEL, LABEL, RUNS, allowed_chats
 from app.config import ConfigError, LiveApiNotAllowed, MissingApiKey, settings
 from app.deliver import Delivery, idea_keyboard, send_tasks_and_documents
 from app.ingest import new_run_id, run_id_of
+from app.meeting import (
+    CONSENT_QUESTION,
+    consent_question as recording_consent_question,
+    copied_recording,
+)
 from app.pipeline import (
     ANSWERS,
     ASSIGNMENT_JSON,
@@ -46,7 +49,7 @@ from app.pipeline import (
     stage_named,
     stages_between,
 )
-from app.render import minutes_count, review_lead
+from app.render import review_lead
 from app.review import Review
 from app.run import Run, missing_before, read_artifact, walk, write_artifact
 from app.stages import StageError
@@ -218,17 +221,12 @@ REVIEW_STAGE = "review"
 # Продолжение, которому осталась одна доставка: стадий у него нет вовсе.
 DELIVERY_ONLY = "delivery"
 
-# $0.006 за минуту записи: час стоит $0.36. Считается по целым минутам, как их и тарифицируют.
-WHISPER_PER_MINUTE = 0.006
-
 # Пустой экран на пять минут неотличим от зависшего процесса.
 TICK_SECONDS = 30.0
 
 CONSENT_WORD = "да"
 
 CONSENT_ASKED = f"Введите «{CONSENT_WORD}», чтобы начать: "
-
-CONSENT_QUESTION = "Все, чьи голоса в записи есть, знали о записи и согласны на это?"
 
 NO_CONSENT = "Без согласия запись не расшифровывается."
 
@@ -266,53 +264,23 @@ DELIVERED = "Разбор ушёл в чат {chat}: сообщений {sent}."
 NOT_DELIVERED = "Не ушло сообщений: {failed}. Повторить доставку: make deliver RUN={run_id}"
 
 
-def whisper_price(seconds: int) -> str:
-    return f"${math.ceil(seconds / 60) * WHISPER_PER_MINUTE:.2f}"
-
-
-def price_line(seconds: int) -> str:
-    """Whisper точной цифрой, разбор — названной неизвестностью.
-
-    Придумать число за разбор значило бы нарушить правило 5 ровно там, где человек на это число
-    опирается. После живого прогона фазы 1 замер появится, и строка станет диапазоном с числом.
-    """
-    return (
-        f"Расшифровка уйдёт в OpenAI, за пределы EU, и будет стоить {whisper_price(seconds)}. "
-        "Разбор сверх этого: на коротких встречах он стоил около $0.02, на часовой не замерен "
-        "ни разу."
-    )
-
-
 # Продолжение платит только за то, за что ещё не платили: лежащая расшифровка снимает Whisper из
-# сметы, лежащий разбор — и разбор тоже.
+# сметы, лежащий разбор — и разбор тоже. У папки входящих продолжения нет, и эти две строки
+# остаются командой.
 PRICE_WITHOUT_WHISPER = (
-    "Расшифровка уже лежит, второй раз за неё не платим. Разбор: на коротких встречах он стоил "
-    "около $0.02, на часовой не замерен ни разу."
+    "Расшифровка уже лежит, второй раз за неё не платим. Платный тут только разбор."
 )
 
 PRICE_OF_NOTHING = "Платного в этом запуске нет: разбор написан, осталась доставка."
 
 
-def spending(start: str, seconds: int) -> str:
-    if start == DELIVERY_ONLY:
-        return PRICE_OF_NOTHING
-    if start == REVIEW_STAGE:
-        return PRICE_WITHOUT_WHISPER
-    return price_line(seconds)
-
-
 def consent_question(recording: Path | None, seconds: int, start: str, run_id: str) -> str:
-    """Один вопрос на два факта: цена и согласие решаются одним человеком в один момент.
-
-    Два вопроса подряд учат тому, что второй — формальность. Имя файла, а не путь: путь к
-    домашнему каталогу владельца в этом тексте не нужен никому.
-    """
-    heading = (
-        f"Запись: {recording.name}, {minutes_count(math.ceil(seconds / 60))}."
-        if recording is not None
-        else f"Прогон {run_id}: запись уже расшифрована."
-    )
-    return "\n".join([heading, spending(start, seconds), CONSENT_QUESTION])
+    """Тот же вопрос, что у папки входящих, плюс смета продолжения вместо цены записи."""
+    if recording is not None:
+        return recording_consent_question(recording.name, seconds)
+    spent = PRICE_OF_NOTHING if start == DELIVERY_ONLY else PRICE_WITHOUT_WHISPER
+    heading = f"Прогон {run_id}: запись уже расшифрована."
+    return "\n".join([heading, spent, CONSENT_QUESTION])
 
 
 def consent_given(question: str) -> bool:
@@ -393,17 +361,6 @@ def meeting_recording(given: str | None, start: str, run_id: str) -> Path | None
     if not recording.is_file():
         raise ConfigError(NO_RECORDING.format(name=given))
     return recording
-
-
-def copied_recording(recording: Path, root: Path) -> Path:
-    """Копия, а не оригинал: расшифровка при KEEP_AUDIO=false удаляет то, что ей дали.
-
-    Запись владельца лежит у него на диске и остаётся нетронутой при любом исходе прогона.
-    """
-    target = root / f"inputs/recording{recording.suffix}"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(recording, target)
-    return target
 
 
 @contextmanager
