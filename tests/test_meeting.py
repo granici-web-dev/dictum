@@ -32,19 +32,24 @@ def test_price_line_names_both_measured_review_costs() -> None:
     line = price_line(AN_HOUR)
 
     assert "4 минуты" in line
-    assert "$0.15" in line
+    assert "$0.10" in line
     assert "44 минуты" in line
-    assert "$0.37" in line
+    assert "$0.25" in line
 
 
 def test_price_line_says_around_and_never_a_bare_number() -> None:
     assert "около" in price_line(AN_HOUR)
 
 
-def test_the_review_estimate_passes_through_both_measurements() -> None:
-    """Прямая через две точки обязана проходить через сами точки, иначе она не про них."""
-    assert dollars(review_price(3 * 60)) == pytest.approx(0.15, abs=0.02)
-    assert dollars(review_price(44 * 60)) == pytest.approx(0.37, abs=0.02)
+def test_the_review_price_follows_the_sonnet_5_rate() -> None:
+    """Прямая через две точки обязана проходить через сами точки, иначе она не про них.
+
+    Точки пересчитаны по действующему тарифу $2 / $10: по $3 / $15 считался claude-sonnet-4-6,
+    и цена перед оплатой называла числа чужой модели.
+    """
+    assert dollars(review_price(3 * 60)) == pytest.approx(0.10, abs=0.02)
+    assert dollars(review_price(44 * 60)) == pytest.approx(0.25, abs=0.02)
+    assert review_price(AN_HOUR) == "$0.31"
 
 
 def test_the_review_estimate_still_grows_with_length() -> None:
