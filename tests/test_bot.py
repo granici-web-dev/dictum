@@ -4514,7 +4514,6 @@ def readable_recordings(monkeypatch: pytest.MonkeyPatch) -> None:
 def no_folder(monkeypatch: pytest.MonkeyPatch) -> None:
     """Папка — состояние процесса: без сброса она переезжала бы из теста в тест."""
     monkeypatch.setattr(bot, "watched_folder", None)
-    monkeypatch.setattr(settings, "meeting_inbox_dir", "")
 
 
 def a_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = RECORDING) -> Path:
