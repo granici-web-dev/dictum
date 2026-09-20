@@ -1,6 +1,15 @@
 """Настройки из .env и ошибки конфигурации, общие для всех исходящих клиентов."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Сколько токенов claude-sonnet-5 отдаёт за один ответ (Models overview, сверено 20.09.2026).
+# Больше этого API не даст и ответит 400 — уже после того, как расшифровка оплачена.
+MODEL_MAX_TOKENS = 128000
+
+# Ниже этого ответ стадии не помещается вместе с размышлением, которое у модели идёт по
+# умолчанию: такой потолок обрывает не длинную запись, а любую.
+LEAST_USEFUL_MAX_TOKENS = 1024
 
 
 class Settings(BaseSettings):
@@ -9,7 +18,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
     anthropic_model_decompose: str = "claude-sonnet-5"
-    anthropic_max_tokens: int = 24000
+    # Потолок одного ответа. 64 000 это половина потолка модели и запас 1,28 к ожидаемым
+    # 50 000 токенов разбора самой длинной записи, которую система вообще принимает (138 минут,
+    # один запрос Whisper). Поднимать есть куда: вторая половина оставлена нарочно.
+    anthropic_max_tokens: int = 64000
     allow_live_api: bool = False
     openai_api_key: str = ""
     telegram_bot_token: str = ""
@@ -44,6 +56,28 @@ class Settings(BaseSettings):
     # Класть ли рядом с артефактами разбор ответов модели: типы блоков и usage по каждому вызову
     # (SPEC §7). По умолчанию нет: файл нужен диагностике, а не прогону.
     trace_stage_calls: bool = False
+
+    @field_validator("anthropic_max_tokens")
+    @classmethod
+    def within_the_model(cls, asked: int) -> int:
+        """Промах в .env ловится на старте, а не ответом API после оплаченной расшифровки.
+
+        Тот же довод, по которому `ensure_schema()` стоит до Whisper (SPEC §3.1): узнать о
+        промахе после $0.83 — худший момент из возможных.
+        """
+        if asked > MODEL_MAX_TOKENS:
+            raise ValueError(
+                f"ANTHROPIC_MAX_TOKENS={asked} больше потолка модели: claude-sonnet-5 отдаёт "
+                f"не больше {MODEL_MAX_TOKENS} токенов за ответ. Поставьте значение не больше "
+                f"{MODEL_MAX_TOKENS} в .env."
+            )
+        if asked < LEAST_USEFUL_MAX_TOKENS:
+            raise ValueError(
+                f"ANTHROPIC_MAX_TOKENS={asked} меньше {LEAST_USEFUL_MAX_TOKENS}: столько не "
+                "хватит ни на один ответ стадии вместе с размышлением, и оборвётся не длинная "
+                "запись, а любая."
+            )
+        return asked
 
 
 class ConfigError(RuntimeError):

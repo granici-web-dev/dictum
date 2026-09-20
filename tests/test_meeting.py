@@ -57,22 +57,34 @@ def test_the_review_estimate_still_grows_with_length() -> None:
     assert dollars(review_price(AN_HOUR)) > dollars(review_price(44 * 60))
 
 
-def test_price_line_warns_when_the_review_may_not_fit_one_pass() -> None:
-    """Расшифровка к моменту обрыва уже оплачена, и молчать об этом до согласия нельзя."""
+def test_a_two_hour_recording_gets_no_one_pass_warning() -> None:
+    """Предел потребности владельца — два часа, и при умолчании разбор их берёт одним проходом."""
+    assert "ANTHROPIC_MAX_TOKENS" not in price_line(120 * 60)
+
+
+def test_the_one_pass_warning_still_fires_on_a_lowered_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Строка живая, а не мёртвая: её мёртвость при умолчании — цель работы, а не лишний код."""
+    monkeypatch.setattr(settings, "anthropic_max_tokens", 12000)
+
     assert "ANTHROPIC_MAX_TOKENS" in price_line(60 * 60)
-    assert "ANTHROPIC_MAX_TOKENS" not in price_line(40 * 60)
 
 
 def test_the_one_pass_warning_moves_with_anthropic_max_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Настройку поднимают ровно затем, чтобы длинная запись прошла: граница едет вместе с ней."""
+    """Настройку поднимают ровно затем, чтобы длинная запись прошла: граница едет вместе с ней.
+
+    При умолчании 64 000 граница садится на границу одного запроса Whisper: всё, что длиннее,
+    отвергается раньше, чем дойдёт до этой строки.
+    """
+    assert one_pass_minutes() == 138
+
+    monkeypatch.setattr(settings, "anthropic_max_tokens", 24000)
+
     assert one_pass_minutes() == 52
-
-    monkeypatch.setattr(settings, "anthropic_max_tokens", 48000)
-
-    assert one_pass_minutes() == 103
-    assert "ANTHROPIC_MAX_TOKENS" not in price_line(60 * 60)
+    assert "ANTHROPIC_MAX_TOKENS" in price_line(60 * 60)
 
 
 def test_the_consent_question_names_the_file_the_length_and_the_price() -> None:
