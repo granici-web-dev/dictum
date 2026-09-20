@@ -11,10 +11,12 @@ run-text:
 	uv run python -m app.cli $(if $(FILE),--file $(FILE),"$(TEXT)") $(ARGS)
 # Запись встречи с ноутбука: спрашивает согласие и цену в терминале, разбор уходит в чат.
 # RUN=<id> продолжает сорванный прогон по тому, что он успел записать.
+# Кавычки вокруг значений обязательны: без них «Новая запись 11.m4a» уходит тремя аргументами.
 meeting:
-	uv run python -m app.cli $(if $(FILE),--meeting $(FILE),) $(if $(RUN),--run $(RUN),) $(if $(CHAT),--chat $(CHAT),)
+	@[ -n "$(FILE)$(RUN)" ] || { echo "Нужен FILE=<путь к записи> или RUN=<id прогона>."; exit 64; }
+	uv run python -m app.cli $(if $(FILE),--meeting "$(FILE)",) $(if $(RUN),--run "$(RUN)",) $(if $(CHAT),--chat "$(CHAT)",)
 deliver:
-	uv run python -m app.cli --deliver $(RUN) $(if $(CHAT),--chat $(CHAT),)
+	uv run python -m app.cli --deliver "$(RUN)" $(if $(CHAT),--chat "$(CHAT)",)
 # Уборка своей доски и артефактов после проверочных прогонов. Обе цели только руками и ни от
 # чего не зависят: попасть в них из up, test или run-text нельзя, иначе однажды прогон сотрёт
 # доску или артефакты за собой.
