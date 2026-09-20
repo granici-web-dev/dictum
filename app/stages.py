@@ -81,9 +81,9 @@ ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = ROOT / ".claude" / "commands"
 API_MODE_PROMPT = ROOT / "templates" / "api_mode.md"
 
-# Без явного таймаута SDK считает выход по 28 токенов в секунду и запрещает нестримовый запрос
-# уже на 21 334 токенах. Замеренная скорость стадий — около 110 в секунду, то есть потолок
-# в 24 000 укладывается примерно в четыре минуты; десять — запас на медленный ответ.
+# При потоке это не время всего запроса, а время молчания между событиями, и смысл у него
+# лучше прежнего: поток, замолчавший на десять минут, мёртв, а генерация на восемь минут —
+# нормальная работа разбора двухчасовой встречи. От длины ответа он больше не зависит вовсе.
 REQUEST_TIMEOUT_SECONDS = 600.0
 
 FILE_BLOCK = re.compile(r"""<file\s+path=["']([^"']+)["']\s*>\n?(.*?)</file>""", re.DOTALL)
@@ -529,14 +529,20 @@ def ask_once(
 ) -> tuple[Message, int]:
     started = time.perf_counter()
     try:
-        response = anthropic_client().messages.create(
+        # Потоком у всех стадий одной веткой (SPEC §7). Нестримовый запрос упирается не в
+        # модель, а в HTTP-таймаут: при замеренных 106 токенах в секунду десять минут это около
+        # 63 600 токенов выхода, и за ними запрос умирает, а SDK повторяет его дважды — прогон
+        # платит за генерацию трижды и не получает ничего. Ветка «стримить, когда потолок велик»
+        # была бы вторым путём кода, которым никто не ходит, пока он не сломается.
+        with anthropic_client().messages.stream(
             model=model,
             max_tokens=settings.anthropic_max_tokens,
             system=load_prompt(stage) + "\n\n" + API_MODE_PROMPT.read_text(encoding="utf-8"),
             messages=messages,
             thinking=thinking_of(stage),
             tools=tools,
-        )
+        ) as stream:
+            response: Message = stream.get_final_message()
     except anthropic.APIError as error:
         logger.warning(
             "stage=%s run=%s model=%s duration_ms=%d error=%s",

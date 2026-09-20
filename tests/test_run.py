@@ -968,7 +968,11 @@ def test_no_diagnostics_file_without_the_setting(llm: InstallResponses, tmp_path
 def test_the_diagnostics_file_names_the_blocks_without_their_content(
     llm: InstallResponses, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Сырой ответ удачной стадии нигде не остаётся, и причину дефекта ищут по форме ответа."""
+    """Сырой ответ удачной стадии нигде не остаётся, и причину дефекта ищут по форме ответа.
+
+    Он же и проверка, что разбор блоков пережил поток: блоки приходят событиями и собираются
+    обратно, а список типов и `caller` у них тот же, что был до потоковой передачи.
+    """
     monkeypatch.setattr(settings, "trace_stage_calls", True)
     parent = a_review_on_disk(tmp_path / "parent")
     child = tmp_path / "child"

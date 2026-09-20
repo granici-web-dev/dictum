@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -29,8 +30,52 @@ def message_body(text: str, stop_reason: str = "end_turn") -> dict[str, Any]:
     }
 
 
+def sse(body: dict[str, Any]) -> httpx2.Response:
+    """Тот же ответ, но событиями потока: стадии зовут модель только так (SPEC §7).
+
+    Блок уходит целиком одним `content_block_start`, без дельт: собирается он в тот же
+    `Message`, а дробить текст по буквам двойнику незачем — стадия читает готовый ответ.
+    `stop_reason` и `usage` приходят последним `message_delta`, как у настоящего API, и
+    `thinking_tokens` вместе с ними.
+    """
+    opening = {name: value for name, value in body.items() if name != "content"} | {"content": []}
+    events: list[tuple[str, dict[str, Any]]] = [
+        ("message_start", {"type": "message_start", "message": opening})
+    ]
+    for index, block in enumerate(body["content"]):
+        events.append(
+            (
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": block},
+            )
+        )
+        events.append(("content_block_stop", {"type": "content_block_stop", "index": index}))
+    events.append(
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": body["stop_reason"],
+                    "stop_sequence": body["stop_sequence"],
+                },
+                "usage": body["usage"],
+            },
+        )
+    )
+    events.append(("message_stop", {"type": "message_stop"}))
+    stream = "".join(
+        f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n" for name, data in events
+    )
+    return httpx2.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content=stream.encode("utf-8"),
+    )
+
+
 def ok(text: str, stop_reason: str = "end_turn") -> httpx2.Response:
-    return httpx2.Response(200, json=message_body(text, stop_reason))
+    return sse(message_body(text, stop_reason))
 
 
 def thought(text: str, thinking_tokens: int = 900) -> httpx2.Response:
@@ -42,7 +87,7 @@ def thought(text: str, thinking_tokens: int = 900) -> httpx2.Response:
     body = message_body(text)
     body["content"] = [{"type": "thinking", "thinking": "", "signature": "sig"}, *body["content"]]
     body["usage"]["output_tokens_details"] = {"thinking_tokens": thinking_tokens}
-    return httpx2.Response(200, json=body)
+    return sse(body)
 
 
 def server_error() -> httpx2.Response:
@@ -316,15 +361,20 @@ PAUSED_SEARCH_BLOCKS: list[dict[str, Any]] = json.loads(
 )["content"]
 
 
-def searched(text: str, requests: int = 2) -> httpx2.Response:
+def searched_body(text: str, requests: int = 2) -> dict[str, Any]:
     """Ответ стадии с поиском: блоки поиска из фикстуры, за ними текст с файлом стадии.
 
     Текст модели до поиска («поищу…») лежит в фикстуре вне тегов и должен уйти в никуда.
+    Телом, а не ответом: тесту, которому нужен ответ без цитат, эти блоки приходится править.
     """
     body = message_body(text)
-    body["content"] = [*WEB_SEARCH_BLOCKS, *body["content"]]
+    body["content"] = deepcopy([*WEB_SEARCH_BLOCKS, *body["content"]])
     body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
-    return httpx2.Response(200, json=body)
+    return body
+
+
+def searched(text: str, requests: int = 2) -> httpx2.Response:
+    return sse(searched_body(text, requests))
 
 
 def filtered_search(text: str, requests: int = 1) -> httpx2.Response:
@@ -339,7 +389,7 @@ def filtered_search(text: str, requests: int = 1) -> httpx2.Response:
         *body["content"],
     ]
     body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
-    return httpx2.Response(200, json=body)
+    return sse(body)
 
 
 def paused_search(requests: int = 1) -> httpx2.Response:
@@ -347,7 +397,7 @@ def paused_search(requests: int = 1) -> httpx2.Response:
     body = message_body("", stop_reason="pause_turn")
     body["content"] = PAUSED_SEARCH_BLOCKS
     body["usage"]["server_tool_use"] = {"web_search_requests": requests, "web_fetch_requests": 0}
-    return httpx2.Response(200, json=body)
+    return sse(body)
 
 
 APPROACH_NEW_DE = (FIXTURES / "approach_new_de.json").read_text(encoding="utf-8")

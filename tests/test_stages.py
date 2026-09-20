@@ -42,7 +42,9 @@ from tests.helpers import (
     real_issues,
     request_body,
     searched,
+    searched_body,
     server_error,
+    sse,
     steps_answer,
     thought,
 )
@@ -126,6 +128,51 @@ def test_run_stage_sends_stage_prompt_and_inputs(llm: InstallResponses) -> None:
     transcript = INPUTS["inputs/transcript.md"]
     expected = f'<file path="inputs/transcript.md">\n{transcript}\n</file>'
     assert body["messages"] == [{"role": "user", "content": expected}]
+
+
+def test_the_model_is_called_through_streaming(llm: InstallResponses) -> None:
+    """Нестримовый запрос упирается не в модель, а в HTTP-таймаут (SPEC §7)."""
+    requests = llm([ok(IDEA_BLOCK)])
+
+    run_stage("intake", INPUTS, RUN)
+
+    body = request_body(requests[0])
+    assert body["stream"] is True
+    assert body["max_tokens"] == settings.anthropic_max_tokens
+
+
+def test_a_streamed_answer_keeps_tokens_and_thinking_in_the_log(
+    llm: InstallResponses, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`thinking_tokens` при потоке приходит последним событием, а не в теле ответа."""
+    llm([thought(IDEA_BLOCK, thinking_tokens=1200)])
+
+    with caplog.at_level(logging.INFO, logger="app.stages"):
+        result = run_stage("intake", INPUTS, RUN)
+
+    assert "thinking=yes thinking_tokens=1200 " in caplog.text
+    assert (result.input_tokens, result.output_tokens) == (120, 30)
+
+
+def test_a_streamed_max_tokens_still_names_the_setting(llm: InstallResponses) -> None:
+    """От `stop_reason` зависит текст кнопки «Продолжить»: без него она предложит вторую оплату."""
+    llm([ok('<file path="inputs/idea.md">\n# Обрыв', stop_reason="max_tokens")])
+
+    with pytest.raises(StageError, match="Raise ANTHROPIC_MAX_TOKENS") as exc_info:
+        run_stage("intake", INPUTS, RUN)
+
+    assert exc_info.value.stop_reason == "max_tokens"
+
+
+def test_the_repair_retry_survives_streaming(llm: InstallResponses) -> None:
+    requests = llm([ok("Вот идея, но я забыл теги."), ok(IDEA_BLOCK)])
+
+    result = run_stage("intake", INPUTS, RUN)
+
+    assert "inputs/idea.md" in result.files
+    repair = request_body(requests[1])["messages"]
+    assert repair[-2] == {"role": "assistant", "content": "Вот идея, но я забыл теги."}
+    assert 'в ответе нет ни одного тега <file path="...">' in repair[-1]["content"]
 
 
 def test_run_stage_sends_params_block(llm: InstallResponses) -> None:
@@ -750,6 +797,27 @@ def test_pause_turn_is_continued_with_the_assistant_blocks_unchanged(
     assert result.files["outputs/clarify.json"] == CLARIFY_DE
 
 
+def test_a_streamed_pause_turn_continues_the_search(
+    llm: InstallResponses, searching: None
+) -> None:
+    """Пауза приходит тем же `stop_reason` и при потоке, а URL собираются по обоим ходам."""
+    llm([paused_search(), searched(clarify_answer())])
+
+    turn = stages.ask_model(
+        "clarify",
+        RUN,
+        settings.anthropic_model,
+        [{"role": "user", "content": "ищи"}],
+        stages.search_tools("clarify", SEARCHING_INPUTS),
+    )
+
+    assert len(turn.paused) == 1
+    assert turn.response.stop_reason == "end_turn"
+    assert [call.stop_reason for call in turn.calls] == ["pause_turn", "end_turn"]
+    assert "https://example.org/typescript/handbook" in turn.urls
+    assert "https://example.org/zod/changelog" in turn.urls
+
+
 def test_a_fourth_pause_in_a_row_fails_the_stage(
     llm: InstallResponses, searching: None
 ) -> None:
@@ -865,9 +933,18 @@ def uncited(text: str) -> httpx2.Response:
     Страница, на которую в фикстуре ссылается цитата, переезжает в результаты поиска: без цитат
     модель её иначе не увидела бы, а источник S3 на неё ссылается.
     """
-    body = json.loads(searched(text).content)
+    body = searched_body(text)
+    # Результат без `encrypted_content` — не результат: у настоящего он есть всегда, а двойник
+    # без него подсовывает форму, которой API не отдаёт. Берём тот же непрозрачный блок, что
+    # цитата несёт на ту же страницу, а не сочиняем второй.
     cited = [
-        {"type": "web_search_result", "url": citation["url"], "title": citation["title"]}
+        {
+            "type": "web_search_result",
+            "url": citation["url"],
+            "title": citation["title"],
+            "page_age": None,
+            "encrypted_content": citation["encrypted_index"],
+        }
         for block in body["content"]
         for citation in block.pop("citations", [])
     ]
@@ -875,7 +952,7 @@ def uncited(text: str) -> httpx2.Response:
         if block["type"] == "web_search_tool_result":
             block["content"].extend(cited)
             break
-    return httpx2.Response(200, json=body)
+    return sse(body)
 
 
 def test_research_without_citations_is_not_a_warning(
