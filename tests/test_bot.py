@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -622,6 +623,146 @@ async def test_the_link_is_the_last_thing_the_message_shows(
     assert note.edits[-1] == finished_text(tmp_path)
     assert len(note.edits) == len(stages_between(CARDS_ROUTE_START, "publish")) + 1
     assert store.status["прогон"] == PUBLISHED
+
+
+class TickingNote(SlowNote):
+    """Сообщение, которое умеет дождаться отметки о времени вместо того, чтобы ждать минуту."""
+
+    def __init__(self, breaks_on_time: bool = False) -> None:
+        super().__init__()
+        self.marked = threading.Event()
+        self.breaks_on_time = breaks_on_time
+
+    async def edit_text(self, text: str, reply_markup: object = None) -> Message:
+        if " идёт " not in text:
+            return await super().edit_text(text, reply_markup)
+        if self.breaks_on_time:
+            self.marked.set()
+            raise TelegramError("message can't be edited")
+        # Отпускаем стадию после того, как правка легла: `follow` гасит отсчёт сразу за обходом,
+        # и отпущенная раньше стадия отменила бы задачу прямо внутри этой правки.
+        sent = await super().edit_text(text, reply_markup)
+        self.marked.set()
+        return sent
+
+
+def clock_of(*readings: float) -> Callable[[], float]:
+    """Часы вместо настоящих: показания по очереди, последнее держится (решение 13)."""
+    times = list(readings)
+
+    def reading() -> float:
+        return times.pop(0) if len(times) > 1 else times[0]
+
+    return reading
+
+
+def walk_waiting_for_a_tick(note: TickingNote) -> Walking:
+    """Стадия, которая идёт ровно до первой отметки о времени, а не назначенные три минуты."""
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        assert note.marked.wait(timeout=5)
+        for stage in stages_between(start, stop):
+            on_done(stage)
+        return None
+
+    return walking
+
+
+async def followed(note: SlowNote, tmp_path: Path) -> None:
+    await follow(
+        cast(Message, note),
+        Run(
+            root=tmp_path,
+            run_id="прогон",
+            lang="ru",
+            text="Идея",
+            source="text",
+            auto_approve=True,
+        ),
+        datetime.now(timezone.utc),
+        CARDS_ROUTE_START,
+    )
+
+
+def a_published_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = tmp_path / "outputs/publish.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text('{"I-001": {}}', encoding="utf-8")
+    monkeypatch.setattr(settings, "trello_board_id", "board1")
+    monkeypatch.setattr(bot, "TICK_SECONDS", 0.001)
+
+
+@pytest.mark.asyncio
+async def test_a_stage_shorter_than_the_tick_says_nothing_about_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Отметка встаёт, только когда стадия идёт дольше минуты: иначе она шум, а не ответ."""
+    a_published_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "monotonic", clock_of(0.0, 30.0))
+    monkeypatch.setattr(bot, "walk", walk_reporting_every_stage)
+    note = TickingNote()
+
+    await followed(note, tmp_path)
+
+    assert not any(" идёт " in edit for edit in note.edits)
+    assert len(note.edits) == len(stages_between(CARDS_ROUTE_START, "publish")) + 1
+
+
+@pytest.mark.asyncio
+async def test_a_long_stage_says_how_many_minutes_it_has_been_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Восемь минут молчания человек читает как повисший прогон (решение 13)."""
+    a_published_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "monotonic", clock_of(0.0, 180.0))
+    note = TickingNote()
+    monkeypatch.setattr(bot, "walk", walk_waiting_for_a_tick(note))
+
+    await followed(note, tmp_path)
+
+    [marked] = [edit for edit in note.edits if " идёт " in edit]
+    assert f"▸ {LABEL[CARDS_ROUTE_START]}: идёт 3 мин" in marked
+    assert marked.startswith("Прогон прогон")
+
+
+@pytest.mark.asyncio
+async def test_the_time_mark_is_gone_once_the_stage_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """После конца стадии строка принимает обычный вид, а ссылка уходит последней."""
+    a_published_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "monotonic", clock_of(0.0, 180.0))
+    note = TickingNote()
+    monkeypatch.setattr(bot, "walk", walk_waiting_for_a_tick(note))
+
+    await followed(note, tmp_path)
+
+    marked = next(index for index, edit in enumerate(note.edits) if " идёт " in edit)
+    assert not any(" идёт " in edit for edit in note.edits[marked + 1 :])
+    assert note.edits[-1] == finished_text(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_time_edit_does_not_kill_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отметка косметическая: сорванная правка не стоит прогона, за который заплачено."""
+    a_published_journal(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "monotonic", clock_of(0.0, 180.0))
+    note = TickingNote(breaks_on_time=True)
+    monkeypatch.setattr(bot, "walk", walk_waiting_for_a_tick(note))
+
+    with caplog.at_level(logging.WARNING, logger="app.bot"):
+        await followed(note, tmp_path)
+
+    assert note.edits[-1] == finished_text(tmp_path)
+    assert store.status["прогон"] == PUBLISHED
+    assert "не поправил отметку о времени" in caplog.text
 
 
 def walk_breaking(

@@ -15,6 +15,7 @@ from concurrent.futures import Future
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -366,6 +367,13 @@ REPLY_NOT_QUESTIONS = (
     "сообщением, без ответа (reply). Ответ тимлида пришлите ответом на сообщение с вопросами."
 )
 
+# Отметка о времени идущей стадии (решение 13). Шаг отсчёта константой, а часы — отдельным
+# именем: тест подставляет и то, и другое, иначе проверка строки «идёт 3 мин» стоила бы три
+# минуты.
+TICK_SECONDS = 60.0
+
+RUNNING_MINUTES = "{label}: идёт {minutes} мин"
+
 QUESTIONS_WITHOUT, QUESTIONS_STOP = "without", "stop"
 
 QUESTIONS_BUTTONS = (
@@ -543,20 +551,49 @@ def allowed_chats() -> frozenset[int]:
     return frozenset(int(part) for part in listed)
 
 
-def progress_text(run: Run, done: list[str], start: str = FIRST_STAGE) -> str:
+def progress_text(run: Run, done: list[str], start: str = FIRST_STAGE, minutes: int = 0) -> str:
+    """Галочки стадий, а у идущей — сколько она идёт, если идёт дольше минуты (решение 13)."""
     labels = dict(LABEL)
     labels[FIRST_STAGE] = INGEST_LABEL.get(run.source, LABEL[FIRST_STAGE])
     lines = [f"Прогон {run.run_id}", ""]
     marked_current = False
     for stage in stages_between(*route_of(start)):
+        label = labels[stage.name]
         if stage.name in done:
             mark = "✓"
         elif not marked_current:
             mark, marked_current = "▸", True
+            if minutes:
+                label = RUNNING_MINUTES.format(label=label, minutes=minutes)
         else:
             mark = "·"
-        lines.append(f"{mark} {labels[stage.name]}")
+        lines.append(f"{mark} {label}")
     return "\n".join(lines)
+
+
+async def tick_time(
+    note: Message, run_id: str, written: Callable[[int], str], running: Callable[[], float]
+) -> None:
+    """Раз в минуту дописывает к идущей стадии, сколько она идёт, пока её не отменят.
+
+    Разбор двухчасовой встречи идёт около восьми минут, а сообщение о ходе правится только между
+    стадиями: тишина такой длины читается как повисший прогон, и на живой проверке 19.09.2026
+    владелец десять минут прождал у молчащей команды. Задачей в цикле событий, а не вторым
+    потоком: обход и так уехал в `to_thread`, цикл свободен, и правка здесь идёт без
+    `run_coroutine_threadsafe` (решение 13).
+
+    Новых сообщений не шлёт: правит своё же. Сорванная правка прогон не роняет — она
+    косметическая ровно в том же смысле, в каком косметичны правки прогресса (SPEC §7.3).
+    """
+    while True:
+        await asyncio.sleep(TICK_SECONDS)
+        minutes = int(running() // 60)
+        if minutes < 1:
+            continue
+        try:
+            await note.edit_text(written(minutes))
+        except TelegramError:
+            logger.warning("Прогон %s не поправил отметку о времени", run_id, exc_info=True)
 
 
 def cards_published(root: Path) -> int:
@@ -1830,11 +1867,20 @@ async def follow(
     done = done_before(start)
     loop = asyncio.get_running_loop()
     progress: list[Future[Message | bool]] = []
+    stage_started = monotonic()
+    # Приписка, которую поставила пройденная стадия. Отдельной строкой, потому что текст
+    # сообщения теперь собирают двое — рабочий поток и отсчёт времени, — и без неё первый же
+    # тик стёр бы строку стандартов.
+    tail = ""
+
+    def written(minutes: int = 0) -> str:
+        return progress_text(run, done, start, minutes) + tail
 
     def report(stage: Stage) -> None:
         # Обход идёт в рабочем потоке, а правка сообщения живёт в цикле событий. Строку пишем
         # прямо отсюда: этот поток и так не цикл событий, а язык прогона после ingest назвал
         # Whisper, и до записи он живёт только в памяти обхода (§4.1).
+        nonlocal stage_started, tail
         done.append(stage.name)
         try:
             mark_stage(run.run_id, stage.name, run.lang)
@@ -1843,15 +1889,26 @@ async def follow(
             # опубликованы. Ронять из-за неё прогон, который человек оплатил, нельзя; строка
             # останется на прошлой стадии, и её закроет уборка следующего старта.
             logger.exception("Прогон %s не записал стадию %s", run.run_id, stage.name)
-        written = progress_text(run, done, start)
+        tail = ""
         if stage.name == CLARIFY_STAGE and not parks_after_clarify(run):
             # Незаданные стандарты владелец обязан увидеть до того, как за них заплачено. Когда
             # вопросы уходят сообщением, строка стоит там; без них показать её больше негде.
             snapshot = read_project(read_artifact(run.root, PROJECT))
-            written = f"{written}\n\n{standards_line(snapshot)}"
-        progress.append(asyncio.run_coroutine_threadsafe(note.edit_text(written), loop))
+            tail = f"\n\n{standards_line(snapshot)}"
+        stage_started = monotonic()
+        progress.append(asyncio.run_coroutine_threadsafe(note.edit_text(written()), loop))
 
-    ending = await outcome(run, report, start, redo)
+    ticking = asyncio.create_task(
+        tick_time(note, run.run_id, written, lambda: monotonic() - stage_started)
+    )
+    try:
+        ending = await outcome(run, report, start, redo)
+    finally:
+        # До правок прогресса и финальной: тик, поспевший после ссылки, затёр бы её списком
+        # галочек — ровно так прогон 0ac7bdffe0e0ba58 однажды потерял результат.
+        ticking.cancel()
+        with suppress(asyncio.CancelledError):
+            await ticking
     try:
         if ending.parked:
             # Не остановка: места остановки в чате парковка не занимает, и статус ей пишет
