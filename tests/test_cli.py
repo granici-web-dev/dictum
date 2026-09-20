@@ -987,6 +987,25 @@ def test_meeting_asks_before_the_first_paid_call(
     assert meeting.calls == []
 
 
+def test_meeting_refuses_a_recording_longer_than_one_whisper_request(
+    meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Трёхчасовая запись доходила до отказа OpenAI по размеру, оплатив перекодирование временем."""
+    monkeypatch.setattr(cli, "recording_seconds", lambda path: 139 * 60)
+    terminal = Terminal("да")
+    terminal.install(monkeypatch)
+    called = whisper_never_built(monkeypatch)
+
+    assert main(["--meeting", str(a_recording(tmp_path))]) == EXIT_USAGE
+
+    assert "138" in capsys.readouterr().out
+    assert terminal.asked == []
+    assert not (tmp_path / "runs").exists()
+    assert meeting.calls == []
+    assert called == []
+
+
 def test_meeting_copies_the_recording_and_leaves_the_original(
     meeting: SentReview, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

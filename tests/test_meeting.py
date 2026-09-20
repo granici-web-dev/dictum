@@ -9,8 +9,10 @@ from app.meeting import (
     CONSENT_QUESTION,
     consent_question,
     copied_recording,
+    longer_than_one_whisper_request,
     one_pass_minutes,
     price_line,
+    too_long_refusal,
 )
 
 AN_HOUR = 3600
@@ -72,3 +74,17 @@ def test_the_recording_is_copied_and_the_original_is_left_alone(tmp_path: Path) 
     assert copy.name == "recording.m4a"
     assert copy.read_bytes() == b"m4a"
     assert recording.exists()
+
+
+def test_a_recording_longer_than_one_whisper_request_is_refused() -> None:
+    """Граница фазы 1 — один запрос Whisper: дальше нужна нарезка, а не чужая ошибка по размеру."""
+    assert longer_than_one_whisper_request(139 * 60)
+    assert not longer_than_one_whisper_request(137 * 60)
+
+
+def test_the_refusal_by_length_names_the_file_and_the_limit() -> None:
+    refusal = too_long_refusal("созвон.m4a", 180 * 60)
+
+    assert "созвон.m4a" in refusal
+    assert "180 минут" in refusal
+    assert "138" in refusal

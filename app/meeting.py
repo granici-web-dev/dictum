@@ -22,6 +22,16 @@ MEASURED_REVIEW_MINUTES = 44
 MEASURED_REVIEW_DOLLARS = 0.37
 MEASURED_REVIEW_OUTPUT_TOKENS = 20439
 
+# Граница фазы 1 — один запрос Whisper: 25 МБ перекодированного mp3 при 24 кбит/с, то есть
+# около 138 минут (SPEC §8). Дальше нужна нарезка, и до неё запись отвергается своим отказом:
+# без него человек платит временем за перекодирование и получает чужую ошибку OpenAI по размеру.
+ONE_WHISPER_REQUEST_SECONDS = 138 * 60
+
+TOO_LONG_FOR_ONE_REQUEST = (
+    "Запись {name}, {length}. Одним запросом расшифровки проходит около {limit} минут, и эта "
+    "длиннее. Разрежьте её пополам и отдайте две части по отдельности."
+)
+
 CONSENT_QUESTION = "Все, чьи голоса в записи есть, знали о записи и согласны на это?"
 
 ONE_PASS_WARNING = (
@@ -65,6 +75,18 @@ def price_line(seconds: int) -> str:
     if minutes > one_pass_minutes():
         lines.append(ONE_PASS_WARNING.format(minutes=one_pass_minutes()))
     return "\n".join(lines)
+
+
+def longer_than_one_whisper_request(seconds: int) -> bool:
+    return seconds > ONE_WHISPER_REQUEST_SECONDS
+
+
+def too_long_refusal(name: str, seconds: int) -> str:
+    return TOO_LONG_FOR_ONE_REQUEST.format(
+        name=name,
+        length=minutes_count(math.ceil(seconds / 60)),
+        limit=ONE_WHISPER_REQUEST_SECONDS // 60,
+    )
 
 
 def consent_question(name: str, seconds: int) -> str:

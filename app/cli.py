@@ -32,6 +32,8 @@ from app.meeting import (
     CONSENT_QUESTION,
     consent_question as recording_consent_question,
     copied_recording,
+    longer_than_one_whisper_request,
+    too_long_refusal,
 )
 from app.pipeline import (
     ANSWERS,
@@ -438,6 +440,8 @@ def meeting_run(given: str | None, asked_chat: str | None, resumed: str | None) 
         start = resumed_meeting_start(root) if resumed else FIRST_STAGE
         recording = meeting_recording(given, start, run_id)
         seconds = recording_seconds(recording) if recording is not None else 0
+        if recording is not None and longer_than_one_whisper_request(seconds):
+            raise ConfigError(too_long_refusal(recording.name, seconds))
         agreed = consent_given(consent_question(recording, seconds, start, run_id))
     except (ConfigError, TranscriptionError) as error:
         print(error)
