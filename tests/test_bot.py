@@ -36,7 +36,7 @@ from app.bot import (
     EMPTY,
     FILE_INGEST_LABEL,
     FILE_NOT_TAKEN,
-    FILE_TOO_BIG,
+    file_too_big,
     MAX_FILE_BYTES,
     FIRST_STAGE,
     GATE_EDIT_ASKED,
@@ -2496,9 +2496,39 @@ async def test_recording_over_20_mb_refused_before_consent(
     with caplog.at_level(logging.INFO, logger="app.bot"):
         await on_recording(an_update(chat), NO_CONTEXT)
 
-    assert chat.replies == [FILE_TOO_BIG]
+    assert chat.replies == [file_too_big()]
     assert f"refusal=too_big chat=12 bytes={size}" in caplog.text
     assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_by_size_sends_the_recording_to_the_inbox_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Предел 20 МБ принадлежит Telegram, а рядом стоит вход без него: отказ называет его."""
+    listed(monkeypatch, "12")
+    folder = tmp_path / "Входящие"
+    monkeypatch.setattr(settings, "meeting_inbox_dir", str(folder))
+    chat = RecordingChat(an_audio(size=MAX_FILE_BYTES + 1))
+
+    await on_recording(an_update(chat), NO_CONTEXT)
+
+    assert str(folder) in chat.replies[0]
+    assert "частями" not in chat.replies[0]
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_by_size_names_the_command_when_no_inbox_folder_is_set(
+    monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Без папки вход с ноутбука всё равно есть, и человеку нужен он, а не нарезка записи."""
+    listed(monkeypatch, "12")
+    chat = RecordingChat(an_audio(size=MAX_FILE_BYTES + 1))
+
+    await on_recording(an_update(chat), NO_CONTEXT)
+
+    assert "make meeting FILE=" in chat.replies[0]
+    assert "частями" not in chat.replies[0]
 
 
 @pytest.mark.asyncio
@@ -2515,7 +2545,7 @@ async def test_recording_is_refused_only_by_size(
         await on_recording(an_update(over), NO_CONTEXT)
 
     assert an_hour.replies == [CONSENT_QUESTION]
-    assert over.replies == [FILE_TOO_BIG]
+    assert over.replies == [file_too_big()]
     assert "refusal=file_too_long" not in caplog.text
 
 

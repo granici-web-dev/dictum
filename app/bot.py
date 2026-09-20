@@ -228,10 +228,11 @@ UNSUPPORTED = "Принимаю голосовое, текст и аудиофа
 
 VOICE_NOT_TAKEN = "Не смог забрать голосовое из Telegram. Пришлите его ещё раз."
 
-FILE_TOO_BIG = (
-    f"Файл больше {MAX_FILE_MEGABYTES} МБ: такой Telegram боту не отдаёт. "
-    "Пересохраните запись в mp3 или пришлите её частями."
-)
+FILE_TOO_BIG = f"Файл больше {MAX_FILE_MEGABYTES} МБ: такой Telegram боту не отдаёт."
+
+FILE_TOO_BIG_INBOX = "Положите запись в папку {folder} — я замечу её сам и спрошу здесь согласие."
+
+FILE_TOO_BIG_COMMAND = "Отдайте запись с ноутбука: make meeting FILE=<путь к записи>."
 
 FILE_NOT_TAKEN = "Не смог забрать запись из Telegram. Пришлите её ещё раз."
 
@@ -489,6 +490,17 @@ def inbox_folder() -> Path | None:
     """Папка входящих из настройки. Пусто — поведения нет, и строки в логе тоже."""
     written = settings.meeting_inbox_dir.strip()
     return Path(written).expanduser() if written else None
+
+
+def file_too_big() -> str:
+    """Предел 20 МБ принадлежит Telegram: у записи с ноутбука его нет вовсе (SPEC §3.1).
+
+    Резать запись на части человеку больше незачем, и совет делать это остался от времени, когда
+    входа с ноутбука не было. Отказ называет тот вход, который у этого бота настроен.
+    """
+    folder = inbox_folder()
+    advice = FILE_TOO_BIG_COMMAND if folder is None else FILE_TOO_BIG_INBOX.format(folder=folder)
+    return f"{FILE_TOO_BIG} {advice}"
 
 
 class Ending(BaseModel):
@@ -1322,7 +1334,7 @@ async def on_recording(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Фильтр обработчика `AUDIO | Document.AUDIO`: одно из двух есть всегда.
     assert recording is not None
     if recording.file_size is not None and recording.file_size > MAX_FILE_BYTES:
-        await refuse(message, "too_big", FILE_TOO_BIG, bytes=recording.file_size)
+        await refuse(message, "too_big", file_too_big(), bytes=recording.file_size)
         return
     stopped = await asyncio.to_thread(waiting_for, message.chat_id)
     if stopped is not None:
