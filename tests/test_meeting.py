@@ -12,20 +12,27 @@ from app.meeting import (
     longer_than_one_whisper_request,
     one_pass_minutes,
     price_line,
+    review_price,
     too_long_refusal,
 )
 
 AN_HOUR = 3600
 
 
+def dollars(price: str) -> float:
+    return float(price.removeprefix("$"))
+
+
 def test_price_line_names_whisper_exactly() -> None:
     assert "$0.36" in price_line(AN_HOUR)
 
 
-def test_price_line_names_the_measured_review_cost() -> None:
-    """Оценка стоит на одном живом прогоне, и вопрос называет его, а не выдаёт число за истину."""
+def test_price_line_names_both_measured_review_costs() -> None:
+    """Оценка стоит на двух живых прогонах, и вопрос называет оба, а не выдаёт число за истину."""
     line = price_line(AN_HOUR)
 
+    assert "4 минуты" in line
+    assert "$0.15" in line
     assert "44 минуты" in line
     assert "$0.37" in line
 
@@ -34,9 +41,15 @@ def test_price_line_says_around_and_never_a_bare_number() -> None:
     assert "около" in price_line(AN_HOUR)
 
 
-def test_price_line_scales_the_review_estimate_with_length() -> None:
-    assert "$0.08" in price_line(600)
-    assert "$0.50" in price_line(AN_HOUR)
+def test_the_review_estimate_passes_through_both_measurements() -> None:
+    """Прямая через две точки обязана проходить через сами точки, иначе она не про них."""
+    assert dollars(review_price(3 * 60)) == pytest.approx(0.15, abs=0.02)
+    assert dollars(review_price(44 * 60)) == pytest.approx(0.37, abs=0.02)
+
+
+def test_the_review_estimate_still_grows_with_length() -> None:
+    """Постоянная часть не съедает наклон: час записи дороже сорока четырёх минут."""
+    assert dollars(review_price(AN_HOUR)) > dollars(review_price(44 * 60))
 
 
 def test_price_line_warns_when_the_review_may_not_fit_one_pass() -> None:

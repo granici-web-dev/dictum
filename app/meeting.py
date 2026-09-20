@@ -15,12 +15,16 @@ from app.render import minutes_count
 # $0.006 за минуту записи: час стоит $0.36. Считается по целым минутам, как их и тарифицируют.
 WHISPER_PER_MINUTE = 0.006
 
-# Единственный замер длинного разбора: прогон 54f48ea8e0bc45c7, 19.09.2026. 44 минуты записи дали
-# 22 643 токена на вход и 20 439 на выход, то есть $0.37 по тарифу Sonnet. Короткую встречу линия
-# по одной точке завышает вдвое, и это выбранная сторона ошибки.
-MEASURED_REVIEW_MINUTES = 44
-MEASURED_REVIEW_DOLLARS = 0.37
-MEASURED_REVIEW_OUTPUT_TOKENS = 20439
+# Два замера разбора, и оценка идёт прямой через них обоих. Прогон 54f48ea8e0bc45c7, 19.09.2026:
+# 2640 секунд записи дали 22 643 токена на вход и 20 439 на выход, то есть $0.37 по тарифу Sonnet.
+# Прогон fdbfda84c895f6b7, 20.09.2026: 204 секунды дали 7483 и 8518, то есть $0.15. Вторая точка
+# опровергла первую линию: у разбора есть постоянная часть — системный промпт и размышление
+# модели, — и линия из нуля по одной точке короткую запись не завышала, а занижала втрое.
+SHORT_REVIEW_SECONDS = 204
+SHORT_REVIEW_DOLLARS = 0.15
+LONG_REVIEW_SECONDS = 2640
+LONG_REVIEW_DOLLARS = 0.37
+LONG_REVIEW_OUTPUT_TOKENS = 20439
 
 # Граница фазы 1 — один запрос Whisper: 25 МБ перекодированного mp3 при 24 кбит/с, то есть
 # около 138 минут (SPEC §8). Дальше нужна нарезка, и до неё запись отвергается своим отказом:
@@ -40,13 +44,22 @@ ONE_PASS_WARNING = (
 )
 
 
+def billed_minutes(seconds: int) -> int:
+    """Целые минуты: так их тарифицирует Whisper, и по ним же посчитаны оба замера разбора."""
+    return math.ceil(seconds / 60)
+
+
 def whisper_price(seconds: int) -> str:
-    return f"${math.ceil(seconds / 60) * WHISPER_PER_MINUTE:.2f}"
+    return f"${billed_minutes(seconds) * WHISPER_PER_MINUTE:.2f}"
 
 
 def review_price(seconds: int) -> str:
-    dollars = math.ceil(seconds / 60) * MEASURED_REVIEW_DOLLARS / MEASURED_REVIEW_MINUTES
-    return f"${dollars:.2f}"
+    """Прямая через оба замера: постоянная часть около $0.13 и около полцента за минуту записи."""
+    per_minute = (LONG_REVIEW_DOLLARS - SHORT_REVIEW_DOLLARS) / (
+        billed_minutes(LONG_REVIEW_SECONDS) - billed_minutes(SHORT_REVIEW_SECONDS)
+    )
+    fixed = LONG_REVIEW_DOLLARS - billed_minutes(LONG_REVIEW_SECONDS) * per_minute
+    return f"${fixed + billed_minutes(seconds) * per_minute:.2f}"
 
 
 def one_pass_minutes() -> int:
@@ -56,23 +69,24 @@ def one_pass_minutes() -> int:
     запись прошла одним проходом, и граница обязана ехать вместе с ней. До разбора по частям это
     единственное, чем длинная запись лечится.
     """
-    fits = settings.anthropic_max_tokens / MEASURED_REVIEW_OUTPUT_TOKENS
-    return round(MEASURED_REVIEW_MINUTES * fits)
+    fits = settings.anthropic_max_tokens / LONG_REVIEW_OUTPUT_TOKENS
+    return round(billed_minutes(LONG_REVIEW_SECONDS) * fits)
 
 
 def price_line(seconds: int) -> str:
-    """Whisper точной цифрой, разбор — оценкой по длине от единственного замера.
+    """Whisper точной цифрой, разбор — оценкой по длине от двух замеров.
 
-    Завышенная цена перед согласием никого не обманывает, заниженная обманывает ровно там, где
-    человек на неё опирается: прошлая строка обещала $0.02 за разбор и промахнулась в 18 раз.
+    Заниженная цена обманывает ровно там, где человек на неё опирается: строка до первого замера
+    обещала $0.02 за разбор и промахнулась в 18 раз, а линия по одному замеру обещала $0.03 за
+    трёхминутную запись, которая стоила $0.15. Оба раза мимо было в дешёвую сторону.
     """
-    minutes = math.ceil(seconds / 60)
     lines = [
         f"Расшифровка уйдёт в OpenAI, за пределы EU, и будет стоить {whisper_price(seconds)}.",
-        f"Разбор сверх этого — около {review_price(seconds)}: пересчёт по единственному замеру, "
-        f"{MEASURED_REVIEW_MINUTES} минуты дали ${MEASURED_REVIEW_DOLLARS:.2f}.",
+        f"Разбор сверх этого — около {review_price(seconds)}: пересчёт по двум замерам, "
+        f"{minutes_count(billed_minutes(SHORT_REVIEW_SECONDS))} дали ${SHORT_REVIEW_DOLLARS:.2f}, "
+        f"{minutes_count(billed_minutes(LONG_REVIEW_SECONDS))} — ${LONG_REVIEW_DOLLARS:.2f}.",
     ]
-    if minutes > one_pass_minutes():
+    if billed_minutes(seconds) > one_pass_minutes():
         lines.append(ONE_PASS_WARNING.format(minutes=one_pass_minutes()))
     return "\n".join(lines)
 
@@ -84,7 +98,7 @@ def longer_than_one_whisper_request(seconds: int) -> bool:
 def too_long_refusal(name: str, seconds: int) -> str:
     return TOO_LONG_FOR_ONE_REQUEST.format(
         name=name,
-        length=minutes_count(math.ceil(seconds / 60)),
+        length=minutes_count(billed_minutes(seconds)),
         limit=ONE_WHISPER_REQUEST_SECONDS // 60,
     )
 
@@ -95,7 +109,7 @@ def consent_question(name: str, seconds: int) -> str:
     Два вопроса подряд учат тому, что второй — формальность. Имя файла, а не путь: путь к
     домашнему каталогу владельца в этом тексте не нужен никому.
     """
-    heading = f"Запись: {name}, {minutes_count(math.ceil(seconds / 60))}."
+    heading = f"Запись: {name}, {minutes_count(billed_minutes(seconds))}."
     return "\n".join([heading, price_line(seconds), CONSENT_QUESTION])
 
 
