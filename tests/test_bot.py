@@ -17,7 +17,7 @@ from telegram import Audio, Document, InlineKeyboardMarkup, Message, Update, Voi
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
-from app import bot, deliver
+from app import bot, deliver, inbox
 from app.answers import Answers, answers_file, read_answers
 from app.bot import (
     ANSWERS_STAGE,
@@ -78,12 +78,14 @@ from app.bot import (
     on_recording,
     on_gate_button,
     on_child_button,
+    on_inbox_button,
     on_start,
     on_text,
     on_voice,
     outcome,
     progress_text,
     refuse,
+    watch_inbox,
     GATES_FROM_NEXT_RUN,
     GATES_STATE,
     GATES_UNKNOWN,
@@ -92,6 +94,15 @@ from app.bot import (
     started_run,
 )
 from app.candidates import parse_candidates
+from app.inbox import (
+    NOT_A_RECORDING,
+    QUESTION_POSTPONED,
+    STALE_BUTTON as NOT_IN_THE_FOLDER,
+    Observation,
+    fingerprint,
+    observed_now,
+)
+from app.meeting import consent_question, too_long_refusal
 from app.deliver import IDEA_BUTTON, TASK_BARE_BUTTON, TASK_BUTTON
 from app.clarify import Clarify
 from app.config import ConfigError, MissingApiKey, settings
@@ -4258,11 +4269,16 @@ async def test_a_broken_child_with_an_answer_walks_past_the_questions_not_from_t
 
 
 def test_the_bot_writes_to_no_chat_of_its_own_choosing() -> None:
-    """Бот тимлиду не пишет ничего: отправка по произвольному chat_id есть только в уборке."""
+    """Бот тимлиду не пишет ничего: отправка по названному chat_id есть ровно в двух местах.
+
+    Уборка на старте отвечает в чат брошенного прогона, папка входящих — в единственный
+    разрешённый чат (SPEC §3.1). Везде остальное бот отвечает на сообщение человека.
+    """
     source = Path(str(bot.__file__)).read_text(encoding="utf-8")
 
-    assert source.count("send_message(") == 1
+    assert source.count("send_message(") == 2
     assert "send_message(" in inspect.getsource(bot.warn_orphans)
+    assert "send_message(" in inspect.getsource(bot.told_the_chat)
 
 
 @pytest.mark.asyncio
@@ -4414,3 +4430,486 @@ async def test_the_same_words_at_the_brief_gate_are_still_an_edit(
     await on_text(an_update(TextChat("ok")), NO_CONTEXT)
 
     assert seen == [("brief", "publish")]
+
+
+# --- Папка входящих: обход, вопрос кнопками и прогон по записи с ноутбука (SPEC §3.1) ---
+
+
+class SentToChat:
+    """Двойник `application.bot`: помнит, что бот послал в чат сам, а не ответом на сообщение."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str, object]] = []
+        self.failing: str | None = None
+
+    async def send_message(self, chat_id: int, text: str, reply_markup: object = None) -> Message:
+        if self.failing is not None and text.startswith(self.failing):
+            raise TelegramError("сообщение не ушло")
+        self.sent.append((chat_id, text, reply_markup))
+        return cast(Message, QuietChat())
+
+    def texts(self) -> list[str]:
+        return [text for _, text, _ in self.sent]
+
+
+def an_application(messenger: SentToChat) -> bot.BotApplication:
+    return cast(bot.BotApplication, SimpleNamespace(bot=messenger))
+
+
+class InboxPress(ButtonChat):
+    """Нажатие под вопросом о записи из папки: нажимает человек 99, вопрос стоит в сообщении."""
+
+    def __init__(self, data: str, asked: str = "Запись: REC001.m4a, 10 минут.") -> None:
+        super().__init__(data)
+        self.text = asked
+        self.from_user = SimpleNamespace(id=99)
+        self.question_edits: list[str] = []
+
+    async def edit_message_text(self, text: str) -> Message:
+        self.question_edits.append(text)
+        return cast(Message, self)
+
+
+class Sweeper:
+    """Обход папки руками: первый круг наблюдает, второй предлагает.
+
+    Интервала не ждёт ни один тест. Наблюдения прошлого круга живут здесь, как в самом цикле
+    обхода, поэтому новый `Sweeper` — это ровно перезапуск бота.
+    """
+
+    def __init__(self, messenger: SentToChat) -> None:
+        self.messenger = messenger
+        self.seen: dict[str, Observation] = {}
+
+    async def once(self) -> None:
+        watched = bot.watched_folder
+        assert watched is not None
+        self.seen = await bot.sweep_inbox(an_application(self.messenger), watched, self.seen)
+
+    async def twice(self) -> None:
+        await self.once()
+        await self.once()
+
+
+TEN_MINUTES = 600
+
+RECORDING = "REC001.m4a"
+
+
+@pytest.fixture(autouse=True)
+def readable_recordings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Шов третьего сита: длительность называет ffprobe, и в тестах его не зовут."""
+    monkeypatch.setattr(inbox, "recording_seconds", lambda path: TEN_MINUTES)
+
+
+@pytest.fixture(autouse=True)
+def no_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Папка — состояние процесса: без сброса она переезжала бы из теста в тест."""
+    monkeypatch.setattr(bot, "watched_folder", None)
+    monkeypatch.setattr(settings, "meeting_inbox_dir", "")
+
+
+def a_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str = RECORDING) -> Path:
+    """Папка входящих с одной записью в ней, за которой уже следит бот."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    folder = tmp_path / "Входящие"
+    folder.mkdir()
+    (folder / name).write_bytes(b"m4a")
+    monkeypatch.setattr(bot, "watched_folder", bot.WatchedFolder(folder, 12))
+    return folder
+
+
+def mark_of(folder: Path, name: str = RECORDING) -> str:
+    recording = folder / name
+    return fingerprint(recording, observed_now(recording))
+
+
+async def asked_about(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Папка, про запись в которой вопрос уже задан: дальше на него отвечают кнопкой."""
+    folder = a_folder(tmp_path, monkeypatch)
+    await Sweeper(SentToChat()).twice()
+    return folder
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_asks_about_a_file_that_stopped_growing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Вопрос называет файл, длину и цену, а кнопки несут отпечаток: путь в 64 байта не влезет."""
+    folder = a_folder(tmp_path, monkeypatch)
+    messenger = SentToChat()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await Sweeper(messenger).twice()
+
+    [(chat_id, asked, keyboard)] = messenger.sent
+    assert chat_id == 12
+    assert asked == consent_question(RECORDING, TEN_MINUTES)
+    buttons = cast(InlineKeyboardMarkup, keyboard).inline_keyboard[0]
+    assert [button.callback_data for button in buttons] == [
+        f"inbox:yes:{mark_of(folder)}",
+        f"inbox:no:{mark_of(folder)}",
+    ]
+    assert f"inbox=seen file={RECORDING} seconds={TEN_MINUTES}" in caplog.text
+    assert f"inbox=asked chat=12 file={RECORDING}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_asks_about_a_file_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a_folder(tmp_path, monkeypatch)
+    sweeps = Sweeper(SentToChat())
+
+    await sweeps.twice()
+    await sweeps.once()
+
+    assert len(sweeps.messenger.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_question_that_did_not_reach_the_chat_is_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Журнал двигается после ушедшего сообщения: иначе файл не предложил бы себя никогда."""
+    a_folder(tmp_path, monkeypatch)
+    sweeps = Sweeper(SentToChat())
+    sweeps.messenger.failing = "Запись:"
+
+    await sweeps.twice()
+    sweeps.messenger.failing = None
+    await sweeps.once()
+
+    assert sweeps.messenger.texts() == [consent_question(RECORDING, TEN_MINUTES)]
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_refuses_a_recording_longer_than_one_whisper_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Отказ до вопроса: иначе человек платит временем и получает чужую ошибку OpenAI."""
+    a_folder(tmp_path, monkeypatch)
+    monkeypatch.setattr(inbox, "recording_seconds", lambda path: 139 * 60)
+    sweeps = Sweeper(SentToChat())
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await sweeps.twice()
+        await sweeps.once()
+
+    assert sweeps.messenger.texts() == [too_long_refusal(RECORDING, 139 * 60)]
+    assert f"inbox=skipped reason=too_long file={RECORDING}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_says_once_that_a_file_is_not_a_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Случайно положенный PDF иначе давал бы строку в логе каждые десять секунд."""
+    a_folder(tmp_path, monkeypatch, "договор.pdf")
+
+    def unreadable(path: Path) -> int:
+        raise TranscriptionError(f"ffprobe не смог прочитать {path.name}")
+
+    monkeypatch.setattr(inbox, "recording_seconds", unreadable)
+    sweeps = Sweeper(SentToChat())
+
+    await sweeps.twice()
+    await sweeps.once()
+
+    assert sweeps.messenger.texts() == [NOT_A_RECORDING.format(name="договор.pdf")]
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_postpones_the_question_while_the_chat_has_a_live_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отказ `stop_alive` сжёг бы единственный вопрос про этот файл, поэтому вопрос ждёт."""
+    a_folder(tmp_path, monkeypatch)
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    sweeps = Sweeper(SentToChat())
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await sweeps.twice()
+
+    assert sweeps.messenger.texts() == [
+        QUESTION_POSTPONED.format(name=RECORDING, run_id="прогон")
+    ]
+    assert "inbox=postponed reason=stop_alive run=прогон" in caplog.text
+
+    store.drop_stop(12)
+    await sweeps.once()
+
+    assert sweeps.messenger.texts()[-1] == consent_question(RECORDING, TEN_MINUTES)
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_tells_the_chat_once_that_the_question_is_postponed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_folder(tmp_path, monkeypatch)
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    sweeps = Sweeper(SentToChat())
+
+    await sweeps.twice()
+    await sweeps.once()
+    await sweeps.once()
+
+    assert len(sweeps.messenger.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_does_not_repeat_the_postponed_notice_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Уведомление переживает перезапуск: иначе каждый старт слал бы его заново."""
+    folder = a_folder(tmp_path, monkeypatch)
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    messenger = SentToChat()
+    await Sweeper(messenger).twice()
+
+    monkeypatch.setattr(bot, "watched_folder", bot.WatchedFolder(folder, 12))
+    await Sweeper(messenger).twice()
+
+    assert len(messenger.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_keeps_asking_while_an_assignment_is_parked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """`questions_sent` остановкой не считается: пока тимлид молчит, папка принимает записи."""
+    a_folder(tmp_path, monkeypatch)
+    store.start_run("ребёнок", 12, "voice", "de", False, None, "clarify", PARENT, 1, True)
+    store.park_run("ребёнок")
+    sweeps = Sweeper(SentToChat())
+
+    await sweeps.twice()
+
+    assert sweeps.messenger.texts() == [consent_question(RECORDING, TEN_MINUTES)]
+
+
+@pytest.mark.asyncio
+async def test_the_journal_remembers_a_refusal_across_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Нет» лежит на диске, а не в памяти процесса: перезапуск не переспрашивает."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    await on_inbox_button(a_press(InboxPress(f"inbox:no:{mark_of(folder)}")), NO_CONTEXT)
+
+    monkeypatch.setattr(bot, "watched_folder", bot.WatchedFolder(folder, 12))
+    messenger = SentToChat()
+    await Sweeper(messenger).twice()
+
+    assert messenger.sent == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_consent_no_leaves_no_row_and_no_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    folder = await asked_about(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "walk", never_walks)
+    press = InboxPress(f"inbox:no:{mark_of(folder)}")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_inbox_button(a_press(press), NO_CONTEXT)
+
+    assert store.started == []
+    assert [path.name for path in (tmp_path / "runs").iterdir()] == ["inbox.json"]
+    assert (folder / RECORDING).read_bytes() == b"m4a"
+    [answered] = press.question_edits
+    assert re.fullmatch(rf"{re.escape(press.text)}\n\nНет\. {ANSWERED_AT}", answered)
+    assert f"consent=no chat=12 by=99 file={RECORDING}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_inbox_consent_yes_starts_a_run_with_consent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Строка `source=file` с согласием, копия записи в прогоне, оригинал на месте."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    seen: list[Run] = []
+    monkeypatch.setattr(bot, "walk", walk_remembering_runs(seen))
+    press = InboxPress(f"inbox:yes:{mark_of(folder)}")
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_inbox_button(a_press(press), NO_CONTEXT)
+
+    [(run_id, chat_id, source)] = store.started
+    assert (chat_id, source, store.consents[run_id]) == (12, "file", True)
+    [run] = seen
+    assert (run.run_id, run.source, run.consent_confirmed) == (run_id, "file", True)
+    assert run.audio == tmp_path / "runs" / run_id / "inputs/recording.m4a"
+    assert run.audio.read_bytes() == b"m4a"
+    assert (folder / RECORDING).read_bytes() == b"m4a"
+    [answered] = press.question_edits
+    assert re.fullmatch(rf"{re.escape(press.text)}\n\nДа, все согласны\. {ANSWERED_AT}", answered)
+    assert f"start=inbox run={run_id} chat=12 seconds={TEN_MINUTES}" in caplog.text
+    assert f"consent=yes chat=12 by=99 run={run_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_inbox_yes_while_a_run_is_going_refuses_busy_and_keeps_the_keyboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Решение ещё не принято: журнал не двигается, и нажать можно после конца прогона."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    press = InboxPress(f"inbox:yes:{mark_of(folder)}")
+
+    async with bot.running:
+        await on_inbox_button(a_press(press), NO_CONTEXT)
+
+    assert press.replies == [BUSY]
+    assert press.question_edits == []
+    assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_yes_while_the_chat_waits_for_an_answer_refuses_and_keeps_the_keyboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Остановка могла появиться, пока вопрос висел в чате: ни строки, ни копии."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    press = InboxPress(f"inbox:yes:{mark_of(folder)}")
+
+    await on_inbox_button(a_press(press), NO_CONTEXT)
+
+    assert press.replies == [STOP_ALIVE.format(run_id="прогон")]
+    assert press.question_edits == []
+    assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_yes_on_a_recording_that_left_the_folder_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    folder = await asked_about(tmp_path, monkeypatch)
+    press = InboxPress(f"inbox:yes:{mark_of(folder)}")
+    (folder / RECORDING).unlink()
+
+    await on_inbox_button(a_press(press), NO_CONTEXT)
+
+    assert press.replies == [NOT_IN_THE_FOLDER.format(name=RECORDING)]
+    assert store.started == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_moves_the_recording_after_a_reviewed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Перенос после разбора, а не после «Да»: сорвавшийся прогон продолжают этой же записью."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_inbox_button(a_press(InboxPress(f"inbox:yes:{mark_of(folder)}")), NO_CONTEXT)
+
+    assert not (folder / RECORDING).exists()
+    assert (folder / inbox.DONE / RECORDING).read_bytes() == b"m4a"
+    assert store.status[store.started[0][0]] == REVIEWED
+    assert f"inbox=done file={RECORDING}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_inbox_leaves_the_recording_when_the_run_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Продолжать сорванный прогон нечем, если исходник уехал в done/ до разбора."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+
+    await on_inbox_button(a_press(InboxPress(f"inbox:yes:{mark_of(folder)}")), NO_CONTEXT)
+
+    assert (folder / RECORDING).read_bytes() == b"m4a"
+    assert not (folder / inbox.DONE).exists()
+    assert store.status[store.started[0][0]] == FAILED
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_is_off_without_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    listed(monkeypatch, "12")
+
+    await watch_inbox(an_application(SentToChat()))
+
+    assert bot.watched_folder is None
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_is_off_when_the_allowlist_holds_several_chats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """В какой чат слать разбор — не угадать: соседний бывает групповым."""
+    listed(monkeypatch, "12,-100500")
+    monkeypatch.setattr(settings, "meeting_inbox_dir", str(tmp_path))
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await watch_inbox(an_application(SentToChat()))
+
+    assert bot.watched_folder is None
+    assert "inbox=off reason=several_chats chats=2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_watching_the_inbox_starts_with_the_bot_and_stops_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Незакрытая задача цикла событий пережила бы бота, которого она обслуживает."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(settings, "meeting_inbox_dir", str(tmp_path))
+    application = an_application(SentToChat())
+
+    await watch_inbox(application)
+    watched = bot.watched_folder
+    assert watched is not None and watched.sweeping is not None
+
+    await bot.forget_inbox(application)
+
+    assert bot.watched_folder is None
+    assert watched.sweeping.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_the_inbox_is_watched_only_after_the_orphans_are_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Прогон, начатый раньше уборки, попал бы под свою же уборку."""
+    order: list[str] = []
+
+    async def warned(application: bot.BotApplication) -> None:
+        order.append("orphans")
+
+    async def watched(application: bot.BotApplication) -> None:
+        order.append("inbox")
+
+    monkeypatch.setattr(bot, "warn_orphans", warned)
+    monkeypatch.setattr(bot, "watch_inbox", watched)
+
+    await bot.on_bot_start(an_application(SentToChat()))
+
+    assert order == ["orphans", "inbox"]
+
+
+def test_the_bot_does_not_start_when_the_inbox_folder_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Узнать о мимо набранном пути, положив запись и прождав час, хуже, чем узнать на старте."""
+    ready_to_start(monkeypatch)
+    monkeypatch.setattr(settings, "meeting_inbox_dir", str(tmp_path / "Входящие"))
+
+    with pytest.raises(ConfigError, match="Папки входящих"):
+        main()

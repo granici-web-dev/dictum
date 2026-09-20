@@ -76,6 +76,9 @@ class Entry(BaseModel):
     name: str
     size: int
     mtime_ns: int
+    # Длительность, которую назвал `ffprobe` на обходе. Она же идёт в строку лога о начале
+    # прогона, а файл под нажатой кнопкой тот же самый: спрашивать её второй раз незачем.
+    seconds: int | None = None
     decision: Decision
     run_id: str | None = None
 
@@ -153,9 +156,16 @@ class Journal:
             name=ready.path.name,
             size=ready.observed.size,
             mtime_ns=ready.observed.mtime_ns,
+            seconds=ready.seconds,
             decision=decision,
             run_id=run_id,
         )
+        self.write()
+
+    def answered(self, mark: str, decision: Decision, run_id: str | None = None) -> None:
+        """Ответ на висевший вопрос: файл тот же, и заново его не описывают."""
+        known = self.entries[mark]
+        self.entries[mark] = known.model_copy(update={"decision": decision, "run_id": run_id})
         self.write()
 
     def write(self) -> None:

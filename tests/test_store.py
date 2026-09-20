@@ -406,6 +406,27 @@ def test_a_file_without_a_parent_still_needs_consent(db: None) -> None:
         start_run("файл", 12, "file", "de", False, None, INGEST)
 
 
+def test_a_run_from_the_inbox_folder_is_a_recording_like_any_other(db: None) -> None:
+    """Запись из папки заводит ту же строку, что запись из чата: колонки под неё нет.
+
+    Откуда пришёл прогон — знание процесса, а не строки (SPEC §4). Проверяется здесь потому, что
+    иначе это выяснилось бы на живом прогоне, после оплаченной расшифровки: CHECK согласия
+    пропускает такую строку, а `parent_of` находит её, то есть кнопка поручения под разбором
+    сработает.
+    """
+    start_run("папка", 12, "file", "de", False, True, INGEST)
+    mark_stage("папка", "review", "de")
+    finish_run("папка", REVIEWED)
+
+    parent = parent_of("папка", 12)
+
+    assert parent is not None
+    assert (parent.source, parent.lang, parent.status) == ("file", "de", REVIEWED)
+    a_task_run("поручение", 1, "папка")
+    child = child_of("папка", 1)
+    assert child is not None and child.run_id == "поручение"
+
+
 def test_second_live_run_for_the_same_task_is_rejected_unless_the_first_was_dropped(
     db: None,
 ) -> None:
