@@ -13,7 +13,7 @@ from app.cli import (
     EXIT_USAGE,
     main,
 )
-from app.meeting import CONSENT_QUESTION
+from app.meeting import CONSENT_QUESTION, consent_question
 from app import bot, cli, publish, stages, store, transcribe
 from app.config import ConfigError, settings
 from app.pipeline import Stage
@@ -985,6 +985,15 @@ def test_meeting_asks_before_the_first_paid_call(
 
     assert terminal.asked == []
     assert meeting.calls == []
+
+
+def test_consent_question_is_one_text_for_both_inputs(tmp_path: Path) -> None:
+    """Текст, на который человек тратит деньги, у команды и у папки обязан быть один."""
+    recording = a_recording(tmp_path)
+
+    assert cli.consent_question(recording, 3600, "ingest", "abc123") == consent_question(
+        recording.name, 3600
+    )
 
 
 def test_meeting_refuses_a_recording_longer_than_one_whisper_request(
