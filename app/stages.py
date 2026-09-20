@@ -232,9 +232,17 @@ class StageResult(BaseModel):
 
 
 class StageError(Exception):
-    def __init__(self, message: str, raw: str) -> None:
+    """Стадия не дала того, чего от неё ждали.
+
+    `stop_reason` заполнен, когда причина в самом ответе модели: разбор, упёршийся в потолок
+    одного ответа (`max_tokens`), лечится поднятой настройкой, а не повтором, и тот, кто
+    предлагает повтор человеку, обязан сказать это раньше, чем человек заплатит второй раз.
+    """
+
+    def __init__(self, message: str, raw: str, stop_reason: str | None = None) -> None:
         super().__init__(message)
         self.raw = raw
+        self.stop_reason = stop_reason
 
 
 def load_prompt(stage: str) -> str:
@@ -617,7 +625,11 @@ def answer_text(stage: str, response: Message) -> str:
     raw = "".join(block.text for block in response.content if block.type == "text")
     if response.stop_reason != "end_turn":
         hint = " Raise ANTHROPIC_MAX_TOKENS." if response.stop_reason == "max_tokens" else ""
-        raise StageError(f"{stage}: model stopped with {response.stop_reason}.{hint}", raw)
+        raise StageError(
+            f"{stage}: model stopped with {response.stop_reason}.{hint}",
+            raw,
+            response.stop_reason,
+        )
     return raw
 
 

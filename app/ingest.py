@@ -61,3 +61,9 @@ def child_transcript(parent: str, run_id: str, parent_run_id: str) -> str:
 def run_id_of(transcript: str) -> str | None:
     found = frontmatter.loads(transcript).metadata.get("run_id")
     return found if isinstance(found, str) and found else None
+
+
+def lang_of(transcript: str) -> str | None:
+    """Язык записи из frontmatter: его назвал Whisper, и продолженный прогон берёт его отсюда."""
+    found = frontmatter.loads(transcript).metadata.get("lang")
+    return found if isinstance(found, str) and found else None

@@ -27,6 +27,7 @@ from app.bot import (
     ASSEMBLE,
     ASSEMBLE_ASKED,
     ASSEMBLE_BUTTON,
+    BROKEN,
     BROKEN_REDO,
     BUSY,
     CONSENT_NO,
@@ -55,7 +56,12 @@ from app.bot import (
     PARENT_GONE,
     REVIEW_WITHOUT_MEETING_LANG,
     QUESTIONS_PARKED,
+    RECORDING_GONE,
     REPLY_NOT_QUESTIONS,
+    REVIEW_STAGE,
+    RETRY,
+    RETRY_BUTTON,
+    REVIEW_CUT_OFF,
     STALE_REPLY,
     TASK_ROUTE_END,
     TASK_ROUTE_START,
@@ -78,6 +84,7 @@ from app.bot import (
     on_recording,
     on_gate_button,
     on_child_button,
+    on_retry_button,
     on_inbox_button,
     on_start,
     on_text,
@@ -164,6 +171,7 @@ from app.render import (
 )
 from app.steps import Steps
 from app.review import Review
+from app.stages import StageError
 from tests.helpers import (
     APPROACH_NEW_DE,
     CLARIFY_DE,
@@ -4831,12 +4839,14 @@ async def test_inbox_leaves_the_recording_when_the_run_failed(
     """Продолжать сорванный прогон нечем, если исходник уехал в done/ до разбора."""
     folder = await asked_about(tmp_path, monkeypatch)
     monkeypatch.setattr(bot, "walk", walk_breaking)
+    press = InboxPress(f"inbox:yes:{mark_of(folder)}")
 
-    await on_inbox_button(a_press(InboxPress(f"inbox:yes:{mark_of(folder)}")), NO_CONTEXT)
+    await on_inbox_button(a_press(press), NO_CONTEXT)
 
     assert (folder / RECORDING).read_bytes() == b"m4a"
     assert not (folder / inbox.DONE).exists()
     assert store.status[store.started[0][0]] == FAILED
+    assert press.keyboards[-1] is not None
 
 
 @pytest.mark.asyncio
@@ -4913,3 +4923,256 @@ def test_the_bot_does_not_start_when_the_inbox_folder_is_missing(
 
     with pytest.raises(ConfigError, match="Папки входящих"):
         main()
+
+
+# --- Кнопка «Продолжить» под сорванным прогоном записи (SPEC §7.3) ---
+
+
+class RetryPress(ButtonChat):
+    """Нажатие «Продолжить»: помнит, что и в каком порядке ушло человеку после него."""
+
+    def __init__(self, run_id: str = "прогон") -> None:
+        super().__init__(f"{RETRY}:{run_id}")
+        self.sent: list[str | Path] = []
+
+    async def reply_text(
+        self, text: str, reply_markup: object = None, do_quote: bool | None = None
+    ) -> Message:
+        self.sent.append(text)
+        return await super().reply_text(text, reply_markup, do_quote)
+
+    async def reply_document(self, document: Path) -> Message:
+        self.sent.append(document)
+        return await super().reply_document(document)
+
+
+def a_failed_recording_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, wrote: dict[str, str]
+) -> Path:
+    """Прогон записи, сорванный на маршруте `ingest..review`, и то, что он успел записать."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    store.start_run("прогон", 12, "file", "de", False, True, FIRST_STAGE)
+    store.finish_run("прогон", FAILED)
+    root = tmp_path / "runs" / "прогон"
+    for path, content in wrote.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text(content, encoding="utf-8")
+    return root
+
+
+A_TRANSCRIPT = '---\nrun_id: "прогон"\nsource: file\nduration: 600\nlang: de\n---\n\nHallo.\n'
+
+
+def walk_running_out_of_tokens(
+    run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+) -> Pause | None:
+    raise StageError("review: model stopped with max_tokens.", "", "max_tokens")
+
+
+@pytest.mark.asyncio
+async def test_a_broken_recording_run_offers_to_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Повтор с нуля оплатил бы Whisper второй раз, и решать это за человека нельзя."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    press = ConsentPress(CONSENT_YES, SentRecording())
+
+    await on_consent_button(a_press(press), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert press.edits[-1] == BROKEN.format(run_id=run_id)
+    keyboard = cast(InlineKeyboardMarkup, press.keyboards[-1])
+    [button] = keyboard.inline_keyboard[0]
+    assert (button.text, button.callback_data) == (RETRY_BUTTON, f"{RETRY}:{run_id}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("walking", [walk_breaking, walk_running_out_of_tokens])
+async def test_a_broken_text_run_offers_nothing_to_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore, walking: Walking
+) -> None:
+    """Текст присылают заново, и это ничего не стоит: продолжать там нечего."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walking)
+    chat = TextChat("Встреча текстом")
+
+    await on_text(an_update(chat), NO_CONTEXT)
+
+    assert chat.edits[-1] == BROKEN.format(run_id=store.started[0][0])
+    assert chat.keyboards[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_a_broken_task_run_offers_nothing_to_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """У путей поручения и идеи продолжение своё: их ведёт кнопка под разбором."""
+    a_review_in_chat(tmp_path, monkeypatch, store)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    chat = a_task_button()
+
+    await on_child_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.keyboards[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_a_review_cut_off_by_max_tokens_names_the_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Нажатие при прежней настройке оплатит разбор второй раз и кончится тем же местом."""
+    listed(monkeypatch, "12")
+    monkeypatch.setattr(bot, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(bot, "walk", walk_running_out_of_tokens)
+    press = ConsentPress(CONSENT_YES, SentRecording())
+
+    await on_consent_button(a_press(press), NO_CONTEXT)
+
+    run_id = store.started[0][0]
+    assert press.edits[-1] == REVIEW_CUT_OFF.format(run_id=run_id)
+    assert "ANTHROPIC_MAX_TOKENS" in press.edits[-1]
+    assert "второй раз" in press.edits[-1]
+    assert press.keyboards[-1] is not None
+
+
+@pytest.mark.asyncio
+async def test_retry_delivers_when_the_review_is_already_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Разбор написан: платить не за что, осталась доставка."""
+    root = a_failed_recording_run(
+        tmp_path, monkeypatch, store, {TRANSCRIPT: A_TRANSCRIPT, REVIEW_JSON: REVIEW_DE}
+    )
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = RetryPress()
+
+    await on_retry_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.sent == [
+        review_lead(Review.model_validate_json(REVIEW_DE)),
+        *sent_parts(REVIEW_DE),
+        root / REVIEW_MD,
+        root / TRANSCRIPT,
+    ]
+    assert store.status["прогон"] == REVIEWED
+
+
+def walk_reviewing_runs(seen: list[tuple[str, Run]]) -> Walking:
+    """Обход до разбора, помнящий сам прогон: у продолженного свои язык, запись и место старта."""
+
+    def walking(
+        run: Run, start: str, stop: str, on_done: Callable[[Stage], None], redo: Redo | None = None
+    ) -> Pause | None:
+        seen.append((start, run))
+        (run.root / "outputs").mkdir(parents=True, exist_ok=True)
+        (run.root / REVIEW_JSON).write_text(REVIEW_DE, encoding="utf-8")
+        return None
+
+    return walking
+
+
+@pytest.mark.asyncio
+async def test_retry_starts_from_review_when_the_transcript_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Расшифровка оплачена: Whisper второй раз не зовут, и язык берётся из неё же."""
+    a_failed_recording_run(tmp_path, monkeypatch, store, {TRANSCRIPT: A_TRANSCRIPT})
+    seen: list[tuple[str, Run]] = []
+    monkeypatch.setattr(bot, "walk", walk_reviewing_runs(seen))
+
+    await on_retry_button(a_press(RetryPress()), NO_CONTEXT)
+
+    [(start, run)] = seen
+    assert start == REVIEW_STAGE
+    assert (run.run_id, run.lang, run.source, run.audio) == ("прогон", "de", "file", None)
+    assert run.consent_confirmed is True
+    assert store.status["прогон"] == REVIEWED
+
+
+@pytest.mark.asyncio
+async def test_retry_starts_from_the_recording_in_the_inbox_when_nothing_was_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Исходник лежит во входящих, пока разбор не удался, и журнал знает, чей он."""
+    folder = await asked_about(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    await on_inbox_button(a_press(InboxPress(f"inbox:yes:{mark_of(folder)}")), NO_CONTEXT)
+    run_id = store.started[0][0]
+    seen: list[tuple[str, Run]] = []
+    monkeypatch.setattr(bot, "walk", walk_reviewing_runs(seen))
+
+    await on_retry_button(a_press(RetryPress(run_id)), NO_CONTEXT)
+
+    [(start, run)] = seen
+    assert start == FIRST_STAGE
+    assert run.audio == folder / RECORDING
+
+
+@pytest.mark.asyncio
+async def test_retry_refuses_when_the_recording_is_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store: FakeStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Копию записи из чата унесла расшифровка (KEEP_AUDIO=false): продолжать нечем."""
+    a_failed_recording_run(tmp_path, monkeypatch, store, {})
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = RetryPress()
+
+    with caplog.at_level(logging.INFO, logger="app.bot"):
+        await on_retry_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [RECORDING_GONE.format(run_id="прогон")]
+    assert store.status["прогон"] == FAILED
+    assert "refusal=recording_gone chat=12 run=прогон" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_retry_while_a_run_is_going_refuses_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    a_failed_recording_run(tmp_path, monkeypatch, store, {TRANSCRIPT: A_TRANSCRIPT})
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = RetryPress()
+
+    async with bot.running:
+        await on_retry_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [BUSY]
+    assert store.status["прогон"] == FAILED
+
+
+@pytest.mark.asyncio
+async def test_retry_while_the_chat_waits_for_an_answer_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    """Прогон, ждущий ответа, занял бы место остановки уже после оплаченных стадий."""
+    a_failed_recording_run(tmp_path, monkeypatch, store, {TRANSCRIPT: A_TRANSCRIPT})
+    store.stop(12, a_stopped_gate(tmp_path, monkeypatch))
+    monkeypatch.setattr(bot, "walk", never_walks)
+    chat = RetryPress()
+
+    await on_retry_button(a_press(chat), NO_CONTEXT)
+
+    assert chat.replies == [STOP_ALIVE.format(run_id="прогон")]
+
+
+@pytest.mark.asyncio
+async def test_a_retried_run_from_the_inbox_still_moves_the_recording_after_the_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: FakeStore
+) -> None:
+    folder = await asked_about(tmp_path, monkeypatch)
+    monkeypatch.setattr(bot, "walk", walk_breaking)
+    await on_inbox_button(a_press(InboxPress(f"inbox:yes:{mark_of(folder)}")), NO_CONTEXT)
+    run_id = store.started[0][0]
+    monkeypatch.setattr(bot, "walk", walk_reviewing(REVIEW_DE))
+
+    await on_retry_button(a_press(RetryPress(run_id)), NO_CONTEXT)
+
+    assert (folder / inbox.DONE / RECORDING).read_bytes() == b"m4a"
+    assert store.status[run_id] == REVIEWED

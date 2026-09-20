@@ -62,7 +62,7 @@ from app.inbox import (
     observed_now,
     ready_recordings,
 )
-from app.ingest import Source, new_run_id
+from app.ingest import Source, lang_of, new_run_id
 from app.meeting import (
     consent_question,
     copied_recording,
@@ -106,6 +106,7 @@ from app.render import (
     steps_digest,
 )
 from app.review import Review
+from app.stages import StageError
 from app.run import Pause, Redo, Run, current_standards, read_artifact, walk
 from app.steps import Steps, meeting_lang_of
 from app.store import (
@@ -274,6 +275,26 @@ DISCUSSED = "Вот о чём в ней говорили:"
 ASK_AGAIN = "Пришлите идею одним сообщением и чуть подробнее: что нужно сделать и для кого."
 
 BROKEN = "Прогон {run_id} сорвался. Подробности в логе, попробуйте ещё раз."
+
+# Кнопка под сорванным прогоном записи. Повтор с нуля оплатил бы Whisper второй раз ($0.26 за
+# 44 минуты), и решать это за человека нельзя: кнопка спрашивает и платит только за неоплаченное.
+RETRY = "meet"
+
+RETRY_BUTTON = "Продолжить"
+
+# Разбор, упёршийся в потолок одного ответа, кнопка одна не лечит: расшифровка при этом лежит и
+# второй раз не оплачивается, но при той же настройке разбор кончится тем же местом. Поэтому
+# сообщение называет причину и настройку, а решать, платить ли, остаётся человеку.
+REVIEW_CUT_OFF = (
+    "Разбор записи не уместился в один ответ модели. Поднимите ANTHROPIC_MAX_TOKENS в .env: "
+    "«Продолжить» без этого оплатит разбор второй раз и кончится тем же местом. "
+    "(прогон {run_id})"
+)
+
+RECORDING_GONE = (
+    "Продолжить прогон {run_id} нечем: расшифровки нет, а записи на месте больше нет. "
+    "Положите её в папку ещё раз."
+)
 
 BROKEN_REDO: dict[StopKind, str] = {
     "choice": "Не получилось продолжить, но запись цела. Ответьте ещё раз — кнопкой или номером."
@@ -1626,6 +1647,130 @@ async def on_inbox_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await recording_after_review(run_id, ending.status)
 
 
+def retry_keyboard(run_id: str) -> InlineKeyboardMarkup:
+    # Кнопка называет только прогон: ворот на маршруте записи нет, и другого места, откуда его
+    # продолжать, тоже нет — откуда именно, решают лежащие артефакты. `meet:<run_id>` — 21 байт.
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(RETRY_BUTTON, callback_data=f"{RETRY}:{run_id}")]]
+    )
+
+
+def retry_for(run: Run, start: str) -> InlineKeyboardMarkup | None:
+    """«Продолжить» стоит под сорванной записью и только под ней (SPEC §7.3).
+
+    Текст и голосовое присылают заново, и это ничего не стоит; у путей поручения и идеи
+    продолжение своё — их кнопка под разбором живёт вечно и сама ведёт прогон с того места, до
+    которого он дошёл. Дорого повторять только запись: Whisper за 44 минуты это $0.26.
+    """
+    if route_end(start) != REVIEW_STAGE or run.source != "file":
+        return None
+    return retry_keyboard(run.run_id)
+
+
+def broken_text(run: Run, start: str, error: Exception) -> str:
+    """Что сказать о сорванном прогоне. Причина, которую лечит настройка, называется вслух.
+
+    Про вторую оплату говорится там, где под сообщением стоит кнопка: она и есть то нажатие,
+    которое при прежней настройке упрётся в то же место.
+    """
+    cut_off = isinstance(error, StageError) and error.stop_reason == "max_tokens"
+    if cut_off and retry_for(run, start) is not None:
+        return REVIEW_CUT_OFF.format(run_id=run.run_id)
+    return BROKEN.format(run_id=run.run_id)
+
+
+def resumed_recording(run_id: str, chat_id: int, recording: Path | None = None) -> Run:
+    """Сорванный прогон записи, собранный заново.
+
+    Язык берётся из лежащей расшифровки: его назвал Whisper, и продолженный прогон, взявший
+    вместо него DEFAULT_LANG, переписал бы им строку на первой же отметке о стадии — а из строки
+    язык берёт поручение под этим разбором (SPEC §4.1). Расшифровки нет — прогон идёт с ingest,
+    и язык ему назовёт Whisper.
+    """
+    root = RUNS / run_id
+    spoken = lang_of(read_artifact(root, TRANSCRIPT)) if (root / TRANSCRIPT).exists() else None
+    return Run(
+        root=root,
+        run_id=run_id,
+        lang=spoken or settings.default_lang,
+        audio=recording,
+        source="file",
+        consent_confirmed=True,
+        auto_approve=auto_approve_for(chat_id),
+    )
+
+
+async def on_retry_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Продолжить» на сорванном прогоне записи: повтор платит только за неоплаченное.
+
+    То же правило, что у `make meeting RUN=` и у `resumed_start()`: лежащий разбор оставляет
+    одну доставку, лежащая расшифровка снимает Whisper из сметы, а без обоих нужен исходник.
+    """
+    query, message = update.callback_query, update.effective_message
+    if query is None:
+        return
+    if message is None:
+        logger.warning("retry=lost: колбэк пришёл без доступного сообщения")
+        await query.answer()
+        return
+    if not permitted(message):
+        return
+    await query.answer()
+    pressed = button_of(query, 2)
+    if pressed is None:
+        await refuse(message, "stale_button", STALE_BUTTON, run=NO_RUN)
+        return
+    run_id = pressed[1]
+    if running.locked():
+        await refuse(message, "busy", BUSY, run=run_id)
+        return
+
+    async with running:
+        stopped = await asyncio.to_thread(waiting_for, message.chat_id)
+        if stopped is not None:
+            await refuse(
+                message,
+                "stop_alive",
+                STOP_ALIVE.format(run_id=stopped.run_id),
+                run=stopped.run_id,
+            )
+            return
+        root = RUNS / run_id
+        if (root / REVIEW_JSON).exists():
+            await deliver_again(message, run_id, root)
+            return
+        recording = None
+        if (root / TRANSCRIPT).exists():
+            start = REVIEW_STAGE
+        else:
+            start = FIRST_STAGE
+            recording = watched_folder.recording_of(run_id) if watched_folder else None
+            if recording is None:
+                # Запись из чата удаляет расшифровка (KEEP_AUDIO=false), и продолжать нечем.
+                await refuse(
+                    message, "recording_gone", RECORDING_GONE.format(run_id=run_id), run=run_id
+                )
+                return
+        run = resumed_recording(run_id, message.chat_id, recording)
+        await asyncio.to_thread(reopen_run, run_id, start)
+        logger.info("retry=%s run=%s chat=%s", start, run_id, message.chat_id)
+        note = await message.reply_text(progress_text(run, done_before(start), start))
+        ending = await follow(note, run, datetime.now(timezone.utc), start)
+    await recording_after_review(run_id, ending.status)
+
+
+async def deliver_again(message: Message, run_id: str, root: Path) -> None:
+    """Разбор уже написан: осталась доставка, и ни одного вызова модели она не делает."""
+    run = resumed_recording(run_id, message.chat_id)
+    ending = review_ending(run)
+    logger.info("retry=delivery run=%s chat=%s", run_id, message.chat_id)
+    await asyncio.to_thread(finish_run, run_id, ending.status)
+    lead = await message.reply_text(ending.text, reply_markup=ending.keyboard)
+    if ending.review is not None:
+        await send_tasks_and_documents(lead, run_id, root, ending.review)
+    await recording_after_review(run_id, ending.status)
+
+
 async def recording_after_review(run_id: str, status: str) -> None:
     """Разобранная запись уезжает в `done/`. Не после «Да»: сорвавшийся прогон продолжают ею же.
 
@@ -2124,7 +2269,7 @@ async def outcome(
                 stop=waiting,
                 keyboard=gate_keyboard(run.run_id, waiting.stage),
             )
-        if route_end(start) == "review":
+        if route_end(start) == REVIEW_STAGE:
             return review_ending(run)
         if route_end(start) == TASK_ROUTE_END:
             return card_ending(run)
@@ -2139,13 +2284,13 @@ async def outcome(
         # а не `no_task`: сломанный ffmpeg — это поломка установки, и отчёт серии живых прогонов
         # не должен считать её записью без задания.
         logger.warning("Прогон %s не расшифровал запись: %s", run.run_id, error)
-        return Ending(text=str(error), status=FAILED)
+        return Ending(text=str(error), status=FAILED, keyboard=retry_for(run, start))
     except OSError:
         # Файлы прогона мог унести `make clean-runs` между прогонами. Повторять нечего:
         # остановка после этого копила бы один и тот же отказ на каждый ответ человека.
         logger.exception("Прогон %s не нашёл своих файлов", run.run_id)
         return Ending(text=LOST.format(run_id=run.run_id), status=FAILED)
-    except Exception:
+    except Exception as error:
         # Единственная точка перехвата на прогон: одно сообщение человеку, одна запись в лог.
         logger.exception("Прогон %s не дошёл до конца", run.run_id)
         if redo:
@@ -2155,7 +2300,9 @@ async def outcome(
                 text=BROKEN_REDO[redo.kind].format(run_id=run.run_id),
                 stop=Pause(stage=start, artifact=redo.artifact, kind=redo.kind),
             )
-        return Ending(text=BROKEN.format(run_id=run.run_id), status=FAILED)
+        return Ending(
+            text=broken_text(run, start, error), status=FAILED, keyboard=retry_for(run, start)
+        )
 
 
 async def warn_orphans(application: BotApplication) -> None:
@@ -2265,6 +2412,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(on_questions_button, pattern=r"^asked:"))
     application.add_handler(CallbackQueryHandler(on_consent_button, pattern=r"^consent:"))
     application.add_handler(CallbackQueryHandler(on_inbox_button, pattern=r"^inbox:"))
+    application.add_handler(CallbackQueryHandler(on_retry_button, pattern=rf"^{RETRY}:"))
     application.add_handler(
         CallbackQueryHandler(on_child_button, pattern=rf"^(task|{IDEA}):")
     )
